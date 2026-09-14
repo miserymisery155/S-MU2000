@@ -3407,8 +3407,11 @@ void swp30_device::meg_state::decode_program()
 		d.m2_from_m = BIT(opcode, 0x12);
 		d.dr_from_r = BIT(opcode, 0x37);
 		d.no_noise  = BIT(opcode, 0x0a);
-		d.memw      = BIT(opcode, 0x3d);
+		// S-MU2000: idx にも書く命令（bit 0x3e）では、bit 0x3d はメモリへの書き値を取り込まない（doc/upstream.md の 26）。
+		// DUAL ROTR は「mw = p ; idx = p」の命令をメモリを読む 2 命令前に置き、その間にメモリへ書く。取り込むと、
+		// 書き値が音ではなく idx の値に入れ替わり、ロータの遅延線に雑音が入って 16〜25dB 小さくなっていた
 		d.index     = BIT(opcode, 0x3e);
+		d.memw      = BIT(opcode, 0x3d) && !d.index;
 		d.t_write   = BIT(opcode, 0x3b);
 		d.t_from_p  = BIT(opcode, 0x3c);
 		d.mem_use_index = BIT(opcode, 0x21);
