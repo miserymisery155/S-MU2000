@@ -3985,6 +3985,13 @@ void swp30_device::run_sample(s32 &left, s32 &right)
 		m_meg->build_ops(m_meg_ops.data());
 		m_meg_program_changed = false;
 		m_meg_ops_stale = false;
+		// S-MU2000: JIT はすぐには作り直さない。firmware はエフェクトを組むとき、プログラムと番地を
+		// 何百サンプルにもわたって少しずつ書くので、毎サンプル訳し直すと訳すほうが重くなる。
+		// 書き込みが 64 サンプル止まるまでは解釈実行で回す（JIT とビット単位で同じ）
+		meg_jit_invalidate();
+		m_meg_jit_wait = 1;
+	} else if(m_meg_jit_wait && ++m_meg_jit_wait > 64) {
+		m_meg_jit_wait = 0;
 		meg_jit_rebuild();
 	}
 

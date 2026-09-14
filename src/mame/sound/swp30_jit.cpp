@@ -199,6 +199,15 @@ void swp30_device::meg_jit_rebuild()
 	j.stable = 0;
 }
 
+// 訳した物を使えなくする（次に meg_jit_rebuild() を呼ぶまで解釈実行で回る）
+void swp30_device::meg_jit_invalidate()
+{
+	if (m_jit) {
+		m_jit->gen.fn = nullptr;
+		m_jit->spec.fn = nullptr;
+	}
+}
+
 bool swp30_device::meg_jit_run()
 {
 	meg_jit *j = m_jit.get();

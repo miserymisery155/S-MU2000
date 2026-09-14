@@ -469,6 +469,7 @@ public:
 	static u64 meg_jit_selftest();
 private:
 	void meg_jit_rebuild();
+	void meg_jit_invalidate();
 	bool meg_jit_run();
 	std::unique_ptr<meg_jit, void (*)(meg_jit *)> m_jit{nullptr, &meg_jit_delete};
 	// S-MU2000: MEG の定数の値が変わるたびに 1 増える（JIT の定数を焼き込んだ版を捨てる印）。
@@ -477,6 +478,8 @@ private:
 	// S-MU2000: 分岐のあるプログラムを JIT で回すときの「この命令の手前まで飛ばす」位置（0 なら飛ばさない）。
 	// 1 サンプルの中だけで使う。保存しない
 	u32 m_meg_jit_skip = 0;
+	// S-MU2000: プログラムか番地が書かれてから数えたサンプル数（0 なら JIT の作り直しを待っていない）。保存しない
+	u32 m_meg_jit_wait = 0;
 
 	u32 m_sample_counter = 0;
 	u32 m_wave_adr = 0, m_wave_size = 0, m_wave_val = 0, m_revram_adr = 0, m_revram_data = 0;
