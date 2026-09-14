@@ -305,6 +305,7 @@ private:
 			bool m1_expand = false, m2_from_m = false;
 			bool dr_from_r = false, no_noise = false;
 			bool memw = false, index = false, t_write = false, t_from_p = false, mem_use_index = false;
+			bool mem_table = false;   // S-MU2000: bit 0x22-0x23 が 2 の読み出し（内部の表。doc/upstream.md の 24）
 		};
 		std::array<decoded, 0x180> m_decoded = {};
 		void decode_program();
@@ -321,7 +322,7 @@ private:
 			u8  sm, sr, dm, dr, t;
 			u8  dm_src, no_noise, dr_from_r;
 			u8  memw, index, t_write, t_from_p;
-			u8  memop, mem_use_index;
+			u8  memop, mem_use_index, mem_table;
 			u8  lfo, offset_index;
 			u32 addr_mask, addr_base;   // resolve_address() を解いたもの
 			u8  latch;                // bit 0x20: 結果の符号とゼロを覚える
@@ -388,6 +389,8 @@ private:
 		static u16 revram_encode(u32 v);
 		static u32 revram_decode(u16 v);
 		static s16 m1_expand(s16 v);
+		// S-MU2000: 内部の表の 0x000-0x0ff（256 点で 1 周の正弦）。doc/upstream.md の 24
+		static const std::array<s32, 0x100> &table_sine();
 
 		static void call_rand(void *ms);
 		static void call_revram_encode(void *ms);
@@ -435,6 +438,8 @@ private:
 	};
 	std::array<std::array<mix_tap, 32>, 0x60> m_mix_taps = {};
 	std::array<u8, 0x60> m_mix_ntaps = {};
+	std::array<u8, 0x60> m_mix_active = {};   // S-MU2000: 振り分け先のある入力の番号（mixer_rebuild が詰める）
+	u8 m_mix_nactive = 0;
 	u64 m_mix_dirty[2] = { ~u64(0), ~u64(0) };   // 作り直す入力の印（0x00-0x3f、0x40-0x5f）
 	void mixer_rebuild();
 	void mixer_mark(int mix) { if(mix < 0x60) m_mix_dirty[mix >> 6] |= u64(1) << (mix & 63); }
@@ -466,6 +471,9 @@ private:
 	void meg_jit_rebuild();
 	bool meg_jit_run();
 	std::unique_ptr<meg_jit, void (*)(meg_jit *)> m_jit{nullptr, &meg_jit_delete};
+	// S-MU2000: MEG の定数の値が変わるたびに 1 増える（JIT の定数を焼き込んだ版を捨てる印）。
+	// 状態の保存には入れない（meg_state の並びを変えると、前の版で保存した状態が読めなくなる）
+	u32 m_meg_const_gen = 0;
 
 	u32 m_sample_counter = 0;
 	u32 m_wave_adr = 0, m_wave_size = 0, m_wave_val = 0, m_revram_adr = 0, m_revram_data = 0;

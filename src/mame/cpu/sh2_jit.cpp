@@ -677,6 +677,21 @@ sh2_device::jit::code_t sh2_device::jit::compile(sh2_device &cpu, u32 pc)
 		return none;
 	};
 
+	// pc を書くのを遅らせる。レジスタだけの命令（pure）は pc を見ないので、続いているあいだは書かず、
+	// 周辺に触る命令・解釈実行・ブロックを抜ける所の手前でだけ、そのとき正しい pc を書く
+	static const bool lazy_pc = [] {
+		const char *e = std::getenv("SMU2000_SH2_LAZYPC");
+		return !(e && e[0] == '0');
+	}();
+	bool pc_stale = false;              // メモリの pc が古い
+	u32 stale_pc = 0;                   // そのとき正しい pc
+	std::vector<std::pair<size_t, u32>> stale_rets;   // pc を書いてから ret へ行く出口
+	const auto store_pc_at = [&](size_t pos, u32 v) {
+		assembler t;
+		t.store32i(S_pc, v);
+		a.code.insert(a.code.begin() + std::ptrdiff_t(pos), t.code.begin(), t.code.end());
+	};
+
 	bool slot = false;
 	for (int i = 0; ; i++) {
 		const u32 at = pc + 2 * u32(i);
@@ -684,6 +699,7 @@ sh2_device::jit::code_t sh2_device::jit::compile(sh2_device &cpu, u32 pc)
 		const kind k = classify(op);
 
 		if (jit_trace_on()) {
+			if (pc_stale) { a.store32i(S_pc, stale_pc); pc_stale = false; }
 			a.mov64(RCX, RBX);
 			call(reinterpret_cast<void *>(&sh2_device::jit_trace));
 		}
@@ -699,19 +715,40 @@ sh2_device::jit::code_t sh2_device::jit::compile(sh2_device &cpu, u32 pc)
 			a.patch(no_delay);
 			a.store32i(S_pc, at + 2);
 			a.patch(done);
-		} else
+		} else if (!lazy_pc || jit_trace_on())
 			a.store32i(S_pc, at + 2);
 
 		// 2. 実行する
 		res r = none;
-		if (!slot && native_enabled())
+		const size_t op_begin = a.code.size();
+		// 遅延スロットの命令も、pc を使わない普通の命令なら機械語で書く（解釈実行でも pc は見ない）。
+		// pc を使うのは MOV.W/MOV.L @(disp,PC) と MOVA だけ（分岐はスロットに来ない）
+		static const bool slot_native = [] {
+			const char *e = std::getenv("SMU2000_SH2_SLOTNATIVE");
+			return !(e && e[0] == '0');
+		}();
+		const bool pc_rel = (op >> 12) == 0x9 || (op >> 12) == 0xd || (op >> 8) == 0xc7;
+		if (native_enabled() && (!slot || (slot_native && k == kind::normal && !pc_rel)))
 			r = native(op, at);
 		if (r == none) {
+			if (!slot && lazy_pc && !jit_trace_on())
+				a.store32i(S_pc, at + 2);
 			a.mov64(RCX, RBX);
 			a.imm32(RDX, op);
 			call(reinterpret_cast<void *>(&sh2_device::jit_exec));
 			r = k == kind::delayed ? delayed : k == kind::ends ? ends : memop;
+			pc_stale = false;
+		} else if (!slot && lazy_pc && !jit_trace_on()) {
+			if (r == pure) {
+				pc_stale = true;
+				stale_pc = at + 2;
+			} else {
+				store_pc_at(op_begin, at + 2);                // 命令の頭に差し込む（中の飛び先は相対なのでずれない）
+				pc_stale = false;
+			}
 		}
+		if (slot)
+			pc_stale = false;
 
 		// 分岐した・止まる命令・遅延スロットの後はブロックを終える
 		if (slot || r == ends || (r != delayed && (i + 1 >= MAX_INSNS || at + 4 >= ROM_END)))
@@ -726,12 +763,19 @@ sh2_device::jit::code_t sh2_device::jit::compile(sh2_device &cpu, u32 pc)
 			to_finish.push_back(a.jcc_fwd(0x85));             // jne
 		}
 		a.sub32i_mem(S_icount, 1);
-		to_ret.push_back(a.jcc_fwd(0x8e));                    // jle
+		if (pc_stale)
+			stale_rets.emplace_back(a.jcc_fwd(0x8e), stale_pc);   // jle（pc を書いてから ret へ）
+		else
+			to_ret.push_back(a.jcc_fwd(0x8e));                // jle
 
 		slot = r == delayed;
 		if (slot && at + 4 >= ROM_END)
 			return nullptr;
 	}
+
+	// 最後の命令のあとで pc がまだ古ければ書く（終わりの処理と next_block が pc を見る）
+	if (pc_stale)
+		a.store32i(S_pc, stale_pc);
 
 	// 終わりの処理: 3. と 4.
 	const size_t finish = a.code.size();
@@ -754,6 +798,13 @@ sh2_device::jit::code_t sh2_device::jit::compile(sh2_device &cpu, u32 pc)
 		a.patch_to(p, ret);
 	a.imm64(RAX, u64(uintptr_t(next_block)));
 	a.rr(0, false, {0xff}, 4, RAX);      // jmp rax
+	// pc が古いまま抜ける所: 書いてから ret へ
+	for (const auto &[pos, v] : stale_rets) {
+		a.patch_to(pos, a.code.size());
+		a.store32i(S_pc, v);
+		const size_t j = a.jmp_fwd();
+		a.patch_to(j, ret);
+	}
 
 	if (used + a.code.size() > BUF_SIZE) {
 		flush();

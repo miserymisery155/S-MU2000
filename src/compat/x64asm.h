@@ -96,6 +96,7 @@ public:
 	void sub32(u8 d, u8 s) { rr(0, false, {0x29}, s, d); }
 	void imul64(u8 d, u8 s) { rr(0, true, {0x0f, 0xaf}, d, s); }
 	void imul32i(u8 d, u8 s, u32 v) { rr(0, false, {0x69}, d, s); d32(v); }
+	void imul64i(u8 d, u8 s, u32 v) { rr(0, true, {0x69}, d, s); d32(v); }
 	void add32i(u8 d, u32 v) { rr(0, false, {0x81}, 0, d); d32(v); }
 	void and32i(u8 d, u32 v) { rr(0, false, {0x81}, 4, d); d32(v); }
 	void shl64(u8 d, u8 n) { rr(0, true, {0xc1}, 4, d); byte(n); }
@@ -107,6 +108,8 @@ public:
 	void cmovl64(u8 d, u8 s) { rr(0, true, {0x0f, 0x4c}, d, s); }
 	void cmovg64(u8 d, u8 s) { rr(0, true, {0x0f, 0x4f}, d, s); }
 	void cmovs64(u8 d, u8 s) { rr(0, true, {0x0f, 0x48}, d, s); }
+	void cmove64(u8 d, u8 s) { rr(0, true, {0x0f, 0x44}, d, s); }
+	void cmp64ri(u8 d, u32 v) { rr(0, true, {0x81}, 7, d); d32(v); }
 	void setl_mem(const mem &m) { rm(0, false, {0x0f, 0x9c}, 0, m); }
 	void sete_mem(const mem &m) { rm(0, false, {0x0f, 0x94}, 0, m); }
 	void call_reg(u8 r) { rr(0, false, {0xff}, 2, r); }

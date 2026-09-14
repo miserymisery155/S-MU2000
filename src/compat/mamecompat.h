@@ -708,6 +708,7 @@ public:
 		return (m_base && i < m_count) ? m_base[i] : zero;
 	}
 	const T *target() const { return m_base; }
+	size_t count() const { return m_base ? m_count : 0; }
 	explicit operator bool() const { return m_base != nullptr; }
 private:
 	const T *m_base = nullptr;
