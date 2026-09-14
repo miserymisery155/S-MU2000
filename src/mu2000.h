@@ -20,6 +20,7 @@
 #include "mame/video/hd44780.h"
 
 #include <cstdio>
+#include <cstring>
 #include <atomic>
 #include <array>
 #include <deque>
@@ -61,6 +62,18 @@ public:
 
 	void reset();
 
+	// ワーク RAM（0x400000-0x43ffff、256KB）。実機では電池で保持される。
+	// MAME も NVRAM としてこれを保存している（ymmu2000.cpp）。
+	// 入れるのは reset() の前。大きさが違えば false
+	const std::vector<u8> &nvram() const { return m_ram; }
+	bool set_nvram(const u8 *p, size_t n)
+	{
+		if (n != m_ram.size())
+			return false;
+		std::memcpy(m_ram.data(), p, n);
+		return true;
+	}
+
 	// 状態の保存と復元。**機械まるごと**（CPU・RAM・SWP30・LCD・タイマ）。
 	// ROM は入れないので、戻すときは同じ ROM を積んでおくこと。
 	// 正しさは「戻した続きの音が、戻さず走り続けた音と 1 バイトも
@@ -82,8 +95,20 @@ public:
 	// これを待たずに流すと、曲頭のリセットや音色指定が全部捨てられる
 	bool midi_ready(int port = 0) const { return m_cpu->sci(port)->rx_enabled(); }
 
-	// 1 バイト送る。実機と同じく 31250bps の直列で流れる
-	void midi_in(u8 byte, int port = 0) { m_midi[port].queue.push_back(byte); }
+	// 1 バイト送る。実機と同じく 31250bps の直列で流れる。
+	// 線は 1 秒に 3125 バイトしか流れないので、それより速く積まれると溜まる一方になる。
+	// 仮想の口で MIDI の輪ができると際限なく積まれる（実際に起きた）ので、
+	// 溜まっている量が上限（線の 20 秒ぶん）を超えたら捨てる。実機の受信溢れと同じ
+	static constexpr size_t MIDI_QUEUE_LIMIT = 65536;
+	void midi_in(u8 byte, int port = 0)
+	{
+		if (m_midi[port].queue.size() < MIDI_QUEUE_LIMIT)
+			m_midi[port].queue.push_back(byte);
+		else
+			m_midi_dropped.fetch_add(1, std::memory_order_relaxed);
+	}
+	// 溢れて捨てたバイト数（どの糸から読んでもよい）
+	u64 midi_dropped() const { return m_midi_dropped.load(std::memory_order_relaxed); }
 	bool midi_idle(int port) const
 	{
 		return m_midi[port].bit < 0 && m_midi[port].queue.empty();
@@ -93,6 +118,20 @@ public:
 		for (const midi_line &m : m_midi)
 			if (m.bit >= 0 || !m.queue.empty())
 				return false;
+		return true;
+	}
+
+	// MIDI OUT。実機の OUT 端子で、SH7043 の SCI ch0 の送信線に繋がっている
+	// （MAME の ymmu2000.cpp と同じ）。firmware が送り出したもの
+	// （XG の問い合わせやダンプ要求への返事など）を 1 バイトずつ取る。
+	// **run_sample と同じ糸から呼ぶこと**。溜めは 4096 バイトで、溢れたら捨てる。
+	// 状態の保存には入れない（読み戻したときは空から始まる）
+	bool midi_out_take(u8 &v)
+	{
+		if (m_tx_r == m_tx_w)
+			return false;
+		v = m_tx_buf[m_tx_r];
+		m_tx_r = (m_tx_r + 1) & TX_MASK;
 		return true;
 	}
 
@@ -206,6 +245,7 @@ private:
 	u64 m_cycle_debt = 0;
 	// 命令の途中で止まれず走りすぎた分。次の呼び出しから引く
 	u64 m_overrun = 0;
+	bool m_profile = false;
 
 	// スレーブ用のスレッド。合図は atomic の回し合いで、錠は使わない。
 	// 44100 回/秒の受け渡しなので、待つのは眠らずに回して待つ
@@ -218,8 +258,17 @@ private:
 public:
 	// 速さの手掛かり。1 サンプルあたり実行ループを何周したか
 	u64 m_loops = 0, m_timer_fires = 0, m_event_fires = 0;
-	// 区間ごとの所要時間（QueryPerformanceCounter の刻み）
-	u64 m_t_cpu = 0, m_t_swpm = 0, m_t_swps = 0;
+	// 区間ごとの所要時間（QueryPerformanceCounter の刻み）。
+	// **set_profile(true) のときだけ測る**（1 サンプルにつき 3 回読むので、
+	// 常に測ると 0.3% ほど食う）
+	u64 m_t_cpu = 0, m_t_swpm = 0, m_t_swps = 0, m_t_n = 0;
+	// SWP30 の中の MEG の時間は m_swpm / m_swps の m_t_meg（ns）に入る
+	void set_profile(bool on) { m_profile = on; m_swpm.m_profile = on; m_swps.m_profile = on; }
+	void clear_profile()
+	{
+		m_t_cpu = m_t_swpm = m_t_swps = m_t_n = m_loops = 0;
+		m_swpm.m_t_meg = m_swps.m_t_meg = 0;
+	}
 private:
 
 	// MIDI IN A / B。バイトを 31250bps の直列に崩して RX 線に流す。
@@ -232,6 +281,16 @@ private:
 	};
 	void midi_step(u64 now);
 	std::array<midi_line, MIDI_PORTS> m_midi;
+	std::atomic<u64> m_midi_dropped{0};
+
+	// MIDI OUT の線から枠を組み立てる。SCI は 1 ビットにつき 1 回だけ線の値を
+	// 知らせてくるので、時刻を見なくても「0 で開始、8 ビット、1 で終わり」で読める
+	void tx_line(int state);
+	static constexpr size_t TX_SIZE = 4096, TX_MASK = TX_SIZE - 1;
+	u8     m_tx_buf[TX_SIZE] = {};
+	size_t m_tx_r = 0, m_tx_w = 0;
+	int    m_tx_bit = -1;       // -1 待ち / 0-7 データ / 8 ストップ
+	u8     m_tx_cur = 0;
 };
 
 #endif // S_MU2000_MU2000_H

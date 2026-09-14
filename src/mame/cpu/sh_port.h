@@ -41,9 +41,11 @@ public:
 
 protected:
 	required_device<sh7042_device> m_cpu;
-	int m_index;
-	u16 m_default_io, m_mask;
-	u16 m_dr, m_io;
+	int m_index = 0;
+	u16 m_default_io = 0, m_mask = 0;
+	// S-MU2000: 初期値を書く。起動時に firmware が読むことがあり、
+	// 埋めないと直前にそこにあったごみ（引数の文字など）が出る
+	u16 m_dr = 0, m_io = 0;
 
 	virtual void device_start() override ATTR_COLD;
 	virtual void device_reset() override ATTR_COLD;
@@ -72,9 +74,9 @@ public:
 
 protected:
 	required_device<sh7042_device> m_cpu;
-	int m_index;
-	u32 m_default_io, m_mask;
-	u32 m_dr, m_io;
+	int m_index = 0;
+	u32 m_default_io = 0, m_mask = 0;
+	u32 m_dr = 0, m_io = 0;   // S-MU2000: 同上
 
 	virtual void device_start() override ATTR_COLD;
 	virtual void device_reset() override ATTR_COLD;

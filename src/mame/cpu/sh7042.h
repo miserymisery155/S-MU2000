@@ -126,7 +126,7 @@ protected:
 		CR_BUF   = 0x03
 	};
 
-	bool m_die_a;
+	bool m_die_a = false;
 
 	sh7042_device(const machine_config &mconfig, device_type type, const char *tag, device_t *owner, u32 clock);
 
@@ -173,14 +173,14 @@ private:
 	u64  m_event_cycles = 0;
 	bool m_in_event = false;
 
-	u16 m_pcf_ah;
-	u32 m_pcf_al;
-	u32 m_pcf_b;
-	u16 m_pcf_c;
-	u32 m_pcf_dh;
-	u16 m_pcf_dl;
-	u32 m_pcf_e;
-	u16 m_pcf_if;
+	u16 m_pcf_ah = 0;
+	u32 m_pcf_al = 0;
+	u32 m_pcf_b = 0;
+	u16 m_pcf_c = 0;
+	u32 m_pcf_dh = 0;
+	u16 m_pcf_dl = 0;
+	u32 m_pcf_e = 0;
+	u16 m_pcf_if = 0;
 
 	// S-MU2000: address_map の代わり。番地で振り分ける
 

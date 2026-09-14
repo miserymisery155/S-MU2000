@@ -48,9 +48,9 @@ protected:
 	std::array<u32, 8> m_pending;
 	std::array<u16, 8> m_ipr;
 
-	u16 m_isr, m_icr;
+	u16 m_isr = 0, m_icr = 0;
 
-	u8 m_lines;
+	u8 m_lines = 0;
 
 	required_device<sh7042_device> m_cpu;
 

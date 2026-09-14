@@ -8,14 +8,16 @@ namespace ui {
 
 namespace {
 
-// 鳴りっぱなしを消す。16 チャンネルぶん
+// 鳴りっぱなしを消す。口 A と口 B の 16 チャンネルぶん
 void all_off(bridge &br)
 {
 	for (int ch = 0; ch < 16; ch++) {
 		const u8 msg[3] = { u8(0xb0 | ch), 0x7b, 0x00 };   // オールノートオフ
-		br.send(msg, 3);
 		const u8 sus[3] = { u8(0xb0 | ch), 0x40, 0x00 };   // ダンパも離す
+		br.send(msg, 3);
 		br.send(sus, 3);
+		br.send_b(msg, 3);
+		br.send_b(sus, 3);
 	}
 }
 
@@ -72,9 +74,12 @@ void player::run(bridge &br)
 		const double sec = double(now.QuadPart - t0.QuadPart) / double(f.QuadPart);
 		m_pos.store(sec, std::memory_order_relaxed);
 
-		// 来ている分をまとめて送る
+		// 来ている分をまとめて送る。トラックの出し先（SMF の FF 21 のポート指定）が 1 なら口 B へ。
+		// MU2000 の口は 2 つなので、2 以上も口 B にする（render と同じ）
 		while (at < m_events.size() && m_events[at].time <= sec) {
-			br.send(m_events[at].bytes.data(), m_events[at].bytes.size());
+			const smf::event &e = m_events[at];
+			if (e.port >= 1) br.send_b(e.bytes.data(), e.bytes.size());
+			else             br.send(e.bytes.data(), e.bytes.size());
 			at++;
 		}
 		if (at >= m_events.size())

@@ -76,7 +76,7 @@ private:
 
 	enum { DDRAM, CGRAM };
 
-	u32 m_cpu_hz, m_lcd_hz;
+	u32 m_cpu_hz = 0, m_lcd_hz = 0;
 	u64 m_now = 0, m_busy_until = 0;
 
 	const u8 *m_cgrom = nullptr;

@@ -244,6 +244,8 @@ LRESULT plug_view::handle(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 
 	switch (msg) {
 	case WM_TIMER:
+		// パラメータの層: 音源の返事を読み、見えている面の読み返しを頼む
+		m_panel.tick(br);
 		InvalidateRect(h, nullptr, FALSE);
 		return 0;
 

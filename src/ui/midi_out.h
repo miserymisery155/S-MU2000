@@ -38,9 +38,12 @@ public:
 	// 音声スレッドから。1 バイトずつ積む。開いていなければ捨てる
 	void send(u8 v);
 
+	// 相手が受け取らなくなった（送り終わらないまま時間切れになった）
+	bool stuck() const { return m_stuck.load(std::memory_order_acquire); }
+
 private:
-	void run();                       // 送りスレッド
-	void emit(const u8 *p, size_t n); // 組み上がった 1 通を Windows へ
+	void run(unsigned gen, void *handle);  // 送りスレッド
+	void emit(void *handle, const u8 *p, size_t n); // 組み上がった 1 通を Windows へ
 
 	static constexpr size_t SIZE = 8192, MASK = SIZE - 1;
 	u8 m_buf[SIZE] = {};
@@ -54,6 +57,13 @@ private:
 	std::string m_name;
 	std::thread m_thread;
 	std::atomic<bool> m_quit{false};
+	// 送りスレッドが抜けたか。**相手が固まると Windows の呼び出しから戻らず、
+	// 抜けられない**ので、閉じるときはこれを決めた時間だけ待って、だめなら置いていく
+	std::atomic<bool> m_thread_done{true};
+	std::atomic<bool> m_stuck{false};
+	// 開き直すたびに増やす。置いていかれた古い送りスレッドが、あとで戻ってきても
+	// 新しい口の輪に触らないように
+	std::atomic<unsigned> m_gen{0};
 
 	// バイトの並びから 1 通を組み立てる。送りスレッドだけが触る
 	u8     m_msg[3] = {};

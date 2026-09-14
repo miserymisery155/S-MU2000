@@ -3,6 +3,16 @@
 S-MU2000 を動かすには、**自分の MU2000 から吸い出した ROM** が要る。ここに
 その手順と道具が置いてある。ROM そのものは配らない。
 
+> **ここで手元にできるものは、どれも公開・共有しないこと。**
+>
+> * `roms/` に置く吸い出した ROM イメージ（波形 ROM、プログラム ROM、LCD の字）
+> * `build/` にできるダンパのファームウェアイメージ（`firmware_*.bin`）と `.ydl`
+> * 展開したヤマハの更新プログラム
+>
+> GitHub への再配布も、Issue・Pull Request・Discussion・Release への添付もしない。
+> 道具（ソースコード）を公開することと、それで作ったもの・取り出したものを共有することは
+> 別の話。くわしくは [README の注意書き](../../README.md#実機由来のデータは配らない載せない)。
+
 要るのは 2 つ。
 
 | | 大きさ | どうやって手に入れるか |
@@ -95,7 +105,7 @@ python tools/dump/make_standins.py
 | `roms/standin/sin-table.bin` | MEG が使う sin 表 64KB |
 | `roms/hd44780u_b04.bin` | LCD の字（無ければ standin） |
 
-`roms/` は `.gitignore` に入っている。**吸い出したものを公開しないこと。**
+`roms/` は `.gitignore` に入っている。**吸い出したものを公開しないこと**（冒頭の注意書き）。
 
 ## 資料
 

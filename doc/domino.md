@@ -39,7 +39,7 @@ build/gui.exe C:\Users\gugug\GitHub\MU2000\roms
 右クリックでも同じ）。品書きが出るので
 
 * `MIDI IN` → `loopMIDI Port`
-* `MIDI OUT` → 使わない（実機の THRU が要るときだけ選ぶ）
+* `MIDI OUT` / `MIDI THRU A` / `MIDI THRU B` → 使わない（要るときだけ選ぶ）
 
 選んだものは `%LOCALAPPDATA%\S-MU2000\gui.ini` に覚えるので、
 次からは何もしなくてよい。窓の下の行に、いま繋がっている口が出ている。
@@ -97,7 +97,7 @@ F0 43 10 4C 00 00 7E 00 F7
 
 ## 実機も一緒に鳴らしたいとき
 
-`MIDI OUT` に実機（`Yamaha MU2000-1` など）を選ぶと、`gui.exe` が受けた
+`MIDI THRU A` に実機（`Yamaha MU2000-1` など）を選ぶと、`gui.exe` が受けた
 ものをそのまま外へ流す（実機の THRU と同じ）。画面のつまみを回して出た
 コントロールチェンジや SysEx も一緒に出るので、**同じ操作を実機とソフトの
 両方に掛けて聴き比べる**のに使える。

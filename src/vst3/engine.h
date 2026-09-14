@@ -57,9 +57,10 @@ public:
 	uint32_t latency_samples() const { return m_latency; }
 
 	// MIDI を 1 メッセージ流す。実機と同じく 31250bps の直列に崩される。
-	// 起動が終わっていない間は溜めておいて、終わってから流す
-	void midi(const uint8_t *bytes, size_t n);
-	// 全チャンネルのオールノートオフ + リセットオールコントローラ
+	// 起動が終わっていない間は溜めておいて、終わってから流す。
+	// port は 0 が MIDI IN A（パート 1-16）、1 が MIDI IN B（パート 17-32）
+	void midi(const uint8_t *bytes, size_t n, int port = 0);
+	// 両方の口の全チャンネルにオールノートオフ + リセットオールコントローラ
 	void all_notes_off();
 
 	// n サンプルぶん作る。左右は別々の配列（VST3 はそういう渡し方をする）
@@ -125,8 +126,8 @@ private:
 	ui::bridge m_bridge;
 	ui::driver m_drv;
 
-	// 起動前に来た MIDI。音声スレッドしか触らない
-	std::vector<uint8_t> m_pending;
+	// 起動前に来た MIDI。口ごとに持つ。音声スレッドしか触らない
+	std::vector<uint8_t> m_pending[2];
 };
 
 } // namespace vst3

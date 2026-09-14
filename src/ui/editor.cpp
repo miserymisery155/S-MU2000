@@ -3,15 +3,16 @@
 // エディタの面。SOL2 の XG エディタに倣って、パートを 1 つ選び、
 // そのパートのつまみを並べる。
 //
-// **音源には手を入れない。MIDI を送るだけ**。ここで動かすものは全部
-// XG のコントロールチェンジで決まっているので、実機に送るのと同じことをする。
-// 実機と同じ経路なので、パネルから触った結果とも矛盾しない。
+// **音源には手を入れない。MIDI を送るだけ**。つまみは XG のパラメータチェンジを
+// 送る。実機に送るのと同じことなので、パネルから触った結果とも矛盾しない。
 //
-// 覚えている値は「この画面から送った値」。音源から読み返す術が無いので、
-// パネル側で音を変えると表示とずれる。SOL2 のエディタも同じ立て付け。
+// 値は画面では覚えない。音源に問い合わせた返事をパラメータの層（xg::model）が
+// 持っていて、描くときはそれを読む（doc/params.md）。パネルや曲で変えた値も出る。
+// まだ読めていない値は「--」で出す（決め打ちの初期値は出さない）。
 
 #include "panel.h"
 #include "draw.h"
+#include "xg/ram.h"
 
 #include <algorithm>
 #include <cmath>
@@ -21,85 +22,97 @@ namespace ui {
 
 namespace {
 
-struct knob_place { int ctl; double x, y; const char *label; };
+struct knob_place { const char *key; double x, y; const char *label; };
 
-// つまみ 18 個。6 列 × 3 行。番号は XG の標準的な割り当て
+// つまみ 18 個。6 列 × 3 行。どれもマルチパートの塊（08 pp xx）に入っていて、
+// 塊 1 つの読み返しで全部そろう。前は CC11・CC5・CC1 のつまみもあったが、
+// あれらは firmware に問い合わせる口が無い（読み返せない）ので入れ替えた
 const knob_place KNOBS[] = {
-	{   7, 336,  74, "Volume"    },
-	{  10, 440,  74, "Pan"       },
-	{  11, 544,  74, "Express"   },
-	{  91, 648,  74, "Reverb"    },
-	{  93, 752,  74, "Chorus"    },
-	{  94, 856,  74, "Variation" },
+	{ "part.volume",         336,  74, "Volume"    },
+	{ "part.pan",            440,  74, "Pan"       },
+	{ "part.dry_level",      544,  74, "Dry"       },
+	{ "part.reverb_send",    648,  74, "Reverb"    },
+	{ "part.chorus_send",    752,  74, "Chorus"    },
+	{ "part.variation_send", 856,  74, "Variation" },
 
-	{  74, 336, 158, "Cutoff"    },
-	{  71, 440, 158, "Resonance" },
-	{  73, 544, 158, "Attack"    },
-	{  75, 648, 158, "Decay"     },
-	{  72, 752, 158, "Release"   },
-	{  76, 856, 158, "Vib Rate"  },
+	{ "part.cutoff",         336, 158, "Cutoff"    },
+	{ "part.resonance",      440, 158, "Resonance" },
+	{ "part.attack",         544, 158, "Attack"    },
+	{ "part.decay",          648, 158, "Decay"     },
+	{ "part.release",        752, 158, "Release"   },
+	{ "part.vib_rate",       856, 158, "Vib Rate"  },
 
-	{  77, 336, 242, "Vib Depth" },
-	{  78, 440, 242, "Vib Delay" },
-	{   5, 544, 242, "Porta"     },
-	{   1, 648, 242, "Modulation" },
-	{ CTL_BANK_MSB, 752, 242, "Bank"    },
-	{ CTL_PROGRAM,  856, 242, "Program" },
+	{ "part.vib_depth",      336, 242, "Vib Depth" },
+	{ "part.vib_delay",      440, 242, "Vib Delay" },
+	{ "part.note_shift",     544, 242, "Note Shift" },
+	{ "part.detune",         648, 242, "Detune"    },
+	{ "part.bank_msb",       752, 242, "Bank"      },
+	{ "part.program",        856, 242, "Program"   },
 };
+constexpr int KNOB_COUNT = int(sizeof(KNOBS) / sizeof(KNOBS[0]));
 
-// XG の初期値。MU2000 の電源投入時に近づけてある
-u8 default_cc(int cc)
-{
-	switch (cc) {
-	case 7:  return 100;
-	case 10: return 64;
-	case 11: return 127;
-	case 91: return 40;
-	case 71: case 72: case 73: case 74: case 75:
-	case 76: case 77: case 78: return 64;
-	default: return 0;
-	}
-}
+constexpr int PARTS = 32;
+
 
 } // namespace
 
 
-int panel::value_of(int ctl) const
+const xg::param *panel::knob_param(int ctl) const
 {
-	if (ctl >= 0 && ctl < 128)  return m_cc[m_part][ctl];
-	if (ctl == CTL_PROGRAM)     return m_prog[m_part];
-	if (ctl == CTL_BANK_MSB)    return m_bank[m_part];
-	return 0;
+	const int i = ctl - CTL_KNOB;
+	if (i < 0 || i >= KNOB_COUNT)
+		return nullptr;
+	static std::vector<const xg::param *> cache;
+	if (cache.empty())
+		for (const knob_place &k : KNOBS)
+			cache.push_back(xg::find(k.key));
+	return cache[i];
+}
+
+bool panel::value_of(int ctl, int &v) const
+{
+	const xg::param *p = knob_param(ctl);
+	return p && m_xg.get(*p, m_part, v);
 }
 
 void panel::set_value(int ctl, int v, bridge &br)
 {
-	v = std::clamp(v, 0, 127);
-	const u8 ch = u8(m_part);
+	const xg::param *p = knob_param(ctl);
+	if (!p)
+		return;
+	v = std::clamp(v, p->min, p->max);
+	br.send(m_xg.set(*p, m_part, v));
+}
 
-	if (ctl >= 0 && ctl < 128) {
-		m_cc[m_part][ctl] = u8(v);
-		const u8 msg[3] = { u8(0xb0 | ch), u8(ctl), u8(v) };
-		br.send(msg, 3);
-		return;
+
+bool panel::tick(bridge &br)
+{
+	// 値は MU2000 に問い合わせずに、音声の糸が 25ms ごとに写すワーク RAM から読む
+	// （xg/ram.h）。問い合わせは MIDI IN に入るので、LCD の受信マークが点きっぱなしになる
+	br.read_xg(m_ram);
+	if (m_ram.serial == m_ram_serial)
+		return false;
+	m_ram_serial = m_ram.serial;
+	const u64 now = br.audio_ms();
+	m_xg.load(xg::pack(0x00, 0x00, 0x00), m_ram.system, XG_SYSTEM_SIZE, now);
+	for (const xg::ram::block &blk : xg::ram::EFFECTS)
+		m_xg.load(xg::pack(blk.hi, blk.mid, blk.lo), m_ram.effect + (blk.ram - xg::ram::EFFECT), blk.size, now);
+	for (int p = 0; p < XG_PARTS; p++) {
+		m_xg.load(xg::pack(0x08, u8(p), 0x00), m_ram.parts[p], xg::ram::PART_XG_SIZE, now);
+		m_xg.load(xg::pack(0x08, u8(p), xg::ram::PART_EQ_XG), m_ram.parts[p] + xg::ram::PART_EQ_RAM, xg::ram::PART_EQ_SIZE, now);
 	}
-	if (ctl == CTL_PROGRAM) {
-		m_prog[m_part] = u8(v);
-		// バンクは音色を選び直したときに効くので、毎回 3 つ揃えて送る
-		const u8 msg[8] = { u8(0xb0 | ch), 0, m_bank[m_part],
-		                    u8(0xb0 | ch), 32, 0,
-		                    u8(0xc0 | ch), u8(v) };
-		br.send(msg, 8);
-		return;
+	// インサーションのパラメータ 1-10 は、RAM では 16bit の数。XG の 2 バイトの番地（30-43）の形に崩して入れる
+	for (int n = 0; n < 4; n++) {
+		const u8 *w = m_ram.effect + (xg::ram::INS_BLOCK[n] - xg::ram::EFFECT) + xg::ram::INS_WIDE;
+		u8 bytes[20];
+		for (int i = 0; i < 10; i++) {
+			const int v = w[2 * i] << 8 | w[2 * i + 1];
+			bytes[2 * i] = u8((v >> 7) & 0x7f);
+			bytes[2 * i + 1] = u8(v & 0x7f);
+		}
+		m_xg.load(xg::pack(0x03, u8(n), 0x30), bytes, sizeof(bytes), now);
 	}
-	if (ctl == CTL_BANK_MSB) {
-		m_bank[m_part] = u8(v);
-		const u8 msg[8] = { u8(0xb0 | ch), 0, u8(v),
-		                    u8(0xb0 | ch), 32, 0,
-		                    u8(0xc0 | ch), m_prog[m_part] };
-		br.send(msg, 8);
-		return;
-	}
+	return true;
 }
 
 
@@ -110,7 +123,11 @@ void panel::draw_knob(HDC dc, const spot &sp) const
 	const int cx = (sp.r.left + sp.r.right) / 2;
 	const int cy = sp.r.top + int(26 * m_scale);
 	const int r  = int(18 * m_scale);
-	const int v  = value_of(sp.ctl);
+	const xg::param *p = knob_param(sp.ctl);
+	int v = 0;
+	const bool known = value_of(sp.ctl, v);
+	const double frac = (known && p && p->max > p->min)
+	                  ? std::clamp(double(v - p->min) / (p->max - p->min), 0.0, 1.0) : 0.0;
 
 	// 12 時を 0 度として、-135 度から +135 度まで
 	auto at = [&](double deg, double rad_scale, int &x, int &y) {
@@ -119,7 +136,7 @@ void panel::draw_knob(HDC dc, const spot &sp) const
 		y = cy - int(std::cos(a) * r * rad_scale);
 	};
 
-	const int lit = int(std::lround(v / 127.0 * 24));
+	const int lit = known ? int(std::lround(frac * 24)) : -1;
 	for (int i = 0; i <= 24; i++) {
 		const double deg = -135.0 + 270.0 * i / 24.0;
 		int x1, y1, x2, y2;
@@ -131,20 +148,22 @@ void panel::draw_knob(HDC dc, const spot &sp) const
 
 	disc(dc, cx, cy, r, RGB(52, 56, 62), RGB(88, 93, 100), std::max(1, int(m_scale)));
 
-	int px, py;
-	at(-135.0 + 270.0 * v / 127.0, 0.80, px, py);
-	line(dc, cx, cy, px, py, RGB(236, 240, 244), std::max(2, int(2.5 * m_scale)));
+	// 読めていないうちは針を出さない
+	if (known) {
+		int px, py;
+		at(-135.0 + 270.0 * frac, 0.80, px, py);
+		line(dc, cx, cy, px, py, RGB(236, 240, 244), std::max(2, int(2.5 * m_scale)));
+	}
 
 	RECT lab{ sp.r.left, sp.r.top + int(44 * m_scale),
 	          sp.r.right, sp.r.top + int(55 * m_scale) };
 	text_in(dc, lab, sp.label, TEXT_DIM, m_font_small, DT_CENTER | DT_TOP | DT_SINGLELINE);
 
-	char num[16];
-	if (sp.ctl == CTL_PROGRAM) std::snprintf(num, sizeof(num), "%d", v + 1);
-	else                       std::snprintf(num, sizeof(num), "%d", v);
+	const std::string num = (known && p) ? xg::format(*p, v) : "--";
 	RECT val{ sp.r.left, sp.r.top + int(54 * m_scale),
 	          sp.r.right, sp.r.top + int(66 * m_scale) };
-	text_in(dc, val, num, TEXT, m_font_small, DT_CENTER | DT_TOP | DT_SINGLELINE);
+	text_in(dc, val, num.c_str(), known ? TEXT : TEXT_DIM, m_font_small,
+	        DT_CENTER | DT_TOP | DT_SINGLELINE);
 }
 
 
@@ -156,7 +175,7 @@ void panel::paint_editor(HDC dc, const char *status) const
 	fill(dc, top, BODY_TOP);
 
 	// パート
-	RECT lab = scale(26, 42, 120, 16);
+	RECT lab = scale(26, 26, 120, 16);
 	text_in(dc, lab, "PART", TEXT_DIM, m_font_small, DT_LEFT | DT_TOP | DT_SINGLELINE);
 
 	for (const spot &sp : m_spots) {
@@ -184,16 +203,24 @@ void panel::paint_editor(HDC dc, const char *status) const
 	}
 
 	// 選んでいるパートの中身を字でも出す
-	char line1[128];
-	std::snprintf(line1, sizeof(line1), "Part %d   Bank %d   Voice %d   Volume %d",
-	              m_part + 1, m_bank[m_part], m_prog[m_part] + 1, m_cc[m_part][7]);
-	RECT info = scale(26, 200, 320, 18);
-	text_in(dc, info, line1, TEXT, m_font_small, DT_LEFT | DT_VCENTER | DT_WORDBREAK);
+	auto show = [&](const char *key) -> std::string {
+		const xg::param *p = xg::find(key);
+		int v = 0;
+		return (p && m_xg.get(*p, m_part, v)) ? xg::format(*p, v) : "--";
+	};
+	char line1[160];
+	std::snprintf(line1, sizeof(line1), "Part %d (%s)   Bank %s/%s   Voice %s   Rcv Ch %s",
+	              m_part + 1, m_part < 16 ? "A" : "B",
+	              show("part.bank_msb").c_str(), show("part.bank_lsb").c_str(),
+	              show("part.program").c_str(), show("part.rcv_channel").c_str());
+	RECT info = scale(26, 200, 290, 36);
+	text_in(dc, info, line1, TEXT, m_font_small, DT_LEFT | DT_TOP | DT_WORDBREAK);
 
-	RECT hint = scale(26, 288, 320, 46);
+	RECT hint = scale(26, 288, 290, 60);
 	text_in(dc, hint,
 	        "つまみは上下にドラッグ、またはホイール。\n"
-	        "送っているのは XG のコントロールチェンジそのもの。",
+	        "送っているのは XG のパラメータチェンジ。\n"
+	        "値は MU2000 に問い合わせて読み返している。",
 	        RGB(104, 109, 116), m_font_small, DT_LEFT | DT_TOP | DT_WORDBREAK);
 
 	if (status && status[0])
@@ -241,37 +268,31 @@ bool panel::press(int x, int y, bridge &br)
 		m_part = sp->ctl - CTL_PART;
 		return true;
 
-	case spot_kind::knob:
+	case spot_kind::knob: {
+		const xg::param *p = knob_param(sp->ctl);
+		int v = 0;
+		if (!p || !value_of(sp->ctl, v))
+			return false;                        // 読めていないうちは動かさない
 		m_held = sp;
 		m_drag_y = y;
-		m_drag_from = value_of(sp->ctl);
+		m_drag_from = v;
 		return true;
+	}
 
 	case spot_kind::list: {
 		// 左右の端を押すと 1 つずつ。真ん中はホイールで回す
 		const int edge = (sp->r.right - sp->r.left) / 6;
-		int step = 0;
-		if (x < sp->r.left + edge)        step = -1;
-		else if (x >= sp->r.right - edge) step = 1;
-		if (step) {
-			int &v = m_fx[sp->ctl - CTL_FX_FIRST];
-			const int next = std::clamp(v + step, 0, fx_limit(sp->ctl));
-			if (next != v) { v = next; send_fx(sp->ctl, br); }
-		}
+		if (x < sp->r.left + edge)        step_fx(sp->ctl, -1, br);
+		else if (x >= sp->r.right - edge) step_fx(sp->ctl, 1, br);
 		return true;
 	}
 
 	case spot_kind::action:
 		if (sp->ctl == CTL_XG_RESET) {
-			// XG システムオン。実機の電源投入直後と同じ状態に戻す
+			// XG システムオン。実機の電源投入直後と同じ状態に戻す。
+			// 値は次に RAM を写したときに入れ替わる
 			const u8 xg[9] = { 0xf0, 0x43, 0x10, 0x4c, 0x00, 0x00, 0x7e, 0x00, 0xf7 };
 			br.send(xg, 9);
-			for (int p = 0; p < 16; p++) {
-				for (int c = 0; c < 128; c++)
-					m_cc[p][c] = default_cc(c);
-				m_prog[p] = 0;
-				m_bank[p] = 0;
-			}
 		} else if (sp->ctl == CTL_ALL_OFF) {
 			for (int p = 0; p < 16; p++) {
 				const u8 msg[6] = { u8(0xb0 | p), 120, 0, u8(0xb0 | p), 123, 0 };
@@ -302,8 +323,12 @@ bool panel::drag(int x, int y, bridge &br)
 	}
 	if (m_held->kind == spot_kind::knob) {
 		// 100 画素で端から端まで。細かく合わせたいときはホイールを使う
-		const int v = m_drag_from + int((m_drag_y - y) * 127.0 / (100.0 * m_scale));
-		if (v != value_of(m_held->ctl)) {
+		const xg::param *p = knob_param(m_held->ctl);
+		if (!p)
+			return false;
+		const int v = m_drag_from + int((m_drag_y - y) * double(p->max - p->min) / (100.0 * m_scale));
+		int now = 0;
+		if (!value_of(m_held->ctl, now) || std::clamp(v, p->min, p->max) != now) {
 			set_value(m_held->ctl, v, br);
 			return true;
 		}
@@ -331,13 +356,13 @@ bool panel::wheel_at(int x, int y, int delta, bridge &br)
 		return true;
 	}
 	if (sp && sp->kind == spot_kind::knob) {
-		set_value(sp->ctl, value_of(sp->ctl) + delta, br);
+		int v = 0;
+		if (value_of(sp->ctl, v))
+			set_value(sp->ctl, v + delta, br);
 		return true;
 	}
 	if (sp && sp->kind == spot_kind::list) {
-		int &v = m_fx[sp->ctl - CTL_FX_FIRST];
-		const int next = std::clamp(v + delta, 0, fx_limit(sp->ctl));
-		if (next != v) { v = next; send_fx(sp->ctl, br); }
+		step_fx(sp->ctl, delta, br);
 		return true;
 	}
 	// どの面でも、つまみの上でなければダイヤルとして効く。
@@ -353,29 +378,22 @@ bool panel::wheel_at(int x, int y, int delta, bridge &br)
 
 void panel::build_editor_spots()
 {
-	for (int i = 0; i < 16; i++)
+	// 32 パート。8 列 × 4 行。上 2 行が口 A（1-16）、下 2 行が口 B（17-32）
+	for (int i = 0; i < PARTS; i++)
 		m_spots.push_back({ spot_kind::part, mu2000::button::count, CTL_PART + i,
-		                    scale(26 + (i % 8) * 36, 44 + (i / 8) * 30, 30, 26), "", "" });
+		                    scale(26 + (i % 8) * 36, 44 + (i / 8) * 36, 30, 30), "", "" });
 
 	// 枠は 80 × 66。丸の中心は上から 26、名前と値はその下
-	for (const knob_place &k : KNOBS)
-		m_spots.push_back({ spot_kind::knob, mu2000::button::count, k.ctl,
+	for (int i = 0; i < KNOB_COUNT; i++) {
+		const knob_place &k = KNOBS[i];
+		m_spots.push_back({ spot_kind::knob, mu2000::button::count, CTL_KNOB + i,
 		                    scale(k.x - 40, k.y - 26, 80, 66), k.label, "" });
+	}
 
 	m_spots.push_back({ spot_kind::action, mu2000::button::count, CTL_XG_RESET,
 	                    scale(26, 250, 130, 24), "XG リセット", "" });
 	m_spots.push_back({ spot_kind::action, mu2000::button::count, CTL_ALL_OFF,
 	                    scale(162, 250, 150, 24), "オールノートオフ", "" });
-}
-
-void panel::init_editor_values()
-{
-	for (int p = 0; p < 16; p++) {
-		for (int c = 0; c < 128; c++)
-			m_cc[p][c] = default_cc(c);
-		m_prog[p] = 0;
-		m_bank[p] = 0;
-	}
 }
 
 } // namespace ui

@@ -60,9 +60,9 @@ protected:
 
 	// m_decrypted_program は sh_common_execution が持つ
 
-	uint32_t m_test_irq;
-	int32_t m_internal_irq_vector;
-	int8_t m_nmi_line_state;
+	uint32_t m_test_irq = 0;
+	int32_t m_internal_irq_vector = 0;
+	int8_t m_nmi_line_state = 0;
 
 private:
 	virtual uint8_t read_byte(offs_t A);
@@ -85,8 +85,8 @@ private:
 
 
 
-	uint32_t m_cpu_off;
-	int8_t m_irq_line_state[17];
+	uint32_t m_cpu_off = 0;
+	int8_t m_irq_line_state[17] = {};
 };
 
 #endif // MAME_CPU_SH_SH2_H

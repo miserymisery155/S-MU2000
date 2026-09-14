@@ -43,7 +43,7 @@ public:
 protected:
 	required_device<sh7042_device> m_cpu;
 
-	u16 m_dmaor;
+	u16 m_dmaor = 0;
 
 	virtual void device_start() override ATTR_COLD;
 	virtual void device_reset() override ATTR_COLD;
@@ -77,7 +77,7 @@ protected:
 	required_device<sh7042_device> m_cpu;
 	required_device<sh_intc_device> m_intc;
 
-	u32 m_sar, m_dar, m_dmatcr, m_chcr;
+	u32 m_sar = 0, m_dar = 0, m_dmatcr = 0, m_chcr = 0;
 
 	virtual void device_start() override ATTR_COLD;
 	virtual void device_reset() override ATTR_COLD;

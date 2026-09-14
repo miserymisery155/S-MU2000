@@ -41,9 +41,9 @@ protected:
 
 	required_device<sh7042_device> m_cpu;
 	required_device<sh_intc_device> m_intc;
-	int m_port_base, m_port_mask, m_port_shift;
-	int m_intc_vector;
-	bool m_is_hs;
+	int m_port_base = 0, m_port_mask = 0, m_port_shift = 0;
+	int m_intc_vector = 0;
+	bool m_is_hs = false;
 
 	enum {
 		T_SOFT  = 1<<0,
@@ -69,14 +69,14 @@ protected:
 		COUNTED = 64
 	};
 
-	u16 m_addr[8], m_buf[2];
-	u8 m_adcsr, m_adcr;
-	int m_register_mask;
-	int m_trigger, m_start_mode, m_start_channel, m_end_channel, m_start_count;
-	bool m_suspend_on_interrupt, m_analog_power_control;
-	int m_mode, m_channel, m_count;
-	bool m_analog_powered, m_adtrg;
-	u64 m_next_event;
+	u16 m_addr[8] = {}, m_buf[2] = {};
+	u8 m_adcsr = 0, m_adcr = 0;
+	int m_register_mask = 0;
+	int m_trigger = 0, m_start_mode = 0, m_start_channel = 0, m_end_channel = 0, m_start_count = 0;
+	bool m_suspend_on_interrupt = false, m_analog_power_control = false;
+	int m_mode = 0, m_channel = 0, m_count = 0;
+	bool m_analog_powered = false, m_adtrg = false;
+	u64 m_next_event = 0;
 
 	virtual void device_start() override ATTR_COLD;
 	virtual void device_reset() override ATTR_COLD;

@@ -75,6 +75,7 @@ public:
 	// S-MU2000: 音が出ないときの手掛かり
 	s32 m_dbg_adc_max = 0, m_dbg_meg_max = 0, m_dbg_awm_max = 0;
 	u64 m_t_sample = 0, m_t_meg = 0;   // 区間ごとの所要時間
+	bool m_profile = false;            // true のときだけ m_t_meg を測る
 
 	// 発音ごとに、その声が実際にどれだけ音を出したか。
 	// 「発音指示は出ているのに鳴っていない」を数えるため
@@ -102,20 +103,20 @@ private:
 		static const std::array<std::array<s16, 0x800>, 2> interpolation_table;
 		static const std::array<s32, 8> max_value;
 
-		s32 m_start;
-		s32 m_loop;
-		u32 m_address;
-		u16 m_pitch;
+		s32 m_start = 0;
+		s32 m_loop = 0;
+		u32 m_address = 0;
+		u16 m_pitch = 0;
 
-		s32 m_loop_size;
-		s32 m_pos;
-		s32 m_pos_dec;
-		s16 m_dpcm_s0, m_dpcm_s1, m_dpcm_s2, m_dpcm_s3;
-		u32 m_dpcm_pos;
-		s32 m_dpcm_delta;
+		s32 m_loop_size = 0;
+		s32 m_pos = 0;
+		s32 m_pos_dec = 0;
+		s16 m_dpcm_s0 = 0, m_dpcm_s1 = 0, m_dpcm_s2 = 0, m_dpcm_s3 = 0;
+		u32 m_dpcm_pos = 0;
+		s32 m_dpcm_delta = 0;
 
-		bool m_first, m_finetune_active, m_done;
-		s16 m_last;
+		bool m_first = false, m_finetune_active = false, m_done = false;
+		s16 m_last = 0;
 
 		void clear();
 		void keyon();
@@ -151,35 +152,35 @@ private:
 	};
 
 	struct filter_block {
-		u16 m_filter_1_a;
-		u16 m_level_1;
-		u16 m_filter_2_a;
-		u16 m_level_2;
-		u16 m_filter_b;
+		u16 m_filter_1_a = 0;
+		u16 m_level_1 = 0;
+		u16 m_filter_2_a = 0;
+		u16 m_level_2 = 0;
+		u16 m_filter_b = 0;
 
-		s32 m_filter_1_p1;
-		s32 m_filter_2_p1;
-		s32 m_filter_p2;
+		s32 m_filter_1_p1 = 0;
+		s32 m_filter_2_p1 = 0;
+		s32 m_filter_p2 = 0;
 
-		s32 m_filter_1_x1;
-		s32 m_filter_1_x2;
-		s32 m_filter_1_y0;
-		s32 m_filter_1_y1;
+		s32 m_filter_1_x1 = 0;
+		s32 m_filter_1_x2 = 0;
+		s32 m_filter_1_y0 = 0;
+		s32 m_filter_1_y1 = 0;
 
-		s32 m_filter_1_h;
-		s32 m_filter_1_b;
-		s32 m_filter_1_l;
-		s32 m_filter_1_n;
+		s32 m_filter_1_h = 0;
+		s32 m_filter_1_b = 0;
+		s32 m_filter_1_l = 0;
+		s32 m_filter_1_n = 0;
 
-		s32 m_filter_2_x1;
-		s32 m_filter_2_x2;
-		s32 m_filter_2_y0;
-		s32 m_filter_2_y1;
+		s32 m_filter_2_x1 = 0;
+		s32 m_filter_2_x2 = 0;
+		s32 m_filter_2_y0 = 0;
+		s32 m_filter_2_y1 = 0;
 
-		s32 m_filter_2_h;
-		s32 m_filter_2_b;
-		s32 m_filter_2_l;
-		s32 m_filter_2_n;
+		s32 m_filter_2_h = 0;
+		s32 m_filter_2_b = 0;
+		s32 m_filter_2_l = 0;
+		s32 m_filter_2_n = 0;
 
 		void clear();
 		void keyon();
@@ -203,9 +204,11 @@ private:
 	};
 
 	struct iir1_block {
-		s16 m_a[2][2];
-		s16 m_b[2];
-		s32 m_hx[2], m_hy[2];
+		// S-MU2000: 初期値を書く。reset では消えず、firmware が書く前に
+		// 読まれる経路があるので、埋めないと出る音が実行ごとに変わる
+		s16 m_a[2][2] = {};
+		s16 m_b[2] = {};
+		s32 m_hx[2] = {}, m_hy[2] = {};
 
 		void clear();
 		void keyon();
@@ -228,12 +231,12 @@ private:
 			RELEASE = 3
 		};
 
-		u16 m_attack;
-		u16 m_decay1;
-		u16 m_decay2;
-		u16 m_release_glo;
-		s32 m_envelope_level;
-		u8  m_envelope_mode;
+		u16 m_attack = 0;
+		u16 m_decay1 = 0;
+		u16 m_decay2 = 0;
+		u16 m_release_glo = 0;
+		s32 m_envelope_level = 0;
+		u8  m_envelope_mode = 0;
 
 		void clear();
 		void keyon();
@@ -256,17 +259,17 @@ private:
 	};
 
 	struct lfo_block {
-		u32 m_counter;
-		u16 m_state;
+		u32 m_counter = 0;
+		u16 m_state = 0;
 
-		u16 m_r_type_step_pitch;
-		u16 m_r_amplitude;
+		u16 m_r_type_step_pitch = 0;
+		u16 m_r_amplitude = 0;
 
-		u8 m_type;
-		u8 m_step;
-		u8 m_amplitude;
-		bool m_pitch_mode;
-		s8 m_pitch_depth;
+		u8 m_type = 0;
+		u8 m_step = 0;
+		u8 m_amplitude = 0;
+		bool m_pitch_mode = false;
+		s8 m_pitch_depth = 0;
 
 		void clear();
 		void keyon(swp30_device &swp);
@@ -282,8 +285,8 @@ private:
 	};
 
 	struct mixer_slot {
-		std::array<u16, 3> vol;
-		std::array<u16, 3> route;
+		std::array<u16, 3> vol = {};
+		std::array<u16, 3> route = {};
 	};
 
 	struct meg_state {
@@ -295,51 +298,74 @@ private:
 		// そのたびに 25 個ほどのビットを取り出していたので、
 		// プログラムが変わったときだけ解いておく
 		struct decoded {
-			u8   sm, sr, dm, dr, t;
-			u8   mmode, m1t, asel, rop, shift, clamp;
-			u8   dm_src, memop;
-			bool m1_expand, m2_from_m;
-			bool dr_from_r, no_noise;
-			bool memw, index, t_write, t_from_p, mem_use_index;
+			u8   sm = 0, sr = 0, dm = 0, dr = 0, t = 0;
+			u8   mmode = 0, m1t = 0, asel = 0, rop = 0, shift = 0, clamp = 0;
+			u8   dm_src = 0, memop = 0;
+			bool m1_expand = false, m2_from_m = false;
+			bool dr_from_r = false, no_noise = false;
+			bool memw = false, index = false, t_write = false, t_from_p = false, mem_use_index = false;
 		};
-		std::array<decoded, 0x180> m_decoded;
+		std::array<decoded, 0x180> m_decoded = {};
 		void decode_program();
 
+		// S-MU2000: decoded からさらに、命令ごとの判定を済ませた形。
+		// run_program() が使う。**状態の保存には入れない**（meg_state の並びを
+		// 変えると保存済みの状態が読めなくなる）ので、swp30_device が持つ
+		struct op {
+			u8  alu;                  // mmode != 0
+			u8  mmode;
+			u8  m1_from_t, m1_expand, m2_from_m;
+			u8  asel;                 // 0 p / 1 r<<15 / 2 m<<15 / 3 p>>15 / 4 0
+			u8  rop, shift, clamp;
+			u8  sm, sr, dm, dr, t;
+			u8  dm_src, no_noise, dr_from_r;
+			u8  memw, index, t_write, t_from_p;
+			u8  memop, mem_use_index;
+			u8  lfo, offset_index;
+			u32 addr_mask, addr_base;   // resolve_address() を解いたもの
+			u8  latch;                // bit 0x20: 結果の符号とゼロを覚える
+			u8  jump;                 // bit 0x3f: 条件つきで先へ飛ぶ（ALU もレジスタも使わない）
+			u8  cond;                 // bit 0x18-0x1f
+			u16 target;               // 飛び先の番地
+		};
+		void build_ops(op *ops) const;
+		void run_program(const op *ops);
+
 		swp30_device          *m_swp;
-		std::array<u64, 0x180> m_program;
-		std::array<s16, 0x180> m_const;
-		std::array<u16,  0x80> m_offset;
-		std::array<u16,  0x18> m_lfo;
-		std::array<u32,  0x18> m_lfo_increment;
-		std::array<u32,  0x18> m_lfo_counter;
-		std::array<u16,     8> m_map;
+		std::array<u64, 0x180> m_program = {};
+		std::array<s16, 0x180> m_const = {};
+		std::array<u16,  0x80> m_offset = {};
+		std::array<u16,  0x18> m_lfo = {};
+		std::array<u32,  0x18> m_lfo_increment = {};
+		std::array<u32,  0x18> m_lfo_counter = {};
+		std::array<u16,     8> m_map = {};
 
-		std::array<s32,  0x40> m_m;
-		std::array<s32,  0x80> m_r;
-		std::array<s16,     8> m_t;
-		s64                    m_p;
+		std::array<s32,  0x40> m_m = {};
+		std::array<s32,  0x80> m_r = {};
+		std::array<s16,     8> m_t = {};
+		s64                    m_p = 0;
 
-		std::array<s32,     3> m_mw_value;
-		std::array<u8,      3> m_mw_reg;
-		std::array<s32,     3> m_rw_value;
-		std::array<u8,      3> m_rw_reg;
-		std::array<s32,     3> m_index_value;
-		std::array<bool,    3> m_index_active;
-		std::array<s32,     3> m_memw_value;
-		std::array<s32,     3> m_memr_value;
-		std::array<s16,     2> m_t_value;
-		std::array<bool,    3> m_memw_active;
-		std::array<bool,    3> m_memr_active;
-		u32                    m_delay_3;
-		u32                    m_delay_2;
+		std::array<s32,     3> m_mw_value = {};
+		std::array<u8,      3> m_mw_reg = {};
+		std::array<s32,     3> m_rw_value = {};
+		std::array<u8,      3> m_rw_reg = {};
+		std::array<s32,     3> m_index_value = {};
+		std::array<bool,    3> m_index_active = {};
+		std::array<s32,     3> m_memw_value = {};
+		std::array<s32,     3> m_memr_value = {};
+		std::array<s16,     2> m_t_value = {};
+		std::array<bool,    3> m_memw_active = {};
+		std::array<bool,    3> m_memr_active = {};
+		u32                    m_delay_3 = 0;
+		u32                    m_delay_2 = 0;
 
-		u32 m_ram_read, m_ram_write;
-		s32 m_ram_index;
-		u32 m_sample_counter;
-		u16 m_program_address;
-		u16 m_pc;
-		int m_icount;
-		u32 m_retval;
+		u32 m_ram_read = 0, m_ram_write = 0;
+		s32 m_ram_index = 0;
+		u32 m_sample_counter = 0;
+		u16 m_program_address = 0;
+		u16 m_pc = 0;
+		int m_icount = 0;
+		u32 m_retval = 0;
 
 		u16 prg_address_r();
 		void prg_address_w(u16 data);
@@ -367,6 +393,7 @@ private:
 		static void call_revram_decode(void *ms);
 
 		void step();
+		void flush_writes();
 		void reset();
 	};
 
@@ -384,29 +411,45 @@ private:
 	// S-MU2000: sound_stream の代わり。1 サンプル分だけ持つ
 	sound_buffer m_buf;
 
-	std::array<streaming_block, 0x40> m_streaming;
-	std::array<filter_block,    0x40> m_filter;
-	std::array<iir1_block,      0x40> m_iir1;
-	std::array<envelope_block,  0x40> m_envelope;
-	std::array<lfo_block,       0x40> m_lfo;
+	std::array<streaming_block, 0x40> m_streaming = {};
+	std::array<filter_block,    0x40> m_filter = {};
+	std::array<iir1_block,      0x40> m_iir1 = {};
+	std::array<envelope_block,  0x40> m_envelope = {};
+	std::array<lfo_block,       0x40> m_lfo = {};
 
-	std::array<mixer_slot, 0x80> m_mixer;
+	std::array<mixer_slot, 0x80> m_mixer = {};
 
-	std::array<s32,  0x10> m_melo;
-	std::array<s32,  0x10> m_meli;
-	std::array<s32,     4> m_adc;
+	std::array<s32,  0x10> m_melo = {};
+	std::array<s32,  0x10> m_meli = {};
+	std::array<s32,     4> m_adc = {};
 
 	// S-MU2000: DRC は使わない。meg_state はそのまま持つ
 	std::unique_ptr<meg_state> m_meg_storage;
 	meg_state *m_meg;
-	bool m_meg_program_changed;
+	bool m_meg_program_changed = false;
+	// S-MU2000: 判定を済ませた命令表。保存しないので、読み戻したら作り直す
+	std::array<meg_state::op, 0x180> m_meg_ops = {};
+	bool m_meg_ops_stale = true;
+	// S-MU2000: MEG の分岐の状態（doc/upstream.md の 11）。飛び越しは 1 サンプルの中で終わり、
+	// 覚えた符号も次の比較で上書きされるので、状態の保存には入れない
+	bool m_meg_flag_n = false, m_meg_flag_z = false;
+	u16  m_meg_skip_to = 0;
 
-	u32 m_sample_counter;
-	u32 m_wave_adr, m_wave_size, m_wave_val, m_revram_adr, m_revram_data;
-	u16 m_wave_access, m_revram_enable;
+	// S-MU2000: MEG のプログラムを機械語にしたもの（swp30_jit.cpp）。命令表と同じく保存しない。
+	// 環境変数 SMU2000_MEG_JIT=0 で使わない（解釈実行に戻す）
+	struct meg_jit;
+	static void meg_jit_delete(meg_jit *j);
+	static bool meg_jit_enabled();
+	void meg_jit_rebuild();
+	bool meg_jit_run();
+	std::unique_ptr<meg_jit, void (*)(meg_jit *)> m_jit{nullptr, &meg_jit_delete};
 
-	u64 m_keyon_mask;
-	u16 m_internal_adr;
+	u32 m_sample_counter = 0;
+	u32 m_wave_adr = 0, m_wave_size = 0, m_wave_val = 0, m_revram_adr = 0, m_revram_data = 0;
+	u16 m_wave_access = 0, m_revram_enable = 0;
+
+	u64 m_keyon_mask = 0;
+	u16 m_internal_adr = 0;
 
 	// Streaming block trampolines
 	u16 start_h_r(offs_t offset);

@@ -5,6 +5,10 @@
 //   live --list                          MIDI 入力の一覧
 //   live <rom ディレクトリ> [--midi 番号] [--latency ミリ秒]
 //   live <rom ディレクトリ> --waveout    古い方式（WinMM）で鳴らす
+//   live <rom ディレクトリ> --factory    覚えている設定を捨てて工場出荷状態で起動する
+//
+// 設定（ワーク RAM）は終わるときに src/nvram.h の置き場へ残し、次の起動で使う。
+// Ctrl+C でも、音を止めて残してから終わる。
 //
 // 設計の要点は doc/design.md にあるとおりで、**時計を自分で持たない**こと。
 // 音声デバイスが「N サンプルくれ」と要求した分だけ CPU と音源を進める。
@@ -16,6 +20,8 @@
 //                              供給が追いつかず細切れになる（合計 70ms 必要）
 
 #include "mu2000.h"
+#include "nvram.h"
+#include "ui/audio_out.h"
 #include "ui/midi_in.h"
 
 #include <atomic>
@@ -39,6 +45,20 @@ constexpr u32 RATE = 44100;
 // （gui.exe と同じもの。**SysEx の入れ物を Windows へ渡す**のもそちら）
 
 ui::midi_in g_midi;
+
+// Ctrl+C や窓を閉じたとき。すぐには死なず、止めて NVRAM を残してから終わる
+std::atomic<bool> g_quit{false};
+std::atomic<bool> g_done{false};
+
+BOOL WINAPI on_console_ctrl(DWORD type)
+{
+	g_quit.store(true);
+	// 窓を閉じられたときは、ここから戻ると数秒で殺される。後始末を待つ
+	if (type == CTRL_CLOSE_EVENT || type == CTRL_LOGOFF_EVENT || type == CTRL_SHUTDOWN_EVENT)
+		for (int i = 0; i < 400 && !g_done.load(); i++)
+			Sleep(10);
+	return TRUE;
+}
 
 void list_midi_inputs()
 {
@@ -125,7 +145,7 @@ struct generator {
 		const double busy  = double(busy_ticks) / freq.QuadPart;
 		std::printf("  %.0f 秒経過  MIDI %llu バイト  CPU 使用率 %.1f%%\n",
 		            audio, (unsigned long long)g_midi.bytes(), 100.0 * busy / audio);
-		std::printf("     枯渇 %llu 回（残量ゼロ）、生成の最悪 %.1f ms（溜めは %.1f ms ぶん）\n",
+		std::printf("     間に合わなかった %llu 回、生成の最悪 %.1f ms（余裕は %.1f ms）\n",
 		            (unsigned long long)starved, 1000.0 * worst_ticks / freq.QuadPart,
 		            1000.0 * cushion_frames / RATE);
 	}
@@ -133,127 +153,60 @@ struct generator {
 
 // ---- WASAPI 共有モード。イベント駆動
 
-int run_wasapi(generator &gen, double seconds, int latency_ms)
+// ---- WASAPI 共有モード。ui::audio_out に任せる
+//
+// 以前はここに WASAPI の手順を直に書いていたが、gui.exe 側（ui::audio_out）と
+// 二重になっていた。**標本化周波数の変換を自分でやる**ようにした分が
+// 片方にしか入らないのは困るので、こちらもそちらを使う。
+
+int run_wasapi(generator &gen, double seconds, int latency_ms, bool exclusive,
+               const char *dump_dev, const char *audio_dev, bool raw)
 {
-	if (FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED))) {
-		std::fprintf(stderr, "COM を初期化できない\n");
+	ui::audio_out out;
+	std::string err;
+	if (dump_dev)
+		out.set_capture(dump_dev);
+	if (!out.start(latency_ms, [&gen](s16 *o, u32 n) { gen.fill(o, n); }, err, exclusive,
+	               audio_dev ? audio_dev : "", raw)) {
+		std::fprintf(stderr, "%s\n", err.c_str());
 		return 1;
 	}
 
-	IMMDeviceEnumerator *en = nullptr;
-	IMMDevice *dev = nullptr;
-	IAudioClient *client = nullptr;
-	IAudioRenderClient *render = nullptr;
-	HANDLE ev = CreateEventA(nullptr, FALSE, FALSE, nullptr);
-	UINT32 buf_frames = 0;
-	int rc = 1;
-	mmcss_guard mmcss;      // goto done がまたぐので、宣言はここに置く
-
-	auto fail = [](const char *what, HRESULT hr) {
-		std::fprintf(stderr, "%s に失敗 (0x%08lx)\n", what, (unsigned long)hr);
-	};
-
-	HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
-	                              __uuidof(IMMDeviceEnumerator), (void **)&en);
-	if (FAILED(hr)) { fail("デバイス一覧の取得", hr); goto done; }
-
-	hr = en->GetDefaultAudioEndpoint(eRender, eConsole, &dev);
-	if (FAILED(hr)) { fail("既定の音声デバイスの取得", hr); goto done; }
-
-	hr = dev->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, (void **)&client);
-	if (FAILED(hr)) { fail("音声デバイスの起動", hr); goto done; }
-
-	{
-		// こちらは 44100Hz 16bit ステレオで作る。デバイスの形式が違っても
-		// AUTOCONVERTPCM を付けておけば Windows が変換してくれる
-		WAVEFORMATEX fmt{};
-		fmt.wFormatTag      = WAVE_FORMAT_PCM;
-		fmt.nChannels       = 2;
-		fmt.nSamplesPerSec  = RATE;
-		fmt.wBitsPerSample  = 16;
-		fmt.nBlockAlign     = 4;
-		fmt.nAvgBytesPerSec = RATE * 4;
-
-		const REFERENCE_TIME dur = REFERENCE_TIME(latency_ms) * 10000;
-		hr = client->Initialize(AUDCLNT_SHAREMODE_SHARED,
-		                        AUDCLNT_STREAMFLAGS_EVENTCALLBACK |
-		                        AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM |
-		                        AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
-		                        dur, 0, &fmt, nullptr);
-		if (FAILED(hr)) { fail("音声の開始準備", hr); goto done; }
-	}
-
-	hr = client->SetEventHandle(ev);
-	if (FAILED(hr)) { fail("イベントの登録", hr); goto done; }
-
-	hr = client->GetBufferSize(&buf_frames);
-	if (FAILED(hr)) { fail("バッファ長の取得", hr); goto done; }
-
-	hr = client->GetService(__uuidof(IAudioRenderClient), (void **)&render);
-	if (FAILED(hr)) { fail("書き込み口の取得", hr); goto done; }
-
-	std::printf("WASAPI 共有モード  待ち時間 %.1f ms（%u サンプル）\n",
-	            1000.0 * buf_frames / RATE, buf_frames);
+	std::printf("音声の出口: %s\n", out.device_name().c_str());
+	std::printf("%s\n", out.format_line().c_str());
+	std::printf("MMCSS: %s\n", out.mmcss() ? "Pro Audio で登録した"
+	                                        : "登録できず（途切れやすい）");
 	if (seconds > 0.0)
 		std::printf("%.1f 秒で終了\n", seconds);
 	else
 		std::printf("Ctrl+C で終了\n");
 
-	// 音声を作るスレッドは優先度を上げる。取りこぼすと音が切れる
-	SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
-	gen.cushion_frames = buf_frames;
+	// 取りこぼしの判定に使う「一杯ぶん」。デバイス側の長さを 44100 側に直す
+	gen.cushion_frames = u32(out.target_ms() * RATE / 1000.0);
 
-	{
-		// 最初に一杯まで埋めてから走らせる
-		BYTE *data = nullptr;
-		if (SUCCEEDED(render->GetBuffer(buf_frames, &data))) {
-			gen.fill(reinterpret_cast<s16 *>(data), buf_frames);
-			render->ReleaseBuffer(buf_frames, 0);
+	u64 shown = 0;
+	while (!g_quit.load() && (seconds <= 0.0 || gen.produced < u64(seconds * RATE))) {
+		Sleep(20);
+		if (!out.running()) {
+			const std::string e = out.error();
+			if (!e.empty())
+				std::fprintf(stderr, "%s\n", e.c_str());
+			break;
+		}
+		if (gen.produced - shown >= u64(RATE) * 5) {
+			shown = gen.produced;
+			gen.starved = out.late();
+			gen.report(gen.cushion_frames);
+			std::printf("     %s\n", out.latency_line().c_str());
 		}
 	}
 
-	hr = client->Start();
-	if (FAILED(hr)) { fail("再生の開始", hr); goto done; }
-
-	while (seconds <= 0.0 || gen.produced < u64(seconds * RATE)) {
-		if (WaitForSingleObject(ev, 2000) != WAIT_OBJECT_0) {
-			std::fprintf(stderr, "音声デバイスからの合図が来ない\n");
-			break;
-		}
-
-		UINT32 padding = 0;
-		if (FAILED(client->GetCurrentPadding(&padding)))
-			break;
-		// 残量がゼロなら、デバイスは前の分を鳴らし終えて待たされた。
-		// これが本当の音切れ。生成に何 ms かかったかより、こちらが答え。
-		// ただし鳴らし始めの 1 杯目は、まだ渡した音が減っていないので数えない
-		if (padding == 0 && gen.produced > buf_frames)
-			gen.starved++;
-		const UINT32 want = buf_frames - padding;
-		if (!want)
-			continue;
-
-		BYTE *data = nullptr;
-		if (FAILED(render->GetBuffer(want, &data)))
-			break;
-		gen.fill(reinterpret_cast<s16 *>(data), want);
-		render->ReleaseBuffer(want, 0);
-
-		if (gen.produced % (RATE * 5) < want)
-			gen.report(buf_frames);
-	}
-
-	client->Stop();
-	rc = 0;
-
-done:
-	if (render) render->Release();
-	if (client) client->Release();
-	if (dev) dev->Release();
-	if (en) en->Release();
-	if (ev) CloseHandle(ev);
-	CoUninitialize();
-	return rc;
+	gen.starved = out.late();
+	std::printf("待ち時間: %s\n", out.latency_line().c_str());
+	std::printf("余裕の最小: %.1f ms、間に合わなかった %llu 回\n",
+	            out.slack_min_ms(), (unsigned long long)out.late());
+	out.stop();
+	return 0;
 }
 
 // ---- WinMM waveOut。素直だが待ち時間を詰められない
@@ -311,7 +264,7 @@ int run_waveout(generator &gen, double seconds, int frames, int buffers)
 		emit(i);
 
 	int next = 0;
-	while (seconds <= 0.0 || gen.produced < u64(seconds * RATE)) {
+	while (!g_quit.load() && (seconds <= 0.0 || gen.produced < u64(seconds * RATE))) {
 		while (!(hdr[next].dwFlags & WHDR_DONE))
 			WaitForSingleObject(done, 100);
 		emit(next);
@@ -359,22 +312,39 @@ int main(int argc, char **argv)
 	// WASAPI の待ち時間。0 を渡すと Windows の最小周期（この環境で 23.5ms）に
 	// なるが、それだと音源の山で 25 秒に 1 回ほど枯渇する。30ms なら 0 回。
 	// これ以上詰めたければ音源をもっと速くするしかない
-	int  latency_ms = 30;
+	int  latency_ms = 20;   // 溜める目標。実測の最悪 9.2ms + 余裕
+	bool exclusive = false;
+	const char *dump_dev = nullptr;   // デバイスへ渡したものをそのまま書き出す
+	const char *audio_dev = nullptr;  // 音声の出口の名前（一部でよい）
+	bool raw = false;                 // エンジンの信号処理を飛ばす
 	double seconds = 0.0;   // 0 なら Ctrl+C まで
-	bool nomidi = false, use_waveout = false, single = false;
+	bool nomidi = false, use_waveout = false, single = false, factory = false;
 	const char *wav = nullptr;
 	std::string dir;
 
 	for (int i = 1; i < argc; i++) {
-		if (!std::strcmp(argv[i], "--list")) { list_midi_inputs(); return 0; }
+		if (!std::strcmp(argv[i], "--list")) {
+			list_midi_inputs();
+			std::printf("\n音声の出口:\n");
+			const std::vector<std::string> outs = ui::audio_out::list();
+			for (size_t k = 0; k < outs.size(); k++)
+				std::printf("  %zu: %s\n", k, outs[k].c_str());
+			std::printf("  --audio に名前の一部を渡すと、そこへ出す\n");
+			return 0;
+		}
 		else if (!std::strcmp(argv[i], "--midi") && i + 1 < argc) midi_dev = std::atoi(argv[++i]);
 		else if (!std::strcmp(argv[i], "--frames") && i + 1 < argc) frames = std::atoi(argv[++i]);
 		else if (!std::strcmp(argv[i], "--buffers") && i + 1 < argc) buffers = std::atoi(argv[++i]);
 		else if (!std::strcmp(argv[i], "--latency") && i + 1 < argc) latency_ms = std::atoi(argv[++i]);
+		else if (!std::strcmp(argv[i], "--exclusive")) exclusive = true;
+		else if (!std::strcmp(argv[i], "--dump-dev") && i + 1 < argc) dump_dev = argv[++i];
+		else if (!std::strcmp(argv[i], "--audio") && i + 1 < argc) audio_dev = argv[++i];
+		else if (!std::strcmp(argv[i], "--raw")) raw = true;
 		else if (!std::strcmp(argv[i], "--seconds") && i + 1 < argc) seconds = std::atof(argv[++i]);
 		else if (!std::strcmp(argv[i], "--wav") && i + 1 < argc) wav = argv[++i];
 		else if (!std::strcmp(argv[i], "--waveout")) use_waveout = true;
 		else if (!std::strcmp(argv[i], "--nomidi")) nomidi = true;
+		else if (!std::strcmp(argv[i], "--factory")) factory = true;
 		else if (!std::strcmp(argv[i], "--single"))
 			single = true;
 		else if (!std::strcmp(argv[i], "-v")) smu2000::g_verbose = true;
@@ -383,6 +353,8 @@ int main(int argc, char **argv)
 	if (dir.empty()) {
 		std::fprintf(stderr,
 			"使い方: live <rom ディレクトリ> [--midi 番号] [--latency ミリ秒]\n"
+			"        [--exclusive]  デバイスを独り占めして待ち時間を詰める\n"
+			"        [--factory]    覚えている設定を捨てて工場出荷状態で起動する\n"
 			"        live <rom ディレクトリ> --waveout [--frames 数] [--buffers 数]\n"
 			"        live --list        MIDI 入力の一覧\n");
 		return 1;
@@ -399,6 +371,10 @@ int main(int argc, char **argv)
 		std::fprintf(stderr, "警告: %s\n", mu.error().c_str());
 
 	mu.set_threaded(!single);
+	if (factory)
+		std::printf("工場出荷状態で起動する（覚えていた設定は終わるときに上書きされる）\n");
+	else if (smu2000::nvram::load(mu))
+		std::printf("設定: %s\n", smu2000::nvram::path(mu).c_str());
 	mu.reset();
 
 	// 起動を待つ。実機と同じで、ここを待たないと音色指定が捨てられる
@@ -433,18 +409,25 @@ int main(int argc, char **argv)
 
 	std::vector<s16> rec;
 	generator gen(mu, wav ? &rec : nullptr);
+	SetConsoleCtrlHandler(on_console_ctrl, TRUE);
 
 	const int rc = use_waveout ? run_waveout(gen, seconds, frames, buffers)
-	                           : run_wasapi(gen, seconds, latency_ms);
+	                           : run_wasapi(gen, seconds, latency_ms, exclusive, dump_dev,
+	                                        audio_dev, raw);
 
 	if (wav && !rec.empty())
 		write_wav(wav, rec);
 	g_midi.close();
+
+	// 音はもう止まっている。ここで機械に触ってよい
+	if (!smu2000::nvram::save(mu))
+		std::fprintf(stderr, "設定を残せなかった: %s\n", smu2000::nvram::path(mu).c_str());
 
 	const double audio = double(gen.produced) / RATE;
 	const double busy  = double(gen.busy_ticks) / gen.freq.QuadPart;
 	std::printf("終了。%.1f 秒ぶんを %.2f 秒で生成（CPU 使用率 %.1f%%）  MIDI %llu バイト\n",
 	            audio, busy, audio > 0 ? 100.0 * busy / audio : 0.0,
 	            (unsigned long long)g_midi.bytes());
+	g_done.store(true);
 	return rc;
 }

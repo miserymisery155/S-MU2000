@@ -60,7 +60,7 @@ protected:
 	required_device<sh_intc_device> m_intc;
 	std::array<u64, 2> m_next_event;
 	std::array<int, 2> m_intc_vector;
-	u16 m_str;
+	u16 m_str = 0;
 	std::array<u16, 2> m_csr;
 	std::array<u16, 2> m_cnt;
 	std::array<u16, 2> m_cor;
@@ -75,6 +75,7 @@ protected:
 	void clock_start(int clk);
 	void compute_next_event(int clk);
 	void cnt_update(int clk, u64 current_time);
+	void catch_up(int clk, u64 current_time);   // S-MU2000
 };
 
 DECLARE_DEVICE_TYPE(SH_CMT, sh_cmt_device)

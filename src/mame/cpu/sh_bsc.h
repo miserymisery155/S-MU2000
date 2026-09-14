@@ -43,7 +43,7 @@ public:
 
 
 protected:
-	u16 m_bcr1, m_bcr2, m_wcr1, m_wcr2, m_dcr, m_rtcsr, m_rtcnt, m_rtcor;
+	u16 m_bcr1 = 0, m_bcr2 = 0, m_wcr1 = 0, m_wcr2 = 0, m_dcr = 0, m_rtcsr = 0, m_rtcnt = 0, m_rtcor = 0;
 
 	virtual void device_start() override ATTR_COLD;
 	virtual void device_reset() override ATTR_COLD;

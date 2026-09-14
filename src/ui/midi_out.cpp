@@ -1,7 +1,10 @@
 // license:BSD-3-Clause
 
 #include "midi_out.h"
+#include "mm_open.h"
 #include "text.h"
+
+#include <cstring>
 
 #include <windows.h>
 #include <mmsystem.h>
@@ -51,8 +54,19 @@ bool midi_out::open(int device, std::string &err)
 		return false;
 	}
 
+	// 口の持ち主が固まっていると返ってこないので、時間を区切る（mm_open.h）
 	HMIDIOUT h = nullptr;
-	if (midiOutOpen(&h, UINT(device), 0, 0, CALLBACK_NULL) != MMSYSERR_NOERROR) {
+	const int r = open_with_timeout<HMIDIOUT>(
+		[device](HMIDIOUT &out) {
+			return unsigned(midiOutOpen(&out, UINT(device), 0, 0, CALLBACK_NULL));
+		},
+		[](HMIDIOUT late) { midiOutClose(late); }, h);
+	if (r == 2) {
+		err = "MIDI 出力が応答しない（loopMIDI やドライバが固まっているかもしれない。"
+		      "loopMIDI を起動し直すか、機器を挿し直す）";
+		return false;
+	}
+	if (r != 0) {
 		err = "MIDI 出力を開けない";
 		return false;
 	}
@@ -68,10 +82,13 @@ bool midi_out::open(int device, std::string &err)
 	m_sysex.clear();
 
 	m_quit.store(false);
+	m_stuck.store(false);
 	if (!m_wake)
 		m_wake = CreateEventA(nullptr, FALSE, FALSE, nullptr);
 	m_handle = h;
-	m_thread = std::thread([this] { run(); });
+	const unsigned gen = m_gen.fetch_add(1) + 1;
+	m_thread_done.store(false);
+	m_thread = std::thread([this, gen, h] { run(gen, h); });
 	m_open.store(true, std::memory_order_release);
 	return true;
 }
@@ -92,11 +109,19 @@ void midi_out::close()
 	m_open.store(false, std::memory_order_release);
 	m_quit.store(true);
 	SetEvent(HANDLE(m_wake));
-	if (m_thread.joinable())
-		m_thread.join();
+	// 送りスレッドが抜けるのを 2 秒まで待つ。抜けないのは相手が固まっているとき。
+	// そのときは置いていき、口も閉じない（閉じる呼び出しも戻ってこないため）
+	for (int i = 0; i < 200 && !m_thread_done.load(); i++)
+		Sleep(10);
 	HMIDIOUT h = reinterpret_cast<HMIDIOUT>(m_handle);
-	midiOutReset(h);
-	midiOutClose(h);
+	if (m_thread_done.load()) {
+		if (m_thread.joinable())
+			m_thread.join();
+		midiOutReset(h);
+		midiOutClose(h);
+	} else if (m_thread.joinable()) {
+		m_thread.detach();
+	}
 	m_handle = nullptr;
 	m_name.clear();
 }
@@ -114,23 +139,41 @@ void midi_out::send(u8 v)
 	SetEvent(HANDLE(m_wake));
 }
 
-void midi_out::emit(const u8 *p, size_t n)
+void midi_out::emit(void *handle, const u8 *p, size_t n)
 {
-	HMIDIOUT h = reinterpret_cast<HMIDIOUT>(m_handle);
+	HMIDIOUT h = reinterpret_cast<HMIDIOUT>(handle);
 	if (n == 0)
 		return;
 
 	if (p[0] == 0xf0) {
-		MIDIHDR hdr{};
-		hdr.lpData = reinterpret_cast<LPSTR>(const_cast<u8 *>(p));
-		hdr.dwBufferLength = DWORD(n);
-		if (midiOutPrepareHeader(h, &hdr, sizeof(hdr)) != MMSYSERR_NOERROR)
+		// 入れ物は自前で持つ。送り終わらないまま諦めたときに、ドライバが後から
+		// 触っても壊れないよう、そのときは捨てずに置いておく
+		MIDIHDR *hdr = new MIDIHDR{};
+		u8 *copy = new u8[n];
+		std::memcpy(copy, p, n);
+		hdr->lpData = reinterpret_cast<LPSTR>(copy);
+		hdr->dwBufferLength = DWORD(n);
+		if (midiOutPrepareHeader(h, hdr, sizeof(MIDIHDR)) != MMSYSERR_NOERROR) {
+			delete hdr;
+			delete[] copy;
 			return;
-		midiOutLongMsg(h, &hdr, sizeof(hdr));
-		// 送り終わるまで待つ。ここは送りスレッドなので待ってよい
-		while (!(hdr.dwFlags & MHDR_DONE))
+		}
+		midiOutLongMsg(h, hdr, sizeof(MIDIHDR));
+		// 送り終わるまで待つ。ここは送りスレッドなので待ってよいが、
+		// **相手が固まっていると終わらない**。31250bps でも 1 秒で 3000 バイト
+		// 流れるので、長さに見合った時間だけ待って諦める
+		const DWORD limit = 1000 + DWORD(n / 3);
+		const DWORD t0 = GetTickCount();
+		while (!(hdr->dwFlags & MHDR_DONE)) {
+			if (GetTickCount() - t0 > limit) {
+				m_stuck.store(true, std::memory_order_release);
+				return;               // hdr と copy は置いておく（ドライバがまだ持っている）
+			}
 			Sleep(1);
-		midiOutUnprepareHeader(h, &hdr, sizeof(hdr));
+		}
+		midiOutUnprepareHeader(h, hdr, sizeof(MIDIHDR));
+		delete hdr;
+		delete[] copy;
 		return;
 	}
 
@@ -140,12 +183,15 @@ void midi_out::emit(const u8 *p, size_t n)
 	midiOutShortMsg(h, m);
 }
 
-void midi_out::run()
+void midi_out::run(unsigned gen, void *handle)
 {
 	for (;;) {
 		WaitForSingleObject(HANDLE(m_wake), 50);
 
 		for (;;) {
+			// 置いていかれたあとで戻ってきた。もう新しい口のもの
+			if (m_gen.load() != gen)
+				return;
 			const size_t r = m_read.load(std::memory_order_relaxed);
 			if (r == m_write.load(std::memory_order_acquire))
 				break;
@@ -154,14 +200,14 @@ void midi_out::run()
 
 			// リアルタイムはどこに挟まっていてもそのまま通す
 			if (b >= 0xf8) {
-				emit(&b, 1);
+				emit(handle, &b, 1);
 				continue;
 			}
 
 			if (m_in_sysex) {
 				if (b == 0xf7) {
 					m_sysex.push_back(b);
-					emit(m_sysex.data(), m_sysex.size());
+					emit(handle, m_sysex.data(), m_sysex.size());
 					m_sysex.clear();
 					m_in_sysex = false;
 					continue;
@@ -189,7 +235,7 @@ void midi_out::run()
 				m_have = 1;
 				m_want = message_length(b);
 				if (m_have == m_want) {
-					emit(m_msg, size_t(m_want));
+					emit(handle, m_msg, size_t(m_want));
 					m_have = 0;
 				}
 				continue;
@@ -205,14 +251,16 @@ void midi_out::run()
 			}
 			m_msg[m_have++] = b;
 			if (m_have == m_want) {
-				emit(m_msg, size_t(m_want));
+				emit(handle, m_msg, size_t(m_want));
 				m_have = m_status ? 1 : 0;       // 走り状態は続く
 			}
 		}
 
-		if (m_quit.load())
+		if (m_quit.load() || m_gen.load() != gen)
 			break;
 	}
+	if (m_gen.load() == gen)
+		m_thread_done.store(true);
 }
 
 } // namespace ui

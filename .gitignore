@@ -9,3 +9,4 @@ roms/
 cfg/
 nvram/
 snap/
+__pycache__/

@@ -105,57 +105,57 @@ public:
 	// Data that needs to be stored close to the generated DRC code
 	struct internal_sh2_state
 	{
-		uint32_t  pc;
-		uint32_t  pr;
-		uint32_t  sr;
-		uint32_t  mach;
-		uint32_t  macl;
-		uint32_t  r[16];
-		uint32_t  ea;
+		uint32_t  pc = 0;
+		uint32_t  pr = 0;
+		uint32_t  sr = 0;
+		uint32_t  mach = 0;
+		uint32_t  macl = 0;
+		uint32_t  r[16] = {};
+		uint32_t  ea = 0;
 
-		uint32_t  pending_irq;
-		uint32_t  pending_nmi;
-		int32_t   irqline;
-		uint32_t  evec;               // exception vector for DRC
-		uint32_t  irqsr;              // IRQ-time old SR for DRC
-		uint32_t  target;             // target for jmp/jsr/etc so the delay slot can't kill it
-		int     internal_irq_level;
-		int     icount;
-		uint8_t   sleep_mode;
-		uint32_t  arg0;              /* print_debug argument 1 */
-		uint32_t  arg1;
-		uint32_t  gbr;
-		uint32_t  vbr;
+		uint32_t  pending_irq = 0;
+		uint32_t  pending_nmi = 0;
+		int32_t   irqline = 0;
+		uint32_t  evec = 0;               // exception vector for DRC
+		uint32_t  irqsr = 0;              // IRQ-time old SR for DRC
+		uint32_t  target = 0;             // target for jmp/jsr/etc so the delay slot can't kill it
+		int     internal_irq_level = 0;
+		int     icount = 0;
+		uint8_t   sleep_mode = 0;
+		uint32_t  arg0 = 0;              /* print_debug argument 1 */
+		uint32_t  arg1 = 0;
+		uint32_t  gbr = 0;
+		uint32_t  vbr = 0;
 
-		uint32_t  m_delay;
+		uint32_t  m_delay = 0;
 
 		// SH3/4 additional DRC "near" state
-		uint32_t  m_ppc;
-		uint32_t  m_spc;
-		uint32_t  m_ssr;
-		uint32_t  m_rbnk[2][8];
-		uint32_t  m_sgr;
-		uint32_t  m_fr[16];
-		uint32_t  m_xf[16];
-		uint32_t  m_cpu_off;
-		uint32_t  m_pending_irq;
-		uint32_t  m_test_irq;
-		uint32_t  m_fpscr;
-		uint32_t  m_fpul;
-		uint32_t  m_dbr;
+		uint32_t  m_ppc = 0;
+		uint32_t  m_spc = 0;
+		uint32_t  m_ssr = 0;
+		uint32_t  m_rbnk[2][8] = {};
+		uint32_t  m_sgr = 0;
+		uint32_t  m_fr[16] = {};
+		uint32_t  m_xf[16] = {};
+		uint32_t  m_cpu_off = 0;
+		uint32_t  m_pending_irq = 0;
+		uint32_t  m_test_irq = 0;
+		uint32_t  m_fpscr = 0;
+		uint32_t  m_fpul = 0;
+		uint32_t  m_dbr = 0;
 
 		// SH3/4 floating point constants the generated code refers to by address
-		double  m_ftrc_dmin;         // FTRC double-precision range check
-		double  m_ftrc_dmax;
-		float   m_ftrc_smin;         // FTRC single-precision range check
-		float   m_ftrc_smax;
-		float   m_fzero;             // FTRV accumulator initialiser
-		float   m_fone;              // FSRRA reciprocal numerator
-		uint8_t m_fpmode[4];         // FPSCR.RM -> UML rounding mode
+		double  m_ftrc_dmin = 0;         // FTRC double-precision range check
+		double  m_ftrc_dmax = 0;
+		float   m_ftrc_smin = 0;         // FTRC single-precision range check
+		float   m_ftrc_smax = 0;
+		float   m_fzero = 0;             // FTRV accumulator initialiser
+		float   m_fone = 0;              // FSRRA reciprocal numerator
+		uint8_t m_fpmode[4] = {};         // FPSCR.RM -> UML rounding mode
 
-		int     m_frt_input;
-		int     m_fpu_sz;
-		int     m_fpu_pr;
+		int     m_frt_input = 0;
+		int     m_fpu_sz = 0;
+		int     m_fpu_pr = 0;
 	};
 
 	internal_sh2_state *m_sh2_state;
@@ -435,17 +435,17 @@ protected:
 
 public:
 	/* fast RAM */
-	uint32_t              m_fastram_select;
+	uint32_t              m_fastram_select = 0;
 	struct
 	{
-		offs_t              start;                      /* start of the RAM block */
-		offs_t              end;                        /* end of the RAM block */
-		bool                readonly;                   /* true if read-only */
+		offs_t              start = 0;                      /* start of the RAM block */
+		offs_t              end = 0;                        /* end of the RAM block */
+		bool                readonly = false;                   /* true if read-only */
 		void *              base;                       /* base in memory where the RAM lives */
 	} m_fastram[SH2_MAX_FASTRAM];
 
-	int m_pcfsel;                 // last pcflush entry set
-	uint32_t m_pcflushes[16];           // pcflush entries
+	int m_pcfsel = 0;                 // last pcflush entry set
+	uint32_t m_pcflushes[16] = {};           // pcflush entries
 
 
 
@@ -458,7 +458,7 @@ public:
 
 
 	/* internal stuff */
-	uint8_t               m_cache_dirty;                /* true if we need to flush the cache */
+	uint8_t               m_cache_dirty = 0;                /* true if we need to flush the cache */
 
 	/* register mappings */
 
@@ -473,8 +473,8 @@ public:
 
 
 
-	int m_cpu_type;
-	uint32_t m_am;
+	int m_cpu_type = 0;
+	uint32_t m_am = 0;
 
 	void sh2drc_set_options(uint32_t options);
 	void sh2drc_add_pcflush(offs_t address);

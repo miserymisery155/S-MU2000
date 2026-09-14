@@ -118,16 +118,16 @@ protected:
 	required_device<sh7042_device> m_cpu;
 	required_device<sh_intc_device> m_intc;
 	attotime m_external_clock_period;
-	double m_external_to_internal_ratio, m_internal_to_external_ratio;
+	double m_external_to_internal_ratio = 0, m_internal_to_external_ratio = 0;
 
-	int m_id, m_eri_int, m_rxi_int, m_txi_int, m_tei_int;
+	int m_id = 0, m_eri_int = 0, m_rxi_int = 0, m_txi_int = 0, m_tei_int = 0;
 
-	int m_tx_state, m_rx_state, m_tx_bit, m_rx_bit, m_clock_state, m_tx_parity, m_rx_parity, m_tx_clock_counter, m_rx_clock_counter;
-	u32 m_clock_mode;
-	bool m_ext_clock_value, m_rx_value;
+	int m_tx_state = 0, m_rx_state = 0, m_tx_bit = 0, m_rx_bit = 0, m_clock_state = 0, m_tx_parity = 0, m_rx_parity = 0, m_tx_clock_counter = 0, m_rx_clock_counter = 0;
+	u32 m_clock_mode = 0;
+	bool m_ext_clock_value = false, m_rx_value = false;
 
-	u8 m_rdr, m_tdr, m_smr, m_scr, m_ssr, m_brr, m_rsr, m_tsr;
-	u64 m_clock_event, m_clock_step, m_divider;
+	u8 m_rdr = 0, m_tdr = 0, m_smr = 0, m_scr = 0, m_ssr = 0, m_brr = 0, m_rsr = 0, m_tsr = 0;
+	u64 m_clock_event = 0, m_clock_step = 0, m_divider = 0;
 
 	std::string m_last_clock_message;
 

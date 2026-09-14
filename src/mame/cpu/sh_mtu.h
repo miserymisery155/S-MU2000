@@ -117,19 +117,19 @@ protected:
 	required_device<sh7042_device> m_cpu;
 	required_device<sh_intc_device> m_intc;
 	optional_device<sh_mtu_channel_device> m_chained_timer;
-	int m_interrupt[6];
-	u8 m_tier_mask;
+	int m_interrupt[6] = {};
+	u8 m_tier_mask = 0;
 
-	int m_tgr_count, m_tbr_count;
-	int m_tgr_clearing;
-	u8 m_tcr, m_tmdr, m_tior, m_tier, m_tsr;
-	int m_clock_type, m_clock_divider;
-	u16 m_tcnt;
+	int m_tgr_count = 0, m_tbr_count = 0;
+	int m_tgr_clearing = 0;
+	u8 m_tcr = 0, m_tmdr = 0, m_tior = 0, m_tier = 0, m_tsr = 0;
+	int m_clock_type = 0, m_clock_divider = 0;
+	u16 m_tcnt = 0;
 	std::array<u16, 4> m_tgr;
-	u64 m_last_clock_update, m_event_time;
-	u32 m_phase, m_counter_cycle;
-	bool m_counter_incrementing;
-	bool m_channel_active;
+	u64 m_last_clock_update = 0, m_event_time = 0;
+	u32 m_phase = 0, m_counter_cycle = 0;
+	bool m_counter_incrementing = false;
+	bool m_channel_active = false;
 	std::array<int, 8> m_count_types;
 
 	virtual void device_start() override ATTR_COLD;
@@ -181,10 +181,10 @@ protected:
 	required_device<sh7042_device> m_cpu;
 	required_device_array<sh_mtu_channel_device, 5> m_timer_channel;
 
-	int m_timer_count;
+	int m_timer_count = 0;
 
-	u8 m_tstr, m_tsyr, m_toer, m_tocr, m_tgcr;
-	u16 m_tcdr, m_tddr, m_tcnts, m_tcbr;
+	u8 m_tstr = 0, m_tsyr = 0, m_toer = 0, m_tocr = 0, m_tgcr = 0;
+	u16 m_tcdr = 0, m_tddr = 0, m_tcnts = 0, m_tcbr = 0;
 
 	virtual void device_start() override ATTR_COLD;
 	virtual void device_reset() override ATTR_COLD;

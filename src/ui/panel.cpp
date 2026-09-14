@@ -116,8 +116,6 @@ const COLORREF KEY_DOWN   = RGB(150, 140, 95);
 
 panel::panel()
 {
-	init_editor_values();
-	init_effect_values();
 	resize(LOGICAL_W, LOGICAL_H);
 }
 

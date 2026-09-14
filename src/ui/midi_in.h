@@ -39,7 +39,13 @@ public:
 	// 音声スレッドから。溜まっているバイトを 1 つずつ取り出す
 	bool pop(u8 &v);
 
-	void push(u8 v);   // コールバックから
+	// コールバックから。Windows が渡してきたものを積む。
+	// **読んでよい位置を進めるのは、メッセージが終わったときだけ**。音声の糸に
+	// 途中までのメッセージを見せない（前は 1 バイトずつ進めていたので、ブロックの
+	// 境目で前半だけ読まれ、画面から送った SysEx がその途中に挟まることがあった）。
+	// 積みきれなかったメッセージは丸ごと捨てる
+	void on_short(u32 msg);                  // MIM_DATA
+	void on_long(const u8 *p, size_t n);     // MIM_LONGDATA（SysEx の切れ端）
 
 	// SysEx 用の入れ物。バルクダンプも来るので少し大きめに取る
 	static constexpr int    SYSEX_BUFFERS = 4;
@@ -53,6 +59,12 @@ private:
 	static constexpr size_t SIZE = 65536, MASK = SIZE - 1;
 	u8 m_buf[SIZE] = {};
 	std::atomic<size_t> m_read{0}, m_write{0};
+	size_t m_pending = 0;             // 積みかけの書き込み位置（コールバックだけ）
+	bool   m_overflow = false;        // 積みかけが溢れた
+	bool   m_in_sysex = false;        // SysEx の途中か（コールバックだけ）
+	void push(u8 v);
+	void commit();
+	void rollback();                  // 積みかけを捨てる
 	std::atomic<u64>    m_bytes{0};
 
 	void       *m_handle = nullptr;   // HMIDIIN

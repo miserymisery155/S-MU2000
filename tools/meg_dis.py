@@ -53,8 +53,17 @@ def disasm(pc, opcode, const, off):
     t = bits(opcode, 0x38, 3)
     gconst = "%g" % (s16(const.get(pc, 0)) / 32768.0)
 
+    if bits(opcode, 0x3F):
+        # 分岐（doc/upstream.md の 11）。条件 bit 3 が 0 なら必ず、1 なら bit 2 で負／負でない、bit 1 で 0 も
+        cond = bits(opcode, 0x18, 8)
+        if not cond & 8:
+            c = "always"
+        else:
+            c = ("n" if cond & 4 else "!n") + (" || z" if cond & 2 else "")
+        return "skip to %03x if %s" % ((pc & ~0xFF) | bits(opcode, 0x10, 8), c)
+
     mmode = bits(opcode, 0x16, 2)
-    if mmode != 0 and not bits(opcode, 0x3F):
+    if mmode != 0:
         m1t = bits(opcode, 0x14, 2)
         mul1 = ("t%x" % t) if m1t in (1, 2) else gconst
         if bits(opcode, 0x13):
@@ -112,6 +121,8 @@ def disasm(pc, opcode, const, off):
         add("t%x = p" % t if bits(opcode, 0x3C) else "t%x = %s" % (t, gconst))
     if bits(opcode, 0x0A):
         add("nodither")
+    if bits(opcode, 0x20):
+        add("flags")
     memmode = bits(opcode, 0x24, 2)
     if memmode:
         add("mem_%s +%x%s" % ([None, "w", "r", "1r"][memmode],

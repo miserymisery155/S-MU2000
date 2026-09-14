@@ -46,7 +46,7 @@ protected:
 	std::array<u8, 4> m_enable, m_status, m_datamode, m_div, m_cur_rx;
 	std::array<u8, 4> m_tdr, m_tsr, m_tdr_full, m_tx_step, m_tx_active;
 	std::array<u8, 4> m_rdr, m_rsr, m_rdr_full, m_rx_step, m_rx_active;
-	u8 m_targets;
+	u8 m_targets = 0;
 
 	void do_rx_w(int sci, int state);
 

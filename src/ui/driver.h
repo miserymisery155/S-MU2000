@@ -10,8 +10,10 @@
 
 #include "bridge.h"
 #include "mu2000.h"
+#include "xg/ram.h"
 
 #include <cstdio>
+#include <initializer_list>
 
 namespace ui {
 
@@ -38,13 +40,39 @@ public:
 		u8 b;
 		while (br.take_midi(b)) {
 			mu.midi_in(b);
+			watch(b, 0);
 			echo(b);
+		}
+		// パラメータの層の問い合わせ。外へは流さない
+		while (br.take_ask(b))
+			mu.midi_in(b);
+		// 画面から口 B へ（一覧の鍵盤）。外へは流さない
+		while (br.take_midi_b(b)) {
+			mu.midi_in(b, 1);
+			watch(b, 1);
 		}
 	}
 
 	void pump_midi(mu2000 &mu, bridge &br)
 	{
 		pump_midi(mu, br, [](u8) {});
+	}
+
+	// ブロックの終わりで。音源が MIDI OUT から送り出したものを画面へ渡す。
+	// echo には外の MIDI OUT の口を渡す
+	template <typename F>
+	void pump_out(mu2000 &mu, bridge &br, F &&echo)
+	{
+		u8 b;
+		while (mu.midi_out_take(b)) {
+			br.put_out(b);
+			echo(b);
+		}
+	}
+
+	void pump_out(mu2000 &mu, bridge &br)
+	{
+		pump_out(mu, br, [](u8) {});
 	}
 
 	// ホイールで回された分をダイヤルへ。実機と同じロータリーエンコーダなので、
@@ -55,15 +83,111 @@ public:
 			mu.turn_encoder(step);
 	}
 
+	// 音源へ入れた MIDI を 1 バイトずつ見せる。押さえている鍵とベロシティを写しに書く
+	// （音源の中の鍵の状態はきれいに取り出せないので、入口で数える）
+	void watch(u8 b, int port)
+	{
+		port = port ? 1 : 0;
+		if (b >= 0xf8)
+			return;                           // リアルタイム
+		if (b == 0xf0) {
+			m_sysex[port] = true;
+			m_sx_len[port] = 0;
+			m_status[port] = 0;                   // SysEx はランニングステータスを打ち切る
+			return;
+		}
+		if (m_sysex[port]) {
+			if (!(b & 0x80)) {
+				if (m_sx_len[port] < sizeof(m_sx[port]))
+					m_sx[port][m_sx_len[port]] = b;
+				m_sx_len[port]++;
+				return;
+			}
+			m_sysex[port] = false;                // F7 か、途中で別のものが来た
+			if (b == 0xf7) {
+				if (is_reset(m_sx[port], m_sx_len[port]))
+					for (int ch = 0; ch < 16; ch++)
+						m_xg.notes[port * 16 + ch][0] = m_xg.notes[port * 16 + ch][1] = 0;
+				return;
+			}
+		}
+		if (b & 0x80) {
+			m_status[port] = b < 0xf0 ? b : 0;    // F1-F7 は無視して、ランニングステータスも捨てる
+			m_have[port] = 0;
+			return;
+		}
+		const u8 st = m_status[port];
+		if (!st)
+			return;
+		const u8 kind = st & 0xf0;
+		m_data[port][m_have[port]++] = b;
+		const int need = (kind == 0xc0 || kind == 0xd0) ? 1 : 2;
+		if (m_have[port] < need)
+			return;
+		m_have[port] = 0;
+		const int slot = port * 16 + (st & 0x0f);
+		const u8 d0 = m_data[port][0], d1 = m_data[port][1];
+		u64 &bits = m_xg.notes[slot][d0 >> 6];
+		const u64 bit = u64(1) << (d0 & 63);
+		if (kind == 0x90 && d1) {
+			bits |= bit;
+			m_xg.velocity[slot] = d1;
+			m_xg.note_ons[slot]++;
+		} else if (kind == 0x80 || kind == 0x90) {
+			bits &= ~bit;
+		} else if (kind == 0xb0 && (d0 == 120 || d0 >= 123)) {
+			// オールサウンドオフ・オールノートオフ、オムニ／モノ／ポリの切り替え（どれも全部離す）
+			m_xg.notes[slot][0] = m_xg.notes[slot][1] = 0;
+		}
+	}
+
+	// 音源を初期状態に戻す SysEx か（鳴っている音が全部止まる）。F0 と F7 を除いた中身
+	static bool is_reset(const u8 *p, size_t n)
+	{
+		auto is = [&](std::initializer_list<int> want, int any_low_nibble_at = -1) {
+			if (n != want.size())
+				return false;
+			int i = 0;
+			for (int w : want) {
+				const u8 v = i == any_low_nibble_at ? u8(p[i] & 0xf0) : p[i];
+				if (v != w)
+					return false;
+				i++;
+			}
+			return true;
+		};
+		return is({ 0x7e, 0x7f, 0x09, 0x01 }) || is({ 0x7e, 0x7f, 0x09, 0x03 }) ||          // GM / GM2 On
+		       is({ 0x43, 0x10, 0x4c, 0x00, 0x00, 0x7e, 0x00 }, 1) ||                     // XG System On
+		       is({ 0x43, 0x10, 0x4c, 0x00, 0x00, 0x7f, 0x00 }, 1) ||                     // XG All Parameter Reset
+		       is({ 0x41, 0x10, 0x42, 0x12, 0x40, 0x00, 0x7f, 0x00, 0x41 });              // GS Reset
+	}
+
 	// ブロックの終わりで。25ms ごとに LCD と LED を画面へ渡す
 	void publish(mu2000 &mu, bridge &br, u32 frames, u32 rate,
 	             bool ready, const char *message)
 	{
+		br.advance_clock(frames, rate);
 		m_since += frames;
 		if (m_since < rate / 40)
 			return;
 		m_since = 0;
 		publish_now(mu, br, ready, message);
+		if (ready)
+			publish_xg(mu, br);
+	}
+
+	// firmware のワーク RAM から XG の値を写す（xg/ram.h）
+	void publish_xg(mu2000 &mu, bridge &br)
+	{
+		const std::vector<u8> &ram = mu.nvram();
+		std::memcpy(m_xg.system, ram.data() + xg::ram::SYSTEM, XG_SYSTEM_SIZE);
+		m_xg.voice_mode = ram[xg::ram::VOICE_MODE];
+		m_xg.voice_set  = ram[xg::ram::VOICE_SET];
+		std::memcpy(m_xg.effect, ram.data() + xg::ram::EFFECT, XG_EFFECT_SIZE);
+		for (int p = 0; p < XG_PARTS; p++)
+			std::memcpy(m_xg.parts[p], ram.data() + xg::ram::part_base(p), XG_PART_COPY);
+		m_xg.serial++;
+		br.publish_xg(m_xg);
 	}
 
 	static void publish_now(mu2000 &mu, bridge &br, bool ready, const char *message)
@@ -96,6 +220,12 @@ public:
 private:
 	u64 m_applied = 0;
 	u64 m_since = 0;
+	xg_snapshot m_xg;                        // 音声の糸だけが触る
+	u8   m_status[2] = {}, m_data[2][2] = {};
+	int  m_have[2] = {};
+	bool m_sysex[2] = {};
+	u8   m_sx[2][16] = {};                    // SysEx の頭（リセットかを見るだけ）
+	size_t m_sx_len[2] = {};
 };
 
 } // namespace ui

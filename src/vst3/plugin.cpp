@@ -14,6 +14,9 @@
 //   ・コントロールチェンジ、ピッチベンド、プログラムチェンジ  … パラメータ
 // になる。後者のために IMidiMapping で「チャンネル×番号 → パラメータ番号」を
 // 教えてやる必要がある。受け取った側でまた MIDI のバイト列に組み直して音源へ渡す。
+//
+// MIDI の入力バスは **2 本**。実機の MIDI IN A（パート 1-16）と B（パート 17-32）
+// に当たる。パラメータも口ごとに 16ch × 131 本ずつ持つ。
 
 #include "engine.h"
 #include "state.h"
@@ -62,9 +65,44 @@ constexpr int32 kMidiParams = kChannels * kCtrlCount;
 //   状態      … 起動中か、鳴る用意ができたか、ROM が無いか。読むだけ
 constexpr ParamID kGainId   = 4096;
 constexpr ParamID kStatusId = 4097;
-constexpr int32   kParamCount = kMidiParams + 2;
 
-ParamID param_of(int32 ch, int32 ctrl) { return ParamID(ch * kCtrlCount + ctrl); }
+// MIDI IN B（パート 17-32）のぶん。A の 0-2095 と Output / Status の番号は
+// 保存した曲が覚えているので動かさず、B は離れた 8192 番から並べる
+constexpr int32   kPorts      = 2;
+constexpr ParamID kPortBBase  = 8192;
+constexpr int32   kParamCount = kPorts * kMidiParams + 2;
+
+ParamID param_of(int32 port, int32 ch, int32 ctrl)
+{
+	return ParamID((port ? kPortBBase : 0) + ch * kCtrlCount + ctrl);
+}
+
+// パラメータ番号を、口・チャンネル・番号と m_value の位置に戻す。
+// MIDI のパラメータでなければ false
+bool midi_param(ParamID id, int32 &port, int32 &ch, int32 &ctrl, int32 &slot)
+{
+	int32 x = 0;
+	if (id < ParamID(kMidiParams)) {
+		port = 0;
+		x = int32(id);
+	} else if (id >= kPortBBase && id < kPortBBase + ParamID(kMidiParams)) {
+		port = 1;
+		x = int32(id - kPortBBase);
+	} else {
+		return false;
+	}
+	ch   = x / kCtrlCount;
+	ctrl = x % kCtrlCount;
+	slot = port * kMidiParams + x;
+	return true;
+}
+
+// ピッチベンドのパラメータか（これだけ 14bit で、目盛りの付け方が違う）
+bool is_bend(ParamID id)
+{
+	int32 port, ch, ctrl, slot;
+	return midi_param(id, port, ch, ctrl, slot) && ctrl == 129;
+}
 
 // パラメータの初期値。ホストが起動時にこれを送ってくることがあるので、
 // 「初期値と同じ値が来たら何も送らない」ようにするための表でもある
@@ -96,7 +134,7 @@ class mu_plugin : public IComponent, public IAudioProcessor,
 public:
 	mu_plugin()
 	{
-		for (int32 i = 0; i < kMidiParams; i++)
+		for (int32 i = 0; i < kPorts * kMidiParams; i++)
 			m_value[i] = default_of(i % kCtrlCount);
 		m_engine.panel().set_gain(1.0f);
 		m_gain_now = 1.0f;
@@ -170,16 +208,14 @@ public:
 	int32 PLUGIN_API getBusCount(MediaType type, BusDirection dir) override
 	{
 		if (type == kAudio) return dir == kOutput ? 1 : 0;
-		if (type == kEvent) return dir == kInput  ? 1 : 0;
+		if (type == kEvent) return dir == kInput  ? kPorts : 0;
 		return 0;
 	}
 
 	tresult PLUGIN_API getBusInfo(MediaType type, BusDirection dir, int32 index,
 	                              BusInfo &bus) override
 	{
-		if (index != 0)
-			return kInvalidArgument;
-		if (type == kAudio && dir == kOutput) {
+		if (type == kAudio && dir == kOutput && index == 0) {
 			bus.mediaType    = kAudio;
 			bus.direction    = kOutput;
 			bus.channelCount = 2;
@@ -188,12 +224,13 @@ public:
 			bus.flags   = BusInfo::kDefaultActive;
 			return kResultOk;
 		}
-		if (type == kEvent && dir == kInput) {
+		if (type == kEvent && dir == kInput && index >= 0 && index < kPorts) {
 			bus.mediaType    = kEvent;
 			bus.direction    = kInput;
 			bus.channelCount = 16;
-			set_str(bus.name, "MIDI In");
-			bus.busType = kMain;
+			// 実機の MIDI IN A / B。B はパート 17-32 に届く
+			set_str(bus.name, index == 0 ? "MIDI In A (Part 1-16)" : "MIDI In B (Part 17-32)");
+			bus.busType = index == 0 ? kMain : kAux;
 			bus.flags   = BusInfo::kDefaultActive;
 			return kResultOk;
 		}
@@ -349,7 +386,9 @@ public:
 	{
 		if (index < 0 || index >= kParamCount)
 			return kInvalidArgument;
-		if (index >= kMidiParams) {
+		// 並びは A の 2096 本、Output、Status、B の 2096 本。
+		// 前からあるものの位置を変えないよう、B は後ろに足した
+		if (index == kMidiParams || index == kMidiParams + 1) {
 			std::memset(&info, 0, sizeof(info));
 			if (index == kMidiParams) {
 				info.id = kGainId;
@@ -367,22 +406,26 @@ public:
 			}
 			return kResultOk;
 		}
-		const int32 ch = index / kCtrlCount, ctrl = index % kCtrlCount;
+		const int32 port = index < kMidiParams ? 0 : 1;
+		const int32 x = port ? index - kMidiParams - 2 : index;
+		const int32 ch = x / kCtrlCount, ctrl = x % kCtrlCount;
 
+		// B の口は頭に "B " を付ける（A は前からの名前のまま）
+		const char *pre = port ? "B " : "";
 		char name[64];
-		if (ctrl < 128)      std::snprintf(name, sizeof(name), "Ch%d CC%d", ch + 1, ctrl);
-		else if (ctrl == 128) std::snprintf(name, sizeof(name), "Ch%d Aftertouch", ch + 1);
-		else if (ctrl == 129) std::snprintf(name, sizeof(name), "Ch%d Pitch Bend", ch + 1);
-		else                  std::snprintf(name, sizeof(name), "Ch%d Program", ch + 1);
+		if (ctrl < 128)      std::snprintf(name, sizeof(name), "%sCh%d CC%d", pre, ch + 1, ctrl);
+		else if (ctrl == 128) std::snprintf(name, sizeof(name), "%sCh%d Aftertouch", pre, ch + 1);
+		else if (ctrl == 129) std::snprintf(name, sizeof(name), "%sCh%d Pitch Bend", pre, ch + 1);
+		else                  std::snprintf(name, sizeof(name), "%sCh%d Program", pre, ch + 1);
 
 		std::memset(&info, 0, sizeof(info));
-		info.id = param_of(ch, ctrl);
+		info.id = param_of(port, ch, ctrl);
 		set_str(info.title, name);
 		set_str(info.shortTitle, name);
 		info.stepCount = (ctrl == 129) ? 0 : 127;   // ピッチベンドだけ連続
 		info.defaultNormalizedValue = default_of(ctrl);
 		info.unitId = 0;   // kRootUnitId
-		// 2096 本もあるので、一覧に並べさせない
+		// 4192 本もあるので、一覧に並べさせない
 		info.flags = ParameterInfo::kCanAutomate | ParameterInfo::kIsHidden;
 		return kResultOk;
 	}
@@ -401,10 +444,11 @@ public:
 			set_str(str, g);
 			return kResultOk;
 		}
-		if (id >= ParamID(kMidiParams))
+		int32 port, ch, ctrl, slot;
+		if (!midi_param(id, port, ch, ctrl, slot))
 			return kInvalidArgument;
 		char buf[32];
-		if (id % kCtrlCount == 129)
+		if (ctrl == 129)
 			std::snprintf(buf, sizeof(buf), "%+d", int(std::lround(v * 16383.0)) - 8192);
 		else
 			std::snprintf(buf, sizeof(buf), "%d", int(std::lround(v * 127.0)));
@@ -418,7 +462,8 @@ public:
 			return kInvalidArgument;
 		if (id == kGainId || id == kStatusId)
 			return kResultFalse;
-		if (id >= ParamID(kMidiParams))
+		int32 port, ch, ctrl, slot;
+		if (!midi_param(id, port, ch, ctrl, slot))
 			return kInvalidArgument;
 		char buf[32];
 		int i = 0;
@@ -426,8 +471,8 @@ public:
 			buf[i] = char(str[i]);
 		buf[i] = 0;
 		const double plain = std::atof(buf);
-		v = (id % kCtrlCount == 129) ? std::clamp((plain + 8192.0) / 16383.0, 0.0, 1.0)
-		                             : std::clamp(plain / 127.0, 0.0, 1.0);
+		v = ctrl == 129 ? std::clamp((plain + 8192.0) / 16383.0, 0.0, 1.0)
+		                : std::clamp(plain / 127.0, 0.0, 1.0);
 		return kResultOk;
 	}
 
@@ -435,16 +480,16 @@ public:
 	{
 		if (id == kGainId)   return v * 100.0;
 		if (id == kStatusId) return std::lround(v * 2.0);
-		return (id % kCtrlCount == 129) ? std::lround(v * 16383.0) - 8192.0
-		                                : std::lround(v * 127.0);
+		return is_bend(id) ? std::lround(v * 16383.0) - 8192.0
+		                   : std::lround(v * 127.0);
 	}
 
 	ParamValue PLUGIN_API plainParamToNormalized(ParamID id, ParamValue plain) override
 	{
 		if (id == kGainId)   return std::clamp(plain / 100.0, 0.0, 1.0);
 		if (id == kStatusId) return std::clamp(plain / 2.0, 0.0, 1.0);
-		return (id % kCtrlCount == 129) ? std::clamp((plain + 8192.0) / 16383.0, 0.0, 1.0)
-		                                : std::clamp(plain / 127.0, 0.0, 1.0);
+		return is_bend(id) ? std::clamp((plain + 8192.0) / 16383.0, 0.0, 1.0)
+		                   : std::clamp(plain / 127.0, 0.0, 1.0);
 	}
 
 	ParamValue PLUGIN_API getParamNormalized(ParamID id) override
@@ -458,7 +503,8 @@ public:
 			default:                             return 1.0;
 			}
 		}
-		return id < ParamID(kMidiParams) ? m_value[id] : 0.0;
+		int32 port, ch, ctrl, slot;
+		return midi_param(id, port, ch, ctrl, slot) ? m_value[slot] : 0.0;
 	}
 
 	tresult PLUGIN_API setParamNormalized(ParamID id, ParamValue v) override
@@ -466,9 +512,10 @@ public:
 		if (id == kGainId) { m_engine.panel().set_gain(float(std::clamp(v, 0.0, 1.0))); return kResultOk; }
 		if (id == kStatusId)
 			return kResultFalse;   // 読むだけ
-		if (id >= ParamID(kMidiParams))
+		int32 port, ch, ctrl, slot;
+		if (!midi_param(id, port, ch, ctrl, slot))
 			return kInvalidArgument;
-		m_value[id] = v;
+		m_value[slot] = v;
 		return kResultOk;
 	}
 
@@ -489,11 +536,11 @@ public:
 	tresult PLUGIN_API getMidiControllerAssignment(int32 busIndex, int16 channel,
 	                                               CtrlNumber ctrl, ParamID &id) override
 	{
-		if (busIndex != 0 || channel < 0 || channel >= kChannels)
+		if (busIndex < 0 || busIndex >= kPorts || channel < 0 || channel >= kChannels)
 			return kResultFalse;
 		if (ctrl < 0 || ctrl >= kCtrlCount)
 			return kResultFalse;
-		id = param_of(channel, ctrl);
+		id = param_of(busIndex, channel, ctrl);
 		return kResultTrue;
 	}
 
@@ -503,23 +550,24 @@ private:
 	struct msg {
 		int32          off;
 		int32          seq;
+		uint8          port;          // 0 が MIDI IN A、1 が B
 		uint8          n;
 		uint8          b[3];
 		const uint8   *sysex;
 		uint32         sysex_len;
 	};
 
-	void queue(int32 off, uint8 a, uint8 b = 0, uint8 c = 0, int n = 3)
+	void queue(int32 port, int32 off, uint8 a, uint8 b = 0, uint8 c = 0, int n = 3)
 	{
 		if (m_msgs.size() >= m_msgs.capacity())
 			return;
-		m_msgs.push_back({ off, int32(m_msgs.size()), uint8(n), { a, b, c }, nullptr, 0 });
+		m_msgs.push_back({ off, int32(m_msgs.size()), uint8(port), uint8(n), { a, b, c }, nullptr, 0 });
 	}
 
 	smu2000::vst3::engine m_engine;
 	std::vector<msg>      m_msgs;
 	double                m_rate = smu2000::vst3::NATIVE_RATE;
-	double                m_value[kMidiParams] = {};
+	double                m_value[kPorts * kMidiParams] = {};
 	// 出力レベルは bridge が持つ。ここは 1 サンプルずつ寄せる途中の値
 	float                 m_gain_now = 1.0f;
 	std::atomic<bool>     m_hush{false};
@@ -565,31 +613,31 @@ tresult PLUGIN_API mu_plugin::process(ProcessData &data)
 					m_engine.panel().set_gain(float(std::clamp(v, 0.0, 1.0)));
 				continue;
 			}
-			if (id >= ParamID(kMidiParams))
+			int32 port, ch, ctrl, slot;
+			if (!midi_param(id, port, ch, ctrl, slot))
 				continue;
-			const int32 ch = int32(id) / kCtrlCount, ctrl = int32(id) % kCtrlCount;
 			const int32 np = pq->getPointCount();
 			for (int32 p = 0; p < np; p++) {
 				int32 off = 0;
 				ParamValue v = 0.0;
 				if (pq->getPoint(p, off, v) != kResultOk)
 					continue;
-				m_value[id] = v;
+				m_value[slot] = v;
 				// ここで「前と同じ値だから」と捨ててはいけない。RPN/NRPN は
 				// CC101=0, CC100=0, CC6=n のように同じ値を続けて送ることに
 				// 意味があり、捨てるとピッチベンド幅などが化ける
 
 				if (ctrl < 128) {
-					queue(off, uint8(0xb0 | ch), uint8(ctrl),
+					queue(port, off, uint8(0xb0 | ch), uint8(ctrl),
 					      uint8(std::clamp(int(std::lround(v * 127.0)), 0, 127)));
 				} else if (ctrl == 128) {
-					queue(off, uint8(0xd0 | ch),
+					queue(port, off, uint8(0xd0 | ch),
 					      uint8(std::clamp(int(std::lround(v * 127.0)), 0, 127)), 0, 2);
 				} else if (ctrl == 129) {
 					const int bend = std::clamp(int(std::lround(v * 16383.0)), 0, 16383);
-					queue(off, uint8(0xe0 | ch), uint8(bend & 127), uint8(bend >> 7));
+					queue(port, off, uint8(0xe0 | ch), uint8(bend & 127), uint8(bend >> 7));
 				} else {
-					queue(off, uint8(0xc0 | ch),
+					queue(port, off, uint8(0xc0 | ch),
 					      uint8(std::clamp(int(std::lround(v * 127.0)), 0, 127)), 0, 2);
 				}
 			}
@@ -603,29 +651,30 @@ tresult PLUGIN_API mu_plugin::process(ProcessData &data)
 			if (events->getEvent(i, e) != kResultOk)
 				continue;
 			const int32 off = e.sampleOffset;
+			const int32 port = e.busIndex == 1 ? 1 : 0;
 			switch (e.type) {
 			case Event::kNoteOnEvent: {
 				const int v = std::clamp(int(std::lround(e.noteOn.velocity * 127.0)), 1, 127);
-				queue(off, uint8(0x90 | (e.noteOn.channel & 15)),
+				queue(port, off, uint8(0x90 | (e.noteOn.channel & 15)),
 				      uint8(e.noteOn.pitch & 127), uint8(v));
 				break;
 			}
 			case Event::kNoteOffEvent: {
 				const int v = std::clamp(int(std::lround(e.noteOff.velocity * 127.0)), 0, 127);
-				queue(off, uint8(0x80 | (e.noteOff.channel & 15)),
+				queue(port, off, uint8(0x80 | (e.noteOff.channel & 15)),
 				      uint8(e.noteOff.pitch & 127), uint8(v));
 				break;
 			}
 			case Event::kPolyPressureEvent: {
 				const int v = std::clamp(int(std::lround(e.polyPressure.pressure * 127.0)), 0, 127);
-				queue(off, uint8(0xa0 | (e.polyPressure.channel & 15)),
+				queue(port, off, uint8(0xa0 | (e.polyPressure.channel & 15)),
 				      uint8(e.polyPressure.pitch & 127), uint8(v));
 				break;
 			}
 			case Event::kDataEvent:
 				if (e.data.type == DataEvent::kMidiSysEx && e.data.bytes && e.data.size &&
 				    m_msgs.size() < m_msgs.capacity())
-					m_msgs.push_back({ off, int32(m_msgs.size()), 0, { 0, 0, 0 },
+					m_msgs.push_back({ off, int32(m_msgs.size()), uint8(port), 0, { 0, 0, 0 },
 					                   e.data.bytes, e.data.size });
 				break;
 			default:
@@ -651,9 +700,9 @@ tresult PLUGIN_API mu_plugin::process(ProcessData &data)
 			done = at;
 		}
 		if (m.sysex)
-			m_engine.midi(m.sysex, m.sysex_len);
+			m_engine.midi(m.sysex, m.sysex_len, m.port);
 		else
-			m_engine.midi(m.b, m.n);
+			m_engine.midi(m.b, m.n, m.port);
 	}
 	if (left && done < n)
 		m_engine.fill(left + done, right + done, n - done);

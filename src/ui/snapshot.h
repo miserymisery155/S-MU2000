@@ -43,6 +43,25 @@ struct snapshot {
 	char message[96] = {};       // 起動中／ROM が無い等。空なら出さない
 };
 
+// XG の値の写し。音声の糸が firmware のワーク RAM から 25ms ごとに写す（xg/ram.h）。
+// 画面は MU2000 に問い合わせずにこれを読む
+constexpr int XG_PARTS = 32;
+constexpr int XG_PART_COPY = 0x100;     // xg::ram::PART_COPY
+constexpr int XG_SYSTEM_SIZE = 7;
+constexpr int XG_EFFECT_SIZE = 0x16b;   // xg::ram::EFFECT_SIZE
+
+struct xg_snapshot {
+	u64 serial = 0;                                  // 写すたびに増える
+	u8  system[XG_SYSTEM_SIZE] = {};
+	u8  voice_mode = 1, voice_set = 1;               // 音色の引き方（xg/voices.h の lookup）
+	u8  effect[XG_EFFECT_SIZE] = {};                 // 02 01 00 からマスター EQ まで（RAM の並び）
+	u8  parts[XG_PARTS][XG_PART_COPY] = {};          // **XG のパート番号の順**に並べ直してある
+	// 入ってきた MIDI から。口×チャンネル（口 * 16 + ch）ごと。パートとの対応は受信チャンネルで
+	u64 notes[XG_PARTS][2] = {};                     // 押さえている鍵
+	u8  velocity[XG_PARTS] = {};                     // 最後のノートオンの強さ
+	u32 note_ons[XG_PARTS] = {};                     // ノートオンの回数（画面がメーターを振る合図）
+};
+
 } // namespace ui
 
 #endif // S_MU2000_UI_SNAPSHOT_H

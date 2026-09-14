@@ -46,18 +46,36 @@ void sh_cmt_device::device_reset()
 	std::fill(m_cor.begin(), m_cor.end(), 0xffff);
 }
 
+// S-MU2000: 追いつかせる。合わせの時刻を過ぎていたら印を立て、数を直す
+void sh_cmt_device::catch_up(int i, u64 current_time)
+{
+	if(m_next_event[i] && current_time >= m_next_event[i]) {
+		m_csr[i] |= 0x80;
+		if(BIT(m_csr[i], 6))
+			m_intc->internal_interrupt(m_intc_vector[i]);
+		cnt_update(i, current_time);
+	}
+}
+
 u64 sh_cmt_device::internal_update(u64 current_time)
 {
 	u64 next = 0;
 	for(int i = 0; i != 2; i++) {
-		if(m_next_event[i] && current_time >= m_next_event[i]) {
-			m_csr[i] |= 0x80;
-			if(BIT(m_csr[i], 6))
-				m_intc->internal_interrupt(m_intc_vector[i]);
-			cnt_update(i, current_time);
-		}
-		if(!next || (m_next_event[i] && m_next_event[i] < next))
-			next = m_next_event[i];
+		catch_up(i, current_time);
+
+		// S-MU2000: **割り込みを出さないチャンネルは予定に入れない。**
+		//
+		// MU2000 の firmware は CMT を COR=1・1/8 で走らせていて、合わせは
+		// 16 サイクルごとに起きる。割り込みは切ってあり、カウンタを細かい
+		// 時間の物差しとして読んでいるだけ。ここで予定に入れると、CPU が
+		// 16 サイクルごとに止められて実行ループが 1 サンプルに 80 周する
+		// （実測で「次の予定」の 99.8% がこれだった）。
+		//
+		// 読まれたときに catch_up() で計算すれば同じ値になるので、
+		// 起こしてもらう必要は無い。割り込みを出す設定のときだけ入れる
+		if(BIT(m_csr[i], 6))
+			if(!next || (m_next_event[i] && m_next_event[i] < next))
+				next = m_next_event[i];
 	}
 	return next;
 }
@@ -70,11 +88,13 @@ u16 sh_cmt_device::cmstr_r()
 
 u16 sh_cmt_device::cmcsr0_r()
 {
+	catch_up(0, m_cpu->current_cycles());   // S-MU2000: 読むときに追いつかせる
 	return m_csr[0];
 }
 
 u16 sh_cmt_device::cmcnt0_r()
 {
+	catch_up(0, m_cpu->current_cycles());
 	cnt_update(0, m_cpu->current_cycles());
 	return m_cnt[0];
 }
@@ -86,11 +106,13 @@ u16 sh_cmt_device::cmcor0_r()
 
 u16 sh_cmt_device::cmcsr1_r()
 {
+	catch_up(1, m_cpu->current_cycles());   // S-MU2000: 同上
 	return m_csr[1];
 }
 
 u16 sh_cmt_device::cmcnt1_r()
 {
+	catch_up(1, m_cpu->current_cycles());
 	cnt_update(1, m_cpu->current_cycles());
 	return m_cnt[1];
 }

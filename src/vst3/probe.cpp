@@ -468,13 +468,21 @@ int run_torture(IPluginFactory *fac, const TUID cid)
 			std::printf("NG: 範囲外のパラメータに答えてしまう\n"); bad++;
 		}
 		int mapped = 0;
-		for (int16 ch = 0; ch < 16; ch++)
-			for (int cc = 0; cc < 132; cc++) {
-				ParamID id = 0;
-				if (m->getMidiControllerAssignment(0, ch, CtrlNumber(cc), id) == kResultTrue)
-					mapped++;
-			}
-		std::printf("OK: MIDI の割り当ては %d 通り（16ch × 131）\n", mapped);
+		std::vector<ParamID> seen;
+		for (int32 bus = 0; bus < 3; bus++)
+			for (int16 ch = 0; ch < 16; ch++)
+				for (int cc = 0; cc < 132; cc++) {
+					ParamID id = 0;
+					if (m->getMidiControllerAssignment(bus, ch, CtrlNumber(cc), id) == kResultTrue) {
+						mapped++;
+						seen.push_back(id);
+					}
+				}
+		std::sort(seen.begin(), seen.end());
+		if (std::adjacent_find(seen.begin(), seen.end()) != seen.end()) {
+			std::printf("NG: 違う口・チャンネルが同じパラメータに割り当たっている\n"); bad++;
+		}
+		std::printf("OK: MIDI の割り当ては %d 通り（2 口 × 16ch × 131）\n", mapped);
 
 		c->terminate();
 		e->release();
@@ -552,12 +560,14 @@ int main(int argc, char **argv)
 	int block = 512;
 	double extra = 3.0;      // 曲の後ろに足す残響ぶん
 	bool torture = false;
+	bool one_bus = false;    // 比べる用。MIDI ファイルの口 B も A のバスへ流す
 	int  view_seconds = 0;
 	for (int i = 2; i < argc; i++) {
 		if (!std::strcmp(argv[i], "--rate") && i + 1 < argc) rate = std::atof(argv[++i]);
 		else if (!std::strcmp(argv[i], "--block") && i + 1 < argc) block = std::atoi(argv[++i]);
 		else if (!std::strcmp(argv[i], "--tail") && i + 1 < argc) extra = std::atof(argv[++i]);
 		else if (!std::strcmp(argv[i], "--torture")) torture = true;
+		else if (!std::strcmp(argv[i], "--one-bus")) one_bus = true;
 		else if (!std::strcmp(argv[i], "--view")) view_seconds =
 		    (i + 1 < argc && argv[i + 1][0] != '-') ? std::atoi(argv[++i]) : 20;
 		else if (mid.empty()) mid = argv[i];
@@ -648,7 +658,8 @@ int main(int argc, char **argv)
 	SpeakerArrangement out_arr = SpeakerArr::kStereo;
 	proc->setBusArrangements(nullptr, 0, &out_arr, 1);
 	comp->activateBus(kAudio, kOutput, 0, true);
-	comp->activateBus(kEvent, kInput, 0, true);
+	for (int32 b = 0; b < comp->getBusCount(kEvent, kInput); b++)
+		comp->activateBus(kEvent, kInput, b, true);
 
 	ProcessSetup setup{};
 	setup.processMode        = kOffline;
@@ -761,10 +772,19 @@ int main(int argc, char **argv)
 			if (b.empty())
 				continue;
 			const uint8 st = b[0], ch = uint8(st & 15);
+			// MIDI ファイルの口（FF 21）をそのままバスの番号にする。B はパート 17-32
+			const int32 bus = (e.port && !one_bus) ? 1 : 0;
+			// CC などはプラグインが教える割り当てで、パラメータ番号に直す
+			auto param = [&](int ctrl) {
+				ParamID id = ParamID(ch * 131 + ctrl);
+				if (map)
+					map->getMidiControllerAssignment(bus, ch, CtrlNumber(ctrl), id);
+				return id;
+			};
 			if (st == 0xf0) {
 				elist.m_sysex.push_back(std::vector<uint8>(b.begin(), b.end()));
 				Event ev{};
-				ev.busIndex = 0;
+				ev.busIndex = bus;
 				ev.sampleOffset = off;
 				ev.flags = Event::kIsLive;
 				ev.type = Event::kDataEvent;
@@ -774,7 +794,7 @@ int main(int argc, char **argv)
 				elist.addEvent(ev);
 			} else if ((st & 0xf0) == 0x90 && b.size() > 2 && b[2]) {
 				Event ev{};
-				ev.busIndex = 0; ev.sampleOffset = off; ev.flags = Event::kIsLive;
+				ev.busIndex = bus; ev.sampleOffset = off; ev.flags = Event::kIsLive;
 				ev.type = Event::kNoteOnEvent;
 				ev.noteOn.channel = ch;
 				ev.noteOn.pitch = int16(b[1]);
@@ -783,7 +803,7 @@ int main(int argc, char **argv)
 				elist.addEvent(ev);
 			} else if ((st & 0xf0) == 0x80 || ((st & 0xf0) == 0x90 && b.size() > 2)) {
 				Event ev{};
-				ev.busIndex = 0; ev.sampleOffset = off; ev.flags = Event::kIsLive;
+				ev.busIndex = bus; ev.sampleOffset = off; ev.flags = Event::kIsLive;
 				ev.type = Event::kNoteOffEvent;
 				ev.noteOff.channel = ch;
 				ev.noteOff.pitch = int16(b[1]);
@@ -792,7 +812,7 @@ int main(int argc, char **argv)
 				elist.addEvent(ev);
 			} else if ((st & 0xf0) == 0xa0 && b.size() > 2) {
 				Event ev{};
-				ev.busIndex = 0; ev.sampleOffset = off; ev.flags = Event::kIsLive;
+				ev.busIndex = bus; ev.sampleOffset = off; ev.flags = Event::kIsLive;
 				ev.type = Event::kPolyPressureEvent;
 				ev.polyPressure.channel = ch;
 				ev.polyPressure.pitch = int16(b[1]);
@@ -800,14 +820,14 @@ int main(int argc, char **argv)
 				ev.polyPressure.noteId = -1;
 				elist.addEvent(ev);
 			} else if ((st & 0xf0) == 0xb0 && b.size() > 2) {
-				pchanges.get(ParamID(ch * 131 + b[1]))->add(off, double(b[2]) / 127.0);
+				pchanges.get(param(b[1]))->add(off, double(b[2]) / 127.0);
 			} else if ((st & 0xf0) == 0xd0) {
-				pchanges.get(ParamID(ch * 131 + 128))->add(off, double(b[1]) / 127.0);
+				pchanges.get(param(128))->add(off, double(b[1]) / 127.0);
 			} else if ((st & 0xf0) == 0xe0 && b.size() > 2) {
 				const int bend = b[1] | (int(b[2]) << 7);
-				pchanges.get(ParamID(ch * 131 + 129))->add(off, double(bend) / 16383.0);
+				pchanges.get(param(129))->add(off, double(bend) / 16383.0);
 			} else if ((st & 0xf0) == 0xc0) {
-				pchanges.get(ParamID(ch * 131 + 130))->add(off, double(b[1]) / 127.0);
+				pchanges.get(param(130))->add(off, double(b[1]) / 127.0);
 			}
 		}
 

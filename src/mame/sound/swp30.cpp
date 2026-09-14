@@ -7,6 +7,7 @@
 #include "swp30.h"
 
 #include <algorithm>
+#include <chrono>
 #include <sstream>
 
 /*
@@ -429,7 +430,9 @@ void swp30_device::streaming_block::read_16(memory_access<25, 2, -2, ENDIANNESS_
 		// 32103210 32103210 32103210
 		// bbbbaaaa ddddcccc ........
 		u32 l0 = wave.read_dword(adr);
-		u32 l1 = wave.read_dword(adr);
+		// S-MU2000: MAME は l1 も adr から読んでいて、後ろの 2 つが前の 2 つの写しになっていた
+		// （doc/upstream.md の 10）
+		u32 l1 = wave.read_dword(adr+1);
 		val0 = l0;
 		val1 = l0 >> 16;
 		val2 = l1;
@@ -668,7 +671,18 @@ void swp30_device::streaming_block::read_8c(memory_access<25, 2, -2, ENDIANNESS_
 {
 	offs_t base_address = m_address & 0x1ffffff;
 	if(m_loop & 0x80000000) {
-		abort();
+		// S-MU2000: MAME はここで abort() して落ちる（MU100 でも同じ。doc/upstream.md の 7）。
+		//
+		// 圧縮したサンプルを逆向きに鳴らす声は ROM に無い。ここに来るのは、発音数がいっぱいのときに
+		// firmware が鳴っている声を取り上げて、次の音のレジスタを 1 つずつ書いている途中の 1 サンプル。
+		// スタンダードキットのタム（逆向きの 16bit サンプル）の start と loop を書いたあと、
+		// address をまだ書いていないと、前の音（圧縮）の address と逆向きの印が混ざる。
+		// 次の書き込みとキーオンで正しい状態に戻るので、その 1 サンプルは直前の値を保つ
+		val0 = m_dpcm_s0;
+		val1 = m_dpcm_s1;
+		val2 = m_dpcm_s2;
+		val3 = m_dpcm_s3;
+		return;
 	} else {
 		s32 spos =  m_dpcm_pos;
 		base_address += spos >> 2;
@@ -755,7 +769,11 @@ std::pair<s16, bool> swp30_device::streaming_block::step(memory_access<25, 2, -2
 				if(m_pos_dec >= 0x8000)
 					m_pos ++;
 				m_pos_dec &= 0x7fff;
-				m_dpcm_pos = 3;
+				// S-MU2000: MAME は 3 に決め打ちしていた（doc/upstream.md の 12）。
+				// 展開は m_pos+3 まで済んでいて、ループの後ろには先頭の 3 つの差分の写しがある。
+				// 1 回で 2 つ進んでループを跨ぐと、済んでいるのは先頭の 1 つ目までなので、
+				// 3 から始めると 2 つ目の差分を落として積算器がずれる。済んだ所の続きから展開する
+				m_dpcm_pos -= m_loop_size;
 			} else {
 				m_done = true;
 				m_last = result;
@@ -1098,9 +1116,15 @@ void swp30_device::filter_block::keyon()
 s32 swp30_device::filter_block::step(s16 input)
 {
 	s32 y0 = 0;
+	// S-MU2000: レゾナンス（b）は、その段の種類がレゾナンス付き（bit 12）のときだけ効く。
+	// MAME は 1 段目の種類で決めた値を 2 段目にも使っていたので、Q 固定のはずの 2 段目
+	// （ギターの 160Hz のハイパスなど）に山ができていた。b を書いた後に種類が変わった
+	// ときも古い値のままだった（doc/upstream.md の 6 番）
+	const s32 p2_1 = BIT(m_filter_1_a, 12) ? m_filter_p2 : 0x80;
+	const s32 p2_2 = BIT(m_filter_2_a, 12) ? m_filter_p2 : 0x80;
 	if(m_filter_1_a & 0x7fff) {
 		if(!BIT(m_filter_1_a, 13)) {
-			m_filter_1_h = (input << 6) - m_filter_1_l - ((s64(m_filter_p2) * m_filter_1_b) >> 7);
+			m_filter_1_h = (input << 6) - m_filter_1_l - ((s64(p2_1) * m_filter_1_b) >> 7);
 			m_filter_1_b = m_filter_1_b + ((s64(m_filter_1_p1) * m_filter_1_h) >> 16);
 			m_filter_1_n = m_filter_1_h + m_filter_1_l;
 			m_filter_1_l = m_filter_1_l + ((s64(m_filter_1_p1) * m_filter_1_b) >> 16);
@@ -1114,13 +1138,13 @@ s32 swp30_device::filter_block::step(s16 input)
 		} else {
 			switch(m_filter_1_a >> 12) {
 			case 0x2: y0 = m_filter_1_y0 + ((s64(m_filter_1_p1) * ((input << 6) - m_filter_1_y0)) >> 16); break;
-			case 0x3: y0 = 2*m_filter_1_y0 - m_filter_1_y1 + ((s64(m_filter_1_p1) * ((input << 6) - m_filter_1_y0)) >> 16) + ((s64(m_filter_p2) * (m_filter_1_y1 - m_filter_1_y0)) >> 7); break;
+			case 0x3: y0 = 2*m_filter_1_y0 - m_filter_1_y1 + ((s64(m_filter_1_p1) * ((input << 6) - m_filter_1_y0)) >> 16) + ((s64(p2_1) * (m_filter_1_y1 - m_filter_1_y0)) >> 7); break;
 			case 0x6: y0 = ((input - m_filter_1_x1) << 6) + m_filter_1_y0 + ((s64(m_filter_1_p1) * (0 - m_filter_1_y0)) >> 16); break;
-			case 0x7: y0 = ((input - m_filter_1_x1) << 6) + 2*m_filter_1_y0 - m_filter_1_y1 + ((s64(m_filter_1_p1) * (0 - m_filter_1_y0)) >> 16) + ((s64(m_filter_p2) * (m_filter_1_y1 - m_filter_1_y0)) >> 7); break;
+			case 0x7: y0 = ((input - m_filter_1_x1) << 6) + 2*m_filter_1_y0 - m_filter_1_y1 + ((s64(m_filter_1_p1) * (0 - m_filter_1_y0)) >> 16) + ((s64(p2_1) * (m_filter_1_y1 - m_filter_1_y0)) >> 7); break;
 			case 0xa: y0 = ((input - 2*m_filter_1_x1 + m_filter_1_x2) << 6) + m_filter_1_y0 + ((s64(m_filter_1_p1) * (0 - m_filter_1_y0)) >> 16); break;
-			case 0xb: y0 = ((input - 2*m_filter_1_x1 + m_filter_1_x2) << 6) + 2*m_filter_1_y0 - m_filter_1_y1 + ((s64(m_filter_1_p1) * (0 - m_filter_1_y0)) >> 16) + ((s64(m_filter_p2) * (m_filter_1_y1 - m_filter_1_y0)) >> 7); break;
+			case 0xb: y0 = ((input - 2*m_filter_1_x1 + m_filter_1_x2) << 6) + 2*m_filter_1_y0 - m_filter_1_y1 + ((s64(m_filter_1_p1) * (0 - m_filter_1_y0)) >> 16) + ((s64(p2_1) * (m_filter_1_y1 - m_filter_1_y0)) >> 7); break;
 			case 0xe: y0 = ((input - 2*m_filter_1_x1 + m_filter_1_x2) << 6) + m_filter_1_y0 + ((s64(m_filter_1_p1) * ((m_filter_1_x1 << 6) - m_filter_1_y0)) >> 16); break;
-			case 0xf: y0 = ((input - 2*m_filter_1_x1 + m_filter_1_x2) << 6) + 2*m_filter_1_y0 - m_filter_1_y1 + ((s64(m_filter_1_p1) * ((m_filter_1_x1 << 6) - m_filter_1_y0)) >> 16) + ((s64(m_filter_p2) * (m_filter_1_y1 - m_filter_1_y0)) >> 7); break;
+			case 0xf: y0 = ((input - 2*m_filter_1_x1 + m_filter_1_x2) << 6) + 2*m_filter_1_y0 - m_filter_1_y1 + ((s64(m_filter_1_p1) * ((m_filter_1_x1 << 6) - m_filter_1_y0)) >> 16) + ((s64(p2_1) * (m_filter_1_y1 - m_filter_1_y0)) >> 7); break;
 			}
 
 			m_filter_1_x2 = m_filter_1_x1;
@@ -1131,7 +1155,7 @@ s32 swp30_device::filter_block::step(s16 input)
 
 		if(m_filter_2_a & 0x7fff) {
 			if(!BIT(m_filter_2_a, 13)) {
-				m_filter_2_h = y0 - m_filter_2_l - ((s64(m_filter_p2) * m_filter_2_b) >> 7);
+				m_filter_2_h = y0 - m_filter_2_l - ((s64(p2_2) * m_filter_2_b) >> 7);
 				m_filter_2_b = m_filter_2_b + ((s64(m_filter_2_p1) * m_filter_2_h) >> 16);
 				m_filter_2_n = m_filter_2_h + m_filter_2_l;
 				m_filter_2_l = m_filter_2_l + ((s64(m_filter_2_p1) * m_filter_2_b) >> 16);
@@ -1146,13 +1170,13 @@ s32 swp30_device::filter_block::step(s16 input)
 				s32 y0_1 = y0;
 				switch(m_filter_2_a >> 12) {
 				case 0x2: y0 = m_filter_2_y0 + ((s64(m_filter_2_p1) * (y0 - m_filter_2_y0)) >> 16); break;
-				case 0x3: y0 = 2*m_filter_2_y0 - m_filter_2_y1 + ((s64(m_filter_2_p1) * (y0 - m_filter_2_y0)) >> 16) + ((s64(m_filter_p2) * (m_filter_2_y1 - m_filter_2_y0)) >> 7); break;
+				case 0x3: y0 = 2*m_filter_2_y0 - m_filter_2_y1 + ((s64(m_filter_2_p1) * (y0 - m_filter_2_y0)) >> 16) + ((s64(p2_2) * (m_filter_2_y1 - m_filter_2_y0)) >> 7); break;
 				case 0x6: y0 = (y0 - m_filter_2_x1) + m_filter_2_y0 + ((s64(m_filter_2_p1) * (0 - m_filter_2_y0)) >> 16); break;
-				case 0x7: y0 = (y0 - m_filter_2_x1) + 2*m_filter_2_y0 - m_filter_2_y1 + ((s64(m_filter_2_p1) * (0 - m_filter_2_y0)) >> 16) + ((s64(m_filter_p2) * (m_filter_2_y1 - m_filter_2_y0)) >> 7); break;
+				case 0x7: y0 = (y0 - m_filter_2_x1) + 2*m_filter_2_y0 - m_filter_2_y1 + ((s64(m_filter_2_p1) * (0 - m_filter_2_y0)) >> 16) + ((s64(p2_2) * (m_filter_2_y1 - m_filter_2_y0)) >> 7); break;
 				case 0xa: y0 = (y0 - 2*m_filter_2_x1 + m_filter_2_x2) + m_filter_2_y0 + ((s64(m_filter_2_p1) * (0 - m_filter_2_y0)) >> 16); break;
-				case 0xb: y0 = (y0 - 2*m_filter_2_x1 + m_filter_2_x2) + 2*m_filter_2_y0 - m_filter_2_y1 + ((s64(m_filter_2_p1) * (0 - m_filter_2_y0)) >> 16) + ((s64(m_filter_p2) * (m_filter_2_y1 - m_filter_2_y0)) >> 7); break;
+				case 0xb: y0 = (y0 - 2*m_filter_2_x1 + m_filter_2_x2) + 2*m_filter_2_y0 - m_filter_2_y1 + ((s64(m_filter_2_p1) * (0 - m_filter_2_y0)) >> 16) + ((s64(p2_2) * (m_filter_2_y1 - m_filter_2_y0)) >> 7); break;
 				case 0xe: y0 = (y0 - 2*m_filter_2_x1 + m_filter_2_x2) + m_filter_2_y0 + ((s64(m_filter_2_p1) * ((m_filter_2_x1 << 6) - m_filter_2_y0)) >> 16); break;
-				case 0xf: y0 = (y0 - 2*m_filter_2_x1 + m_filter_2_x2) + 2*m_filter_2_y0 - m_filter_2_y1 + ((s64(m_filter_2_p1) * ((m_filter_2_x1 << 6) - m_filter_2_y0)) >> 16) + ((s64(m_filter_p2) * (m_filter_2_y1 - m_filter_2_y0)) >> 7); break;
+				case 0xf: y0 = (y0 - 2*m_filter_2_x1 + m_filter_2_x2) + 2*m_filter_2_y0 - m_filter_2_y1 + ((s64(m_filter_2_p1) * ((m_filter_2_x1 << 6) - m_filter_2_y0)) >> 16) + ((s64(p2_2) * (m_filter_2_y1 - m_filter_2_y0)) >> 7); break;
 				}
 
 				m_filter_2_x2 = m_filter_2_x1;
@@ -1221,13 +1245,9 @@ void swp30_device::filter_block::level_2_w(u16 data)
 void swp30_device::filter_block::filter_b_w(u16 data)
 {
 	m_filter_b = data;
-	if(!BIT(m_filter_1_a, 12))
-		m_filter_p2 = 0x80;
-
-	else {
-		u32 p2 = (m_filter_b >> 11) + 4;
-		m_filter_p2 = (0x10 - (p2 & 7)) << (4 - (p2 >> 3));
-	}
+	// S-MU2000: 種類に関係なく b から計算しておき、使うかは step() が段ごとに決める
+	u32 p2 = (m_filter_b >> 11) + 4;
+	m_filter_p2 = (0x10 - (p2 & 7)) << (4 - (p2 >> 3));
 }
 
 
@@ -1658,11 +1678,14 @@ u16 swp30_device::lfo_block::get_amplitude() const
 
 s16 swp30_device::lfo_block::get_pitch() const
 {
-	s32 v = (m_state - 0x400) * m_pitch_depth;
+	// S-MU2000: the 12-bit state is centred on 0x800, not 0x400.  With 0x400
+	// the vibrato sat about half a swing sharp and swung twice as far as the
+	// real MU2000 (measured on hardware: vib rate sweep, doc/upstream.md).
+	s32 v = (m_state - 0x800) * m_pitch_depth;
 	if(m_pitch_mode)
-		return v >> 8;
+		return v >> 9;
 	else
-		return v >> 11;
+		return v >> 12;
 
 }
 
@@ -1670,7 +1693,9 @@ void swp30_device::lfo_block::type_step_pitch_w(u16 data)
 {
 	m_r_type_step_pitch = data;
 	m_type = data >> 14;
-	m_step = (data >> 8) & 0x1f;
+	// S-MU2000: the step is 6 bits.  The firmware sets bit 13 for vibrato rates
+	// above ~72; dropping it turned a fast vibrato into a ~1Hz wobble.
+	m_step = (data >> 8) & 0x3f;
 	m_pitch_mode = data & 0x80;
 	m_pitch_depth = data & 0x7f;
 }
@@ -2172,6 +2197,8 @@ template<int Sel> u16 swp30_device::meg_map_r()
 
 template<int Sel> void swp30_device::meg_map_w(u16 data)
 {
+	// S-MU2000: 番地の解き方は解いた命令表に焼いてあるので、作り直させる
+	m_meg_program_changed = true;
 	m_meg->map_w<Sel>(data);
 }
 
@@ -2285,6 +2312,26 @@ void swp30_device::revram_enable_w(u16 data)
 void swp30_device::revram_clear_w(u16 data)
 {
 	logerror("revram clear = %04x\n", data);
+
+	// S-MU2000: MAME は何もしていなかった（doc/upstream.md の 8）。
+	//
+	// firmware はエフェクトの種類を替えるたびに、enable にビットを立ててから clear に同じビットを
+	// 書く（0002・0004・0008 のように 1 ビットずつ）。ビット i は MEG のメモリ地図 m_map[i] の区画
+	// （先頭 = 下 8 ビット × 1024、長さ = 2 の (10 + 8-10 ビット) 乗）で、書いた時点の地図の区画を
+	// 0 にするものと読んだ。マスターとスレーブで地図が違っても、それぞれの区画に合う。
+	//
+	// 消さないと、前のエフェクトが残した遅延メモリの中身を新しいエフェクトのプログラムが読む。
+	// パフォーマンスを選ぶのと同時に鍵盤を弾くと（Performance 002 Stereo Grand など）、
+	// 残りを読んだ帰還の網が飽和して張り付き、全振幅のまま戻らなかった。実機は普通に鳴る
+	for(int i = 0; i != 8; i++) {
+		if(!BIT(data, i))
+			continue;
+		const u32 base = BIT(m_meg->m_map[i], 0, 8) << 10;
+		const u32 size = 1 << (10 + BIT(m_meg->m_map[i], 8, 3));
+		const u32 end = std::min<u32>(base + size, u32(m_reverb_ram.size()));
+		if(base < end)
+			std::fill(m_reverb_ram.begin() + base, m_reverb_ram.begin() + end, 0);
+	}
 }
 
 u16 swp30_device::revram_status_r()
@@ -2702,7 +2749,10 @@ s32 swp30_device::mixer_att(s32 sample, s32 att)
 {
 	if(att >= 0xff)
 		return 0;
-	return (sample - ((sample * (att & 0xf)) >> 4)) >> (att >> 4);
+	// S-MU2000: 下 4 ビットは 32 分の 1 刻み（1 から 17/32 まで）。MAME は 16 分の 1 と
+	// していたので、0x18 と 0x20 が同じ大きさになり、パンで音量が行き来していた。
+	// 実機で 17 段のパンを測って ±0.1dB で合う（doc/upstream.md の 5 番）
+	return (sample - ((sample * (att & 0xf)) >> 5)) >> (att >> 4);
 }
 
 void swp30_device::mixer_step(const std::array<s32, 0x40> &samples_per_chan)
@@ -3229,6 +3279,29 @@ static inline u32 meg_pack24(s64 p)
 	return u32(s32(q));
 }
 
+// S-MU2000: MEG の分岐（doc/upstream.md の 11）。
+//
+// MAME は「分岐は無い」としていて、bit 0x3f の立った命令を ALU の無い命令として
+// 読み流していた。LO-FI と DYNA FLT/FLANG/PHASE のプログラムにだけ現れる。並びから:
+//
+//   * bit 0x20 の立った命令は、結果（p）が負か、0 かを覚える
+//   * bit 0x3f の立った命令は、bit 0x18-0x1f の条件が合えば、bit 0x10-0x17 の番地
+//     （同じ 256 番地の中）まで、あいだの命令を何もしない命令にする
+//   * 条件: bit 3 が 0 なら必ず。1 なら bit 2 が 1 で負のとき、0 で負でないとき。
+//     bit 1 が立っていれば 0 のときも
+//
+// LO-FI では、振幅を ±m19 で止める 2 か所と、サンプリング周波数を落とす
+// サンプル＆ホールドの間引き、DYNA 系では包絡の最大値の追従と整流がこの形
+static inline bool meg_cond(u8 cond, bool n, bool z)
+{
+	if(!BIT(cond, 3))
+		return true;
+	bool c = BIT(cond, 2) ? n : !n;
+	if(BIT(cond, 1))
+		c = c || z;
+	return c;
+}
+
 void swp30_device::meg_state::step()
 {
 	// S-MU2000: debugger_instruction_hook は削除
@@ -3253,6 +3326,45 @@ void swp30_device::meg_state::step()
 	if(m_memr_active[m_delay_2]) {
 		m_ram_read = m_memr_value[m_delay_2];
 		m_memr_active[m_delay_2] = false;
+	}
+
+	// S-MU2000: 分岐で飛び越している命令は何もしない
+	if(m_swp->m_meg_skip_to) {
+		if(m_pc < m_swp->m_meg_skip_to) {
+			m_mw_reg[m_delay_3] = 0;
+			m_rw_reg[m_delay_3] = 0;
+			m_memw_active[m_delay_2] = false;
+			m_index_active[m_delay_3] = false;
+			m_t_value[m_delay_2] = s16(std::clamp<s64>(m_p >> (15+8), -0x8000, 0x7fff));
+			m_delay_3 = m_delay_3 == 2 ? 0 : m_delay_3 + 1;
+			m_delay_2 ^= 1;
+			m_pc ++;
+			m_icount --;
+			if(m_pc == 0x180)
+				m_pc = 0;
+			return;
+		}
+		m_swp->m_meg_skip_to = 0;
+	}
+	if(BIT(m_program[m_pc], 0x3f)) {
+		const u64 opc = m_program[m_pc];
+		if(meg_cond(BIT(opc, 0x18, 8), m_swp->m_meg_flag_n, m_swp->m_meg_flag_z)) {
+			const u16 target = (m_pc & ~0xff) | BIT(opc, 0x10, 8);
+			if(target > m_pc)
+				m_swp->m_meg_skip_to = target;
+		}
+		m_mw_reg[m_delay_3] = 0;
+		m_rw_reg[m_delay_3] = 0;
+		m_memw_active[m_delay_2] = false;
+		m_index_active[m_delay_3] = false;
+		m_t_value[m_delay_2] = s16(std::clamp<s64>(m_p >> (15+8), -0x8000, 0x7fff));
+		m_delay_3 = m_delay_3 == 2 ? 0 : m_delay_3 + 1;
+		m_delay_2 ^= 1;
+		m_pc ++;
+		m_icount --;
+		if(m_pc == 0x180)
+			m_pc = 0;
+		return;
 	}
 
 	// S-MU2000: 解いておいた形を使う。中身は decode_program() が入れている
@@ -3332,6 +3444,10 @@ void swp30_device::meg_state::step()
 		}
 
 		m_p = r;
+		if(BIT(m_program[m_pc], 0x20)) {
+			m_swp->m_meg_flag_n = r < 0;
+			m_swp->m_meg_flag_z = r == 0;
+		}
 	}
 
 	m_mw_reg[m_delay_3] = dm;
@@ -3447,6 +3563,247 @@ void swp30_device::meg_state::step()
 		m_pc = 0;
 }
 
+// S-MU2000: サンプルの切れ目で、遅れて入る m/r/index の書き込みを流し切る。
+//
+// 書き込みは 3 命令遅れるので、プログラムの最後の 3 命令（0x17d-0x17f）が
+// 書いたものは、そのままだと次のサンプルの 0x000-0x002 で入る。ところが
+// ミキサはその前に m20-m2f へ送りを書き、m20-m3f の出口を読む。TALK MOD は
+// インサーションの出口 m2c/m2d を 0x17e/0x17f で書くので、出口はミキサに
+// 読まれず、次のサンプルの頭で送りを出口の古い値で潰してしまい、音が全く
+// 出なかった（パフォーマンス 017 FeedbackEG など）。ヤマハがこう書いている
+// 以上、実機はサンプルの切れ目で書き込みが済んでからミキサとやり取りする
+// はず（切れ目に空きのクロックがあると見る）。doc/upstream.md の 9
+void swp30_device::meg_state::flush_writes()
+{
+	for(u32 i = 0; i != 3; i++) {
+		const u32 k = (m_delay_3 + i) % 3;
+		if(m_mw_reg[k])
+			m_m[m_mw_reg[k]] = m_mw_value[k];
+		if(m_rw_reg[k])
+			m_r[m_rw_reg[k]] = m_rw_value[k];
+		if(m_index_active[k])
+			m_ram_index = m_index_value[k];
+		m_mw_reg[k] = 0;
+		m_rw_reg[k] = 0;
+		m_index_active[k] = false;
+	}
+}
+
+// S-MU2000: 命令ごとの判定を、プログラムが変わったときに 1 回だけ済ませる。
+// step() が毎回やっていた分岐のうち、プログラムと番地の割り当て（m_map）
+// だけで決まるものをここで解く
+void swp30_device::meg_state::build_ops(op *ops) const
+{
+	for(u32 pc = 0; pc != 0x180; pc++) {
+		const decoded &d = m_decoded[pc];
+		op &o = ops[pc];
+		o = op{};
+		o.alu       = d.mmode != 0;
+		o.mmode     = d.mmode;
+		o.m1_from_t = d.m1t == 1 || d.m1t == 2;
+		o.m1_expand = d.m1_expand;
+		o.m2_from_m = d.m2_from_m;
+		switch(d.asel) {
+		case 0: o.asel = 0; break;
+		case 1: o.asel = d.sr ? 1 : 3; break;
+		case 2: o.asel = d.sm ? 2 : 3; break;
+		case 3: o.asel = 4; break;
+		}
+		o.rop       = d.rop;
+		o.shift     = d.shift == 3 ? 4 : d.shift;
+		o.clamp     = d.clamp;
+		o.sm = d.sm; o.sr = d.sr; o.dm = d.dm; o.dr = d.dr; o.t = d.t;
+		o.dm_src    = d.dm_src;
+		o.no_noise  = d.no_noise;
+		o.dr_from_r = d.dr_from_r;
+		o.memw      = d.memw;
+		o.index     = d.index;
+		o.t_write   = d.t_write;
+		o.t_from_p  = d.t_from_p;
+		o.memop     = d.memop;
+		o.mem_use_index = d.mem_use_index;
+		o.lfo          = pc >> 4;
+		o.offset_index = pc / 3;
+		o.latch  = BIT(m_program[pc], 0x20);
+		o.jump   = BIT(m_program[pc], 0x3f);
+		o.cond   = BIT(m_program[pc], 0x18, 8);
+		o.target = (pc & ~0xff) | BIT(m_program[pc], 0x10, 8);
+
+		// resolve_address() と同じ選び方。i == 7 で必ず止まるので「無し」は無い
+		const u16 key = (pc / 12) << 11;
+		for(int i=0; i != 8; i++)
+			if(i == 7 || m_map[i+1] <= m_map[i] || ((m_map[i+1] & 0xf800) > key)) {
+				o.addr_mask = (1 << (10+BIT(m_map[i], 8, 3))) - 1;
+				o.addr_base = BIT(m_map[i], 0, 8) << 10;
+				break;
+			}
+	}
+}
+
+// S-MU2000: 1 サンプルぶん（384 命令）をまとめて回す。中身は step() と同じ。
+// 384 は 3 でも 2 でも割り切れるので、遅延の輪の位置は回し終えると元に戻る
+void swp30_device::meg_state::run_program(const op *ops)
+{
+	u32 d3 = m_delay_3, d2 = m_delay_2;
+	s64 p = m_p;
+	const u32 sample_counter = m_sample_counter;
+	bool flag_n = m_swp->m_meg_flag_n, flag_z = m_swp->m_meg_flag_z;
+	u32 skip_to = 0;
+
+	for(u32 pc = 0; pc != 0x180; pc++) {
+		const op &o = ops[pc];
+
+		if(m_mw_reg[d3])
+			m_m[m_mw_reg[d3]] = m_mw_value[d3];
+		if(m_rw_reg[d3])
+			m_r[m_rw_reg[d3]] = m_rw_value[d3];
+		if(m_index_active[d3])
+			m_ram_index = m_index_value[d3];
+		if(m_memw_active[d2]) {
+			m_ram_write = m_memw_value[d2];
+			m_memw_active[d2] = false;
+		}
+		if(m_memr_active[d2]) {
+			m_ram_read = m_memr_value[d2];
+			m_memr_active[d2] = false;
+		}
+
+		// S-MU2000: 分岐（step() と同じ）。飛び越す命令と分岐の命令は何もしない
+		if(skip_to && pc >= skip_to)
+			skip_to = 0;
+		if(skip_to || o.jump) {
+			if(!skip_to && meg_cond(o.cond, flag_n, flag_z) && o.target > pc)
+				skip_to = o.target;
+			m_mw_reg[d3] = 0;
+			m_rw_reg[d3] = 0;
+			m_memw_active[d2] = false;
+			m_index_active[d3] = false;
+			m_t_value[d2] = s16(std::clamp<s64>(p >> (15+8), -0x8000, 0x7fff));
+			d3 = d3 == 2 ? 0 : d3 + 1;
+			d2 ^= 1;
+			continue;
+		}
+
+		if(o.alu) {
+			s64 m1 = o.m1_from_t ? m_t[o.t] : m_const[pc];
+			if(o.m1_expand)
+				m1 = m1_expand(m1);
+			s64 m2 = o.m2_from_m ? m_m[o.sm] : m_r[o.sr];
+
+			s64 m;
+			switch(o.mmode) {
+			case 1:  m = m1 << (8+15); break;
+			case 2:  m = m1 * m2; break;
+			default: m = m2 << 15; break;
+			}
+
+			s64 a;
+			switch(o.asel) {
+			case 0:  a = p; break;
+			case 1:  a = s64(m_r[o.sr]) << 15; break;
+			case 2:  a = s64(m_m[o.sm]) << 15; break;
+			case 3:  a = p >> 15; break;
+			default: a = 0; break;
+			}
+
+			s64 r;
+			switch(o.rop) {
+			case 0:  r = m + a; break;
+			case 1:  r = m - a; break;
+			case 2:  r = m + (a < 0 ? -a : a); break;
+			default: r = m & a; break;
+			}
+
+			r <<= o.shift;
+			r = util::sext(r, 42);
+
+			switch(o.clamp) {
+			case 0:  break;
+			case 1:  r = std::clamp<s64>(r, -0x4000000000, 0x3fffffffff); break;
+			case 2:  r = std::clamp<s64>(r, 0, 0x3fffffffff); break;
+			default: r = std::min<s64>(r < 0 ? -r : r, 0x3fffffffff); break;
+			}
+			p = r;
+			if(o.latch) {
+				flag_n = r < 0;
+				flag_z = r == 0;
+			}
+		}
+
+		m_mw_reg[d3] = o.dm;
+		if(o.dm) {
+			u32 v;
+			switch(o.dm_src) {
+			case 0: case 1: case 2: case 3:
+				v = get_lfo(o.lfo);
+				break;
+			case 4: v = m_ram_read; break;
+			case 5: v = m_swp->rand() & 0xffffff; if(v & 0x00800000) v |= 0xff000000; break;
+			case 6: {
+				s64 q = p;
+				if(!o.no_noise)
+					q += m_swp->rand() & 0x07e0;
+				v = meg_pack24(q);
+				break;
+			}
+			default: v = m_m[o.sm]; break;
+			}
+			m_mw_value[d3] = v;
+		}
+
+		m_rw_reg[d3] = o.dr;
+		if(o.dr) {
+			u32 v;
+			if(o.dr_from_r)
+				v = m_r[o.sr];
+			else {
+				s64 q = p;
+				if(!o.no_noise)
+					q += m_swp->rand() & 0x07e0;
+				v = meg_pack24(q);
+			}
+			m_rw_value[d3] = v;
+		}
+
+		m_memw_active[d2] = o.memw;
+		if(o.memw)
+			m_memw_value[d2] = p >> 15;
+
+		m_index_active[d3] = o.index;
+		if(o.index)
+			m_index_value[d3] = p >> (15+8);
+
+		if(o.t_write)
+			m_t[o.t] = o.t_from_p ? m_t_value[d2] : m_const[pc];
+		m_t_value[d2] = o.index ? s16((p >> 8) & 0x7fff)
+		                        : s16(std::clamp<s64>(p >> (15+8), -0x8000, 0x7fff));
+
+		if(o.memop) {
+			u32 off = u32(m_offset[o.offset_index]) + u32(o.mem_use_index ? m_ram_index : 0) - sample_counter;
+			if(o.memop == 3)
+				off += 1;
+			const u32 address = ((off & o.addr_mask) + o.addr_base) & 0x3ffff;
+			if(o.memop == 1)
+				m_swp->m_reverb_ram[address] = revram_encode(m_ram_write);
+			else {
+				m_memr_value[d2] = revram_decode(m_swp->m_reverb_ram[address]);
+				m_memr_active[d2] = true;
+			}
+		}
+
+		d3 = d3 == 2 ? 0 : d3 + 1;
+		d2 ^= 1;
+	}
+
+	m_p = p;
+	m_delay_3 = d3;
+	m_delay_2 = d2;
+	m_swp->m_meg_flag_n = flag_n;
+	m_swp->m_meg_flag_z = flag_z;
+	m_pc = 0;
+	m_icount -= 0x180;
+}
+
 // S-MU2000: execute_run() を run_sample() に置き換えた。
 // もとは MAME のスケジューラが m_icount 分だけ回す作りだった。
 // ここではホストが「1 サンプルくれ」と呼ぶ形にする。DRC は使わない。
@@ -3454,14 +3811,28 @@ void swp30_device::meg_state::step()
 // 1 サンプル = sample_step() 1 回 + MEG のプログラム 384 ステップ。
 void swp30_device::run_sample(s32 &left, s32 &right)
 {
-	if(m_meg_program_changed) {
+	if(m_meg_program_changed || m_meg_ops_stale) {
 		m_meg->decode_program();
+		m_meg->build_ops(m_meg_ops.data());
 		m_meg_program_changed = false;
+		m_meg_ops_stale = false;
+		meg_jit_rebuild();
 	}
 
 	sample_step();
-	for(int i = 0; i != 384; i++)
-		m_meg->step();
+	if(m_dbg_meg) {
+		// S-MU2000: 1 命令ずつ追うときは元の step() で回す
+		for(int i = 0; i != 384; i++)
+			m_meg->step();
+	} else if(m_profile) {
+		// S-MU2000: MEG だけの時間を測る（blocktime が使う）
+		const auto t0 = std::chrono::steady_clock::now();
+		if(!meg_jit_run())
+			m_meg->run_program(m_meg_ops.data());
+		m_t_meg += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count());
+	} else if(!meg_jit_run())
+		// S-MU2000: 機械語にできていれば、そちらで回す（swp30_jit.cpp）
+		m_meg->run_program(m_meg_ops.data());
 
 	// sound_stream_update() がやっていたことをここで行う。
 	// DAC は出力 0-3 の先頭 2 本。scale は 1<<17。
@@ -3514,6 +3885,8 @@ void swp30_device::dump_meg(const char *path)
 
 void swp30_device::sample_step()
 {
+	m_meg->flush_writes();
+
 	// S-MU2000: MEG の m レジスタ 0x20-0x3f を毎サンプル書き出す（--dump-dac）。
 	// **混ぜる前**なので、ここに出るのは MEG が 384 段回し終わった直後の姿、
 	// つまりエフェクトの出口。次の行の mixer_step が 0x20-0x2f を
@@ -3607,6 +3980,8 @@ void swp30_device::state(state_io &s)
 		m_meg->m_swp = keep;
 	}
 	s.v(m_meg_program_changed);
+	if (!s.writing())
+		m_meg_ops_stale = true;
 
 	s.v(m_sample_counter);
 	s.v(m_wave_adr); s.v(m_wave_size); s.v(m_wave_val);

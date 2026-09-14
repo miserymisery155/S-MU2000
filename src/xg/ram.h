@@ -1,0 +1,109 @@
+// license:BSD-3-Clause
+//
+// XG の値が firmware のワーク RAM（0x400000-0x43ffff）のどこにあるか。
+//
+// 画面は MU2000 に問い合わせずに、ここを読んで値を出す（doc/params.md の「RAM から読む」）。
+// 問い合わせ（ダンプ要求）は MIDI IN に入るので、LCD の受信マークが点きっぱなしになる。
+// RAM なら何も流さずに、曲・SysEx・パネル操作のどれで変わった値も見える。
+//
+// 番地は、1 項目ずつパラメータチェンジで書いて RAM の変わった所を探して決めた。
+// 塊の中の並びは XG の番地そのまま。xgtest.exe が全項目を一括ダンプと突き合わせる。
+
+#ifndef S_MU2000_XG_RAM_H
+#define S_MU2000_XG_RAM_H
+
+#pragma once
+
+#include "xg/model.h"
+
+namespace xg {
+namespace ram {
+
+// ワーク RAM の先頭（0x400000）からの位置
+constexpr u32 SYSTEM   = 0x226c1;   // 00 00 00-06
+constexpr u32 VOICE_MODE = 0x226bc; // 音色の引き方（1 が XG）。xg/voices.h の lookup に渡す
+constexpr u32 VOICE_SET  = 0x226de; // 音色の組の選び方（MU2000 の音色なら 1）
+constexpr u32 EFFECT   = 0x0cad8;   // 02 01 00 から。下の EFFECTS の並び
+constexpr u32 EFFECT_SIZE = 0x16b;  // 02 01 00 からマスター EQ の終わりまで
+// パートの塊は PART_STRIDE ずつ並ぶが、**並びは XG のパート番号の順ではない**。
+// 口ごとに「10 番目のパート（ch10）が先頭、残りが 1-9, 11-16」の固定の順（ドラムかどうかに
+// よらない。パートを DRUM にしても並びは変わらなかった）
+constexpr u32 PARTS    = 0x28d64;   // 並びの先頭（パート 10 の塊）
+constexpr u32 PART_STRIDE = 0x134;
+
+// XG のパート番号（0-31）から、塊の先頭
+constexpr u32 part_base(int part)
+{
+	const int port = part / 16, k = part % 16;
+	const int slot = k == 9 ? 0 : k < 9 ? k + 1 : k;
+	return PARTS + u32(port * 16 + slot) * PART_STRIDE;
+}
+constexpr u32 PART_XG_SIZE = 0x29;  // 08 pp 00-28
+// パートの EQ（08 pp 72-77）は塊の +0x6A から。XG の番地から 8 引いた所
+constexpr u32 PART_EQ_XG   = 0x72;
+constexpr u32 PART_EQ_RAM  = 0x6a;
+constexpr u32 PART_EQ_SIZE = 6;
+
+// パートの塊の中の、XG に番地の無い演奏中の値
+constexpr u32 PART_MOD  = 0x7d;     // CC1
+constexpr u32 PART_EXP  = 0x7e;     // CC11
+constexpr u32 PART_BEND = 0x80;     // ピッチベンドの MSB の半分（0x20 が真ん中）
+constexpr u32 PART_HOLD = 0xd9;     // CC64。0 か 1
+constexpr u32 PART_VOICE = 0xf8;    // 選んでいる音色の記録を指す値（ROM の中。xg/voices.h）
+constexpr u32 PART_COPY = 0x100;    // 画面へ写す長さ（上の全部を含む）
+
+// エフェクトの塊。xg は XG の番地の先頭、ram はワーク RAM での先頭
+struct block { u8 hi, mid, lo; u32 size; u32 ram; };
+
+constexpr block EFFECTS[] = {
+	{ 0x02, 0x01, 0x00, 0x14, 0x0cad8 },   // リバーブ
+	{ 0x02, 0x01, 0x20, 0x14, 0x0caec },   // コーラス
+	{ 0x02, 0x01, 0x40, 0x1c, 0x0cb02 },   // バリエーション
+	// インサーションは 03 0n 00-11 がそのまま並び、そのあとに 20-25（パラメータ 11-16）が
+	// 詰めて続く。1 つずつ書いて RAM の変わった所で確かめた。
+	// パラメータ 1-10 の 2 バイトの番地（30-43）は、+0x18 から 16bit の数で 10 個並ぶ
+	// （7bit ずつではないので、この表には入れない。INS_WIDE を見よ）
+	{ 0x03, 0x00, 0x00, 0x12, 0x0cb7e },   // インサーション 1
+	{ 0x03, 0x00, 0x20, 0x06, 0x0cb90 },
+	{ 0x03, 0x01, 0x00, 0x12, 0x0cbaa },   // インサーション 2
+	{ 0x03, 0x01, 0x20, 0x06, 0x0cbbc },
+	{ 0x03, 0x02, 0x00, 0x12, 0x0cbd6 },   // インサーション 3
+	{ 0x03, 0x02, 0x20, 0x06, 0x0cbe8 },
+	{ 0x03, 0x03, 0x00, 0x12, 0x0cc02 },   // インサーション 4
+	{ 0x03, 0x03, 0x20, 0x06, 0x0cc14 },
+	{ 0x02, 0x40, 0x00, 0x15, 0x0cc2e },   // マスター EQ（02 40 00-14）
+};
+
+// インサーション n（0-3）の塊の先頭と、そこからパラメータ 1-10 の 16bit の数（上位バイトが先）の位置
+constexpr u32 INS_BLOCK[4] = { 0x0cb7e, 0x0cbaa, 0x0cbd6, 0x0cc02 };
+constexpr u32 INS_WIDE = 0x18;
+
+// XG の番地から、ワーク RAM での位置。無ければ false
+inline bool locate(u32 addr, u32 &off)
+{
+	const u8 hi = u8(addr >> 14), mid = u8((addr >> 7) & 0x7f), lo = u8(addr & 0x7f);
+	if (hi == 0x00 && mid == 0x00 && lo < 7) {
+		off = SYSTEM + lo;
+		return true;
+	}
+	if (hi == 0x08 && mid < 32 && lo < PART_XG_SIZE) {
+		off = part_base(mid) + lo;
+		return true;
+	}
+	if (hi == 0x08 && mid < 32 && lo >= PART_EQ_XG && lo < PART_EQ_XG + PART_EQ_SIZE) {
+		off = part_base(mid) + PART_EQ_RAM + (lo - PART_EQ_XG);
+		return true;
+	}
+	for (const block &b : EFFECTS) {
+		if (hi == b.hi && mid == b.mid && lo >= b.lo && lo < b.lo + b.size) {
+			off = b.ram + (lo - b.lo);
+			return true;
+		}
+	}
+	return false;
+}
+
+} // namespace ram
+} // namespace xg
+
+#endif // S_MU2000_XG_RAM_H
