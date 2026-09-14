@@ -52,7 +52,7 @@ glyph(0xCF, ["##.##", "##.##", "##.##", "##.##", "##.##", "##.##", "##.##", "##.
 
 # ---- sin テーブル
 N = 0x8000
-(OUT / "sin-table.bin").write_bytes(struct.pack("<%dH" % N, *(min(65535, round(math.sin((i + .5) / N * math.pi / 2) * 65535)) for i in range(N))))
+(OUT / "sin-table.bin").write_bytes(struct.pack("<%dH" % N, *(min(65535, round(0x8000 + math.sin((i + .5) / N * math.pi / 2) * 0x7fff)) for i in range(N))))
 
 # ---- LCD SVG
 W, H = 1280, 386

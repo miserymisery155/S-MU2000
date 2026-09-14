@@ -5,6 +5,7 @@
 #include "mu2000.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -230,6 +231,13 @@ bool mu2000::load_sintab(const std::string &path)
 	auto rom = std::make_shared<std::vector<u16>>(raw.size() / 2);
 	for (size_t i = 0; i < rom->size(); i++)
 		(*rom)[i] = u16(raw[i * 2] | (raw[i * 2 + 1] << 8));
+	// 表は 1/4 周期を 0x8000（中心）から 0xffff（山）まで持つ形。MEG は後ろ半周期を ^0xffff で作るので、
+	// 0 から始まる表だと山と谷の境目で値が 0 と 0xffff の間を跳び、深いコーラス（CELESTE・SYMPHONIC・CHORUS 3）に
+	// 雑音が乗っていた。前の make_standins.py が作った 0 始まりの代替品は、ここで中心から始まる形に作り直す
+	if (rom->size() == 0x8000 && (*rom)[0] < 0x4000) {
+		for (size_t i = 0; i < rom->size(); i++)
+			(*rom)[i] = u16(std::min(65535.0, std::round(0x8000 + std::sin((i + 0.5) / 0x8000 * 3.14159265358979323846 / 2) * 0x7fff)));
+	}
 	set_sintab_rom(std::move(rom));
 	return true;
 }
