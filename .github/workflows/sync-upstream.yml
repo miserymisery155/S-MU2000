@@ -1,13 +1,13 @@
-
 name: Sync fork with upstream
 
 on:
   schedule:
-    - cron: '0 * * * *'
+    - cron: '0 * * * *'   # every hour
   workflow_dispatch:
 
 permissions:
   contents: write
+  issues: write
 
 jobs:
   sync:
@@ -16,7 +16,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: main
+          ref: main   # confirm this matches your fork's default branch
 
       - name: Add upstream remote
         run: git remote add upstream https://github.com/tarboh/S-MU2000.git
@@ -24,11 +24,39 @@ jobs:
       - name: Fetch upstream
         run: git fetch upstream
 
-      - name: Merge upstream changes (fast-forward only)
+      - name: Attempt merge
+        id: merge
+        continue-on-error: true
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git merge upstream/main --ff-only
+          git merge upstream/main --no-edit
 
       - name: Push changes
+        if: steps.merge.outcome == 'success'
         run: git push origin main
+
+      - name: Abort failed merge
+        if: steps.merge.outcome == 'failure'
+        run: git merge --abort
+
+      - name: Open issue on conflict
+        if: steps.merge.outcome == 'failure'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'sync-conflict'
+            });
+            if (issues.length === 0) {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: 'Upstream sync failed: merge conflict',
+                body: `The automatic sync from [tarboh/S-MU2000](https://github.com/tarboh/S-MU2000) failed due to a merge conflict.\n\nRun: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}\n\nTo fix manually:\n\`\`\`\ngit fetch upstream\ngit merge upstream/main\n# resolve conflicts\ngit push origin main\n\`\`\``,
+                labels: ['sync-conflict']
+              });
+            }
