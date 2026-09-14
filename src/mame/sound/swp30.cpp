@@ -2328,8 +2328,11 @@ u32 swp30_device::meg_state::revram_decode(u16 v)
 	u32 s = (v >> 11) & 1;
 	u32 m = v & 0x7ff;
 	u32 vb = e ? (m | 0x800) << (e-1) : m;
+	// S-MU2000: MAME は e = 0 の負の値を 0xffffffe0 で反転していて、下の 5bit が反転されなかった。
+	// -1 を詰めて戻すと -32 になり、リバーブの尾に小さな負の値が膨らんで残る。詰め方（revram_encode）の
+	// ちょうど逆になるよう全部反転する（doc/upstream.md の 18）
 	if(s)
-		vb ^= e ? (0xffffffff << (e-1)) & 0xffffffff : 0xffffffe0;
+		vb ^= e ? (0xffffffff << (e-1)) & 0xffffffff : 0xffffffff;
 	return vb;
 }
 
@@ -3382,7 +3385,9 @@ void swp30_device::meg_state::decode_program()
 // 出力が符号ごと裏返り、直流だけが残っていた。
 static inline u32 meg_pack24(s64 p)
 {
-	s64 q = p >> 15;
+	// S-MU2000: 0 の側へ切り捨てる。負の無限大の側（>> 15）だと、音が止んだあとも IIR の段が
+	// 1 LSB ずつの行き来を続け、-66dB の雑音と直流が残る。実機は数秒でぴったり 0 になる（doc/upstream.md の 18）
+	s64 q = p / 32768;
 	if(q >  0x7fffff) q =  0x7fffff;
 	if(q < -0x800000) q = -0x800000;
 	return u32(s32(q));

@@ -110,7 +110,7 @@ void emit_revram_decode(assembler &a)
 	a.shl32cl(RDX);
 	const size_t join = a.jmp_fwd();
 	a.patch(e0);
-	a.imm32(RDX, 0xffffffe0);
+	a.imm32(RDX, 0xffffffff);
 	a.patch(join);
 	a.test32ri(R8, 0x800);
 	const size_t no_sign = a.jcc_fwd(0x84);
@@ -307,6 +307,11 @@ bool swp30_device::meg_jit::build(meg_state &ms, const meg_state::op *ops, swp30
 
 	// p を 24bit に詰める（meg_pack24）。入力 rax、出力 eax
 	const auto pack24 = [&]() {
+		// meg_pack24 と同じく 0 の側へ切り捨てる（負なら 0x7fff を足してから右へ）
+		a.mov64(RCX, RAX);
+		a.sar64(RCX, 63);
+		a.and32i(RCX, 0x7fff);
+		a.add64(RAX, RCX);
 		a.sar64(RAX, 15);
 		a.imm64(RCX, u64(s64(-0x800000)));
 		a.cmp64(RAX, RCX);
