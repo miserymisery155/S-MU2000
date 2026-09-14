@@ -149,6 +149,10 @@ public:
 	static constexpr s32 DAC_FULL_SCALE = 1 << 17;
 	void run_sample(s32 &left, s32 &right);
 
+	// A/D INPUT に入れる音。次の run_sample の 1 サンプルぶんで、16bit の目盛り（±32768 が全振幅）。
+	// 左が AD1、右が AD2。今はサンプリングの録音にだけ使う（録るのは AD1。入力の切り替えはまだ無い）
+	void set_audio_input(s32 ad1, s32 ad2) { m_ad_in[0] = ad1; m_ad_in[1] = ad2; }
+
 	sh7043a_device &cpu()  { return *m_cpu; }
 	swp30_device   &swpm() { return m_swpm; }
 	swp30_device   &swps() { return m_swps; }
@@ -213,7 +217,8 @@ private:
 	std::vector<u8>  m_ram;         // ワーク RAM  0x400000-0x43ffff
 	std::vector<u8>  m_dram;        // DRAM        0x1000000-0x107ffff
 	std::vector<u8>  m_iram;        // CPU 内蔵    0xfffff000-0xffffffff
-	std::vector<u8>  m_sampram;     // SWP30 のサンプリング RAM
+	std::vector<u8>  m_sampram;     // SWP30 のサンプリング RAM（4MB、SWP30 から見て 0x1000000 語目から）
+	s32 m_ad_in[2] = {};            // A/D INPUT（set_audio_input）
 
 	// パネルまわり。音そのものには関わらないが、firmware は起動時に触る。
 	// LCD は「要らない」ように見えて必要だった。firmware は初期化のたびに

@@ -1994,6 +1994,7 @@ u16 swp30_device::read16(offs_t addr)
 	case 0x0cf: return wave_size_r<0>();
 	case 0x10e: return wave_access_r();
 	case 0x10f: return wave_busy_r();
+	case 0x30f: return u16(m_rec_pos);
 	case 0x14e: return wave_val_r<1>();
 	case 0x14f: return wave_val_r<0>();
 	case 0x18e: return keyon_mask_r<3>();
@@ -2096,6 +2097,7 @@ void swp30_device::write16(offs_t addr, u16 data)
 	case 0x0ce: wave_size_w<1>(data); return;
 	case 0x0cf: wave_size_w<0>(data); return;
 	case 0x10e: wave_access_w(data); return;
+	case 0x30e: m_rec_ctrl = data; return;
 	case 0x14e: wave_val_w<1>(data); return;
 	case 0x14f: wave_val_w<0>(data); return;
 	case 0x18e: keyon_mask_w<3>(data); return;
@@ -2280,6 +2282,9 @@ void swp30_device::wave_access_w(u16 data)
 {
 	m_wave_access = data;
 	logerror("wave_access_w %04x\n", m_wave_access);
+	// S-MU2000: 0x7000 は録音（sample_step）。位置は 0 から数え直す
+	if(data == 0x7000)
+		m_rec_pos = 0;
 	if(data == 0x8000) {
 		m_wave_val = m_wave_cache.read_dword(m_wave_adr);
 		logerror("wave read adr=%08x size=%08x -> %08x\n", m_wave_adr, m_wave_size, m_wave_val);
@@ -4066,6 +4071,23 @@ void swp30_device::sample_step()
 {
 	m_meg->flush_writes();
 
+	// S-MU2000: サンプリングの録音。firmware は録音を始めるとき、スレーブに番地（サンプリング RAM の先頭
+	// 0x1000000）と長さ（語数）を書いてから、波形アクセスに 0x7000 を書く。あとは 0x30f（書いた位置の下 16bit）と
+	// 0x10f の bit 14（書き終わり）を見続け、止めるときにアクセスを 0 に戻す。
+	// 1 サンプルごとに A/D 入力を 16bit で書く。32bit の語 1 つに 2 サンプル（下の 16bit が先）で、
+	// 声が 16bit のサンプルを読むとき（streaming_block::read_16）と同じ並び
+	if(m_wave_access == 0x7000 && m_wave_size) {
+		const u16 v = u16(std::clamp<s32>(m_adc_in, -0x8000, 0x7fff));
+		u32 w = m_wave_cache.read_dword(m_wave_adr);
+		w = (m_rec_pos & 1) ? ((w & 0x0000ffff) | (u32(v) << 16)) : ((w & 0xffff0000) | v);
+		m_wave_cache.write_dword(m_wave_adr, w);
+		m_rec_pos++;
+		if(!(m_rec_pos & 1)) {
+			m_wave_adr++;
+			m_wave_size--;
+		}
+	}
+
 	// S-MU2000: MEG の m レジスタ 0x20-0x3f を毎サンプル書き出す（--dump-dac）。
 	// **混ぜる前**なので、ここに出るのは MEG が 384 段回し終わった直後の姿、
 	// つまりエフェクトの出口。次の行の mixer_step が 0x20-0x2f を
@@ -4168,6 +4190,12 @@ void swp30_device::state(state_io &s)
 	s.v(m_revram_adr); s.v(m_revram_data);
 	s.v(m_wave_access); s.v(m_revram_enable);
 	s.v(m_keyon_mask); s.v(m_internal_adr);
+	// 版 4 から: サンプリングの録音の位置
+	if(s.version() >= 4) {
+		s.v(m_rec_pos); s.v(m_rec_ctrl);
+	} else if(!s.writing()) {
+		m_rec_pos = 0; m_rec_ctrl = 0;
+	}
 	// 版 3 から: ピッチ EG（スロット 0x0B と 0x10、今の値、着いた印）。版 2 の状態には無いので 0 にする
 	if(s.version() >= 3) {
 		s.stdarr(m_pitch_offset);

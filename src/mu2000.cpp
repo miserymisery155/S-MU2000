@@ -63,6 +63,8 @@ mu2000::mu2000()
 	m_dram.assign(0x80000, 0);       // 512KB
 	m_iram.assign(0x1000, 0);        // CPU 内蔵 4KB
 	m_sampram.assign(0x400000, 0);   // SWP30 のサンプリング RAM
+	m_swpm.set_sample_ram(m_sampram.data(), m_sampram.size());
+	m_swps.set_sample_ram(m_sampram.data(), m_sampram.size());
 
 	build_bus();
 }
@@ -769,6 +771,10 @@ void mu2000::run_sample(s32 &left, s32 &right)
 
 	run_cycles(cycles);
 
+	// A/D 入力。firmware はスレーブで録音する（どちらのチップにも同じものを入れておく）
+	m_swpm.set_adc_input(m_ad_in[0]);
+	m_swps.set_adc_input(m_ad_in[0]);
+
 	if (m_profile) {
 		QueryPerformanceCounter(&pt1);
 		m_t_cpu += u64(pt1.QuadPart - pt0.QuadPart);
@@ -827,7 +833,7 @@ namespace {
 
 // 保存の形。中身の並びを変えたら上げる
 constexpr u32 STATE_MAGIC   = 0x554d3253;   // "S2MU"
-constexpr u32 STATE_VERSION = 3;   // 2: MIDI の入口が A/B の 2 口になった / 3: SWP30 のピッチ EG
+constexpr u32 STATE_VERSION = 4;   // 2: MIDI の入口が A/B の 2 口になった / 3: SWP30 のピッチ EG / 4: サンプリングの録音の位置
 constexpr u32 STATE_VERSION_OLDEST = 2;
 
 } // namespace

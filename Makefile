@@ -85,6 +85,11 @@ $(BUILD)/render.exe: $(OBJS) $(BUILD)/src/mu2000.o $(BUILD)/src/smf.o $(BUILD)/s
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
 
+# samptest はサンプリング（録音して試聴する）が一回りするかを確かめる
+$(BUILD)/samptest.exe: $(OBJS) $(BUILD)/src/mu2000.o $(BUILD)/src/samptest.o
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
+
 # statetest は状態の保存と復元が正しいかを確かめる
 $(BUILD)/statetest.exe: $(OBJS) $(BUILD)/src/mu2000.o $(BUILD)/src/smf.o $(BUILD)/src/statetest.o
 	@mkdir -p $(dir $@)
@@ -203,7 +208,7 @@ regen:
 #   make test                     全部
 #   make test T=piano             1 件だけ
 #   make test-update              指紋を焼き直す（意図して音を変えたとき）
-TEST_EXES := $(BUILD)/verify.exe $(BUILD)/statetest.exe $(BUILD)/render.exe $(BUILD)/xgtest.exe
+TEST_EXES := $(BUILD)/verify.exe $(BUILD)/statetest.exe $(BUILD)/render.exe $(BUILD)/xgtest.exe $(BUILD)/samptest.exe
 
 test: $(TEST_EXES)
 	$(PYTHON) tools/run_tests.py $(if $(T),--only $(T),)

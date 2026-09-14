@@ -32,6 +32,10 @@ public:
 
 	// 外から与えるメモリ
 	void set_wave_rom(const void *base, size_t bytes);
+	// S-MU2000: サンプリング RAM（SWP30 から見て 0x1000000 語目から。2 チップで同じ物を共有する）
+	void set_sample_ram(u8 *base, size_t bytes) { m_wave_cache.set_overlay(base, 0x1000000, bytes >> 2); }
+	// S-MU2000: A/D 入力の 1 サンプル（16bit の目盛り）。録音（波形アクセス 0x7000）のときに書き込む
+	void set_adc_input(s32 v) { m_adc_in = v; }
 	void set_sintab(const u16 *base, size_t count);
 
 	void reset();
@@ -478,6 +482,12 @@ private:
 	// S-MU2000: 分岐のあるプログラムを JIT で回すときの「この命令の手前まで飛ばす」位置（0 なら飛ばさない）。
 	// 1 サンプルの中だけで使う。保存しない
 	u32 m_meg_jit_skip = 0;
+	// S-MU2000: サンプリング。m_adc_in は毎サンプル外から入れる（保存しない）。
+	// m_rec_pos は録音を始めてから書いた 16bit のサンプル数（0x30f で下の 16bit が読める）、
+	// m_rec_ctrl は 0x30e に書かれた値（意味はまだ分からない。firmware は 0x001f を書く）
+	s32 m_adc_in = 0;
+	u32 m_rec_pos = 0;
+	u16 m_rec_ctrl = 0;
 	// S-MU2000: プログラムか番地が書かれてから数えたサンプル数（0 なら JIT の作り直しを待っていない）。保存しない
 	u32 m_meg_jit_wait = 0;
 

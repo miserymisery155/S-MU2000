@@ -137,7 +137,21 @@ public:
 
 	u32 read_dword(offs_t addr) const
 	{
+		if (u32(addr - m_ov_from) < m_ov_units) {
+			u32 v;
+			std::memcpy(&v, m_ov + (size_t(addr - m_ov_from) << (-AddrShift)), 4);
+			return v;
+		}
 		return read_at<u32>(offset_of(addr, 4));
+	}
+
+	// S-MU2000: 番地 from から units 個ぶんを、別の書ける領域に差し替える（SWP30 のサンプリング RAM）。
+	// 読み出し（read_dword）と書き込み（write_dword）の両方がこちらを使う
+	void set_overlay(u8 *base, offs_t from, size_t units)
+	{
+		m_ov = base;
+		m_ov_from = from;
+		m_ov_units = base ? u32(units) : 0;
 	}
 
 	u64 read_qword(offs_t addr) const
@@ -159,6 +173,10 @@ public:
 
 	void write_dword(offs_t addr, u32 data)
 	{
+		if (u32(addr - m_ov_from) < m_ov_units) {
+			std::memcpy(m_ov + (size_t(addr - m_ov_from) << (-AddrShift)), &data, 4);
+			return;
+		}
 		if (m_write) std::memcpy(m_write + offset_of(addr, 4), &data, 4);
 	}
 
@@ -189,6 +207,9 @@ private:
 	size_t    m_bytes = 0;
 	size_t    m_mask  = 0;
 	bool      m_pow2  = false;
+	u8       *m_ov    = nullptr;
+	offs_t    m_ov_from  = 0;
+	u32       m_ov_units = 0;
 };
 
 // ---- MAME の小物 ------------------------------------------------------------
