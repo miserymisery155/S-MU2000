@@ -649,13 +649,13 @@ void swp30_device::streaming_block::dpcm_step(u8 input)
 		acc -= s32((s64(acc) * 3) >> 7);
 	s32 sample = acc + (delta << scale);
 
-	if(sample < -0x8000) {
+	// S-MU2000: MAME は上限に当たると差分を 0 にしていた。そうすると次のサンプルから波形が崩れ、
+	// ループのたびに雑音が出る（XG の Flute の高い音、doc/upstream.md の 17）。上限で切り詰めるだけにする。
+	// 案は MUXG2K の hockinsk さん（issue #3）
+	if(sample < -0x8000)
 		sample = -0x8000;
-		delta = 0;
-	} else if(sample > limit) {
+	else if(sample > limit)
 		sample = limit;
-		delta = 0;
-	}
 	m_dpcm_s3 = sample;
 
 	switch(mode) {
@@ -1763,7 +1763,7 @@ void swp30_device::awm2_step(std::array<s32, 0x40> &samples_per_chan)
 
 		auto &lfo = m_lfo[chan];
 
-		auto [sample1, trigger_release] = m_streaming[chan].step(m_wave_cache, lfo.get_pitch(), (m_pitch_offset[chan] & 0x4000) ? u16(m_peg_cur[chan] & 0x3fff) : 0);
+		auto [sample1, trigger_release] = m_streaming[chan].step(m_wave_cache, lfo.get_pitch(), u16(m_peg_cur[chan] & 0x3fff));
 		if(trigger_release)
 			m_envelope[chan].trigger_release();
 
@@ -2412,7 +2412,7 @@ void swp30_device::pitch_w(offs_t offset, u16 data)
 
 // S-MU2000: チップの中のピッチ EG（doc/upstream.md の 13）。MAME はスロット 0x0B と 0x10 を読み捨てていた。
 // スロット 0x10 は目標で、下の 14bit が符号付き、ピッチ（スロット 0x11）と同じ目盛り。
-// bit 14 が立っているときだけピッチに足す（立っていない声に足すと実機と合わない）。
+// bit 14 が何の印かは分かっていない。立っていなくても足す（doc/upstream.md の 13 の追記）。
 // firmware はキーオンの前に初めのレベルを書き、キーオン後に段ごとの目標と速さを書いて、
 // 着いた印（内部ポート 4 の bit 14）を見て次の段へ進む（0x12B81C）
 u16 swp30_device::pitch_offset_r(offs_t offset)
