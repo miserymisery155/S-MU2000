@@ -4,16 +4,22 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+  workflow_run:
+    workflows: ["Sync fork with upstream"]
+    types: [completed]
 
 jobs:
   build:
     runs-on: windows-latest
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
     defaults:
       run:
         shell: msys2 {0}
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_branch || github.ref }}
 
       - name: Set up MSYS2 (MinGW-w64)
         uses: msys2/setup-msys2@v2
