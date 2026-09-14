@@ -30,5 +30,9 @@ int main()
 	std::printf("乱数 1〜3 個目:");
 	for (int i = 0; i < 3; i++) std::printf(" %08x", swp.machine().rand());
 	std::printf("\n");
+
+	// MEG の JIT が機械語で書いたリバーブ RAM の詰め方・戻し方と係数の広げ方（m1_expand）が、C++ の関数と全部の入力で同じか
+	std::printf("MEG の JIT のリバーブ RAM の詰め方と戻し方・係数の広げ方: 食い違い %llu\n",
+	            (unsigned long long)swp30_device::meg_jit_selftest());
 	return 0;
 }

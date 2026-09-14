@@ -62,6 +62,7 @@ void sh2_device::device_start()
 
 void sh2_device::device_reset()
 {
+	jit_flush();
 	std::fill(std::begin(m_sh2_state->r), std::end(m_sh2_state->r), 0);
 	std::fill(std::begin(m_irq_line_state), std::end(m_irq_line_state), 0);
 
@@ -257,9 +258,16 @@ void sh2_device::execute_run()
 		return;
 	}
 
+	const bool use_jit = jit_enabled();
 	do
 	{
+		// S-MU2000: 訳せる所は訳した物で回す。1 命令以上進めて、icount も同じだけ減っている
+		if (use_jit && jit_run())
+			continue;
+
 		debugger_instruction_hook(m_sh2_state->pc);
+		if (jit_trace_on())
+			jit_trace(this);
 
 		const uint16_t opcode = m_decrypted_program->read_word(m_sh2_state->pc >= 0x40000000 ? m_sh2_state->pc : m_sh2_state->pc & m_am);
 

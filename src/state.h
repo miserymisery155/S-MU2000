@@ -33,6 +33,9 @@ public:
 	state_io(const u8 *p, size_t n) : m_in(p), m_len(n) {}
 
 	bool writing() const { return m_out != nullptr; }
+	// 状態の形の版。読むときは先頭で読んだ版、書くときは今の版を入れておく
+	u32 version() const { return m_version; }
+	void set_version(u32 v) { m_version = v; }
 	bool ok() const      { return m_ok; }
 	const std::string &error() const { return m_err; }
 
@@ -104,6 +107,7 @@ private:
 	const u8 *m_in = nullptr;
 	size_t m_len = 0, m_at = 0;
 	bool m_ok = true;
+	u32 m_version = 0;
 	std::string m_err;
 };
 

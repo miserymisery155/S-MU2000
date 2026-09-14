@@ -120,7 +120,7 @@ private:
 
 		void clear();
 		void keyon();
-		std::pair<s16, bool> step(memory_access<25, 2, -2, ENDIANNESS_LITTLE>::cache &wave, s32 pitch_lfo);
+		std::pair<s16, bool> step(memory_access<25, 2, -2, ENDIANNESS_LITTLE>::cache &wave, s32 pitch_lfo, u16 pitch_offset);
 
 		void start_h_w(u16 data);
 		void start_l_w(u16 data);
@@ -272,6 +272,7 @@ private:
 		s8 m_pitch_depth = 0;
 
 		void clear();
+		static u32 tri_state(u32 counter);
 		void keyon(swp30_device &swp);
 		u16 get_amplitude() const;
 		s16 get_pitch() const;
@@ -412,12 +413,31 @@ private:
 	sound_buffer m_buf;
 
 	std::array<streaming_block, 0x40> m_streaming = {};
+	// S-MU2000: チップの中のピッチ EG（doc/upstream.md の 13）。スロット 0x10（目標）、0x0B（速さ）、
+	// 今の値、着いた印。streaming_block の並びを変えないよう外に置く（状態の版 2 を読めるように）
+	std::array<u16, 0x40> m_pitch_offset = {};
+	std::array<u16, 0x40> m_peg_rate = {};
+	std::array<s32, 0x40> m_peg_cur = {};
+	std::array<u8,  0x40> m_peg_reached = {};
+	void peg_step(int chan);
 	std::array<filter_block,    0x40> m_filter = {};
 	std::array<iir1_block,      0x40> m_iir1 = {};
 	std::array<envelope_block,  0x40> m_envelope = {};
 	std::array<lfo_block,       0x40> m_lfo = {};
 
 	std::array<mixer_slot, 0x80> m_mixer = {};
+	// S-MU2000: ミキサの振り分けを、入力ごとの「足し先と減衰」の並びにしておく。
+	// route / vol が書かれたら作り直す（毎サンプル 16 出力ぶんを解くのをやめた）
+	struct mix_tap {
+		u8  dst;       // mixer_out の番号
+		u8  raw;       // 1 なら減衰なしで足す
+		u16 att;       // mixer_att に渡す値
+	};
+	std::array<std::array<mix_tap, 32>, 0x60> m_mix_taps = {};
+	std::array<u8, 0x60> m_mix_ntaps = {};
+	u64 m_mix_dirty[2] = { ~u64(0), ~u64(0) };   // 作り直す入力の印（0x00-0x3f、0x40-0x5f）
+	void mixer_rebuild();
+	void mixer_mark(int mix) { if(mix < 0x60) m_mix_dirty[mix >> 6] |= u64(1) << (mix & 63); }
 
 	std::array<s32,  0x10> m_melo = {};
 	std::array<s32,  0x10> m_meli = {};
@@ -440,6 +460,9 @@ private:
 	struct meg_jit;
 	static void meg_jit_delete(meg_jit *j);
 	static bool meg_jit_enabled();
+public:
+	static u64 meg_jit_selftest();
+private:
 	void meg_jit_rebuild();
 	bool meg_jit_run();
 	std::unique_ptr<meg_jit, void (*)(meg_jit *)> m_jit{nullptr, &meg_jit_delete};
@@ -466,6 +489,10 @@ private:
 	void address_l_w(offs_t offset, u16 data);
 	u16 pitch_r(offs_t offset);
 	void pitch_w(offs_t offset, u16 data);
+	u16 pitch_offset_r(offs_t offset);
+	void pitch_offset_w(offs_t offset, u16 data);
+	u16 peg_rate_r(offs_t offset);
+	void peg_rate_w(offs_t offset, u16 data);
 
 
 	// Filter block trampolines

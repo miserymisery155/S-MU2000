@@ -705,7 +705,7 @@ void swp30_device::streaming_block::read_8c(memory_access<25, 2, -2, ENDIANNESS_
 	val3 = m_dpcm_s3;
 }
 
-std::pair<s16, bool> swp30_device::streaming_block::step(memory_access<25, 2, -2, ENDIANNESS_LITTLE>::cache &wave, s32 pitch_lfo)
+std::pair<s16, bool> swp30_device::streaming_block::step(memory_access<25, 2, -2, ENDIANNESS_LITTLE>::cache &wave, s32 pitch_lfo, u16 pitch_offset)
 {
 	if(m_done)
 		return std::make_pair(m_last, false);
@@ -739,17 +739,20 @@ std::pair<s16, bool> swp30_device::streaming_block::step(memory_access<25, 2, -2
 	// of the pitch.  Left in, it trips the 0x4000 clamp below as soon as
 	// finetune becomes active (i.e. once the loop point is crossed), and
 	// the note jumps to the maximum pitch for the rest of its life.
-	u32 pitch = (m_pitch & 0x3fff) + pitch_lfo;
+	// S-MU2000: ピッチ EG の今の値を、14bit で回り込ませて足す（doc/upstream.md の 13）
+	// S-MU2000: ピッチは 14bit の符号付き（1 オクターブ 1024、0x3eef = -0x111）。下の e の計算は
+	// 符号付きのまま成り立つ。MAME はループ点を越えたあとの範囲の制限だけ符号なし（0〜0x3fff）で
+	// かけていたので、0 に近いピッチ（元の鍵のまま鳴らす音）に LFO を掛けると、下へ振った分が 0 に、
+	// 0 のすぐ下の値を上へ振った分が 0x3fff に張り付き、ビブラートが片側だけになっていた（doc/upstream.md の 14）
+	s32 sp = s32(util::sext(u32((m_pitch + pitch_offset) & 0x3fff), 14)) + pitch_lfo;
 	if(m_finetune_active) {
 		s32 ft = (m_loop >> 24) & 0x7f;
 		if(ft & 0x40)
 			ft -= 0x80;
-		pitch += ft;
-		if(pitch & 0x80000000)
-			pitch = 0;
-		if(pitch & 0x4000)
-			pitch = 0x3fff;
+		sp = std::clamp(sp + ft, -0x2000, 0x1fff);
 	}
+	const u32 pitch = u32(sp);
+
 	u32 e = ((pitch >> 10) + 8) & 15;
 	u32 m = pitch & 0x3ff;
 	u32 step = (pitch_base[m] << 10) >> (15-e);
@@ -1526,7 +1529,7 @@ u16 swp30_device::envelope_block::step(u32 sample_counter)
 			if(m_envelope_mode == DECAY1)
 				m_envelope_mode = DECAY2;
 
-			else if(m_release_glo & 0xff00)
+			else if(m_release_glo & 0x8000)   // S-MU2000: bit 15 が立っているときだけ（doc/upstream.md の 16）
 				m_envelope_mode = RELEASE;
 		}
 		break;
@@ -1581,7 +1584,10 @@ u16 swp30_device::envelope_block::release_glo_r() const
 void swp30_device::envelope_block::release_glo_w(u16 data)
 {
 	m_release_glo = data;
-	if(data & 0xff00)
+	// S-MU2000: MAME は release の速さが 0 でなければ release に入れていた。firmware は遅れて鳴らす層の
+	// キーオンの前に 0x01xx を書く（pc 0x12E3DE）が、実機ではその層は鳴り続ける。鍵を離すときに書く値は
+	// どれも bit 15 が立っている（0xA8〜0xF0）ので、bit 15 を「release せよ」の印とみる（doc/upstream.md の 16）
+	if(data & 0x8000)
 		m_envelope_mode = RELEASE;
 }
 
@@ -1648,13 +1654,25 @@ void swp30_device::lfo_block::clear()
 
 void swp30_device::lfo_block::keyon(swp30_device &swp)
 {
-	m_counter = swp.rand() & 0x3ffff;
+	// S-MU2000: MAME は乱数から始めていた。実機は同じ音を何度弾いてもビブラートとトレモロが
+	// 同じ形で始まる（doc/upstream.md の 15）。カウンタは 0 から始め、三角波は下の tri_state で
+	// 中央から上がり始める。乱数は MEG のディザと同じ数列なので、引く回数は変えない
+	swp.rand();
+	m_counter = 0;
 	switch(m_type) {
 	case 0: m_state = m_counter >> 6; break;
-	case 1: m_state = m_counter & 0x20000 ? (~m_counter >> 5) & 0xffe : (m_counter >> 5) & 0xffe; break;
+	case 1: m_state = tri_state(m_counter); break;
 	case 2: m_state = m_counter & 0x20000 ? 0xfff : 0; break;
 	case 3: m_state = swp.rand() & 0xfff; break;
 	}
+}
+
+// S-MU2000: 三角波。MAME の式はカウンタ 0 で一番下から始まるが、実機は中央（0x800）から上がり始める。
+// 1/4 周期（0x10000）ずらすと、ビブラートの深さ最大・遅れ 0 の Square Lead C5 で実機と 3 セント以内で重なる
+u32 swp30_device::lfo_block::tri_state(u32 counter)
+{
+	const u32 c = (counter + 0x10000) & 0x3ffff;
+	return c & 0x20000 ? (~c >> 5) & 0xffe : (c >> 5) & 0xffe;
 }
 
 void swp30_device::lfo_block::step(swp30_device &swp)
@@ -1665,7 +1683,7 @@ void swp30_device::lfo_block::step(swp30_device &swp)
 		m_counter += 0x40;
 	switch(m_type) {
 	case 0: m_state = m_counter >> 6; break;
-	case 1: m_state = m_counter & 0x20000 ? (~m_counter >> 5) & 0xffe : (m_counter >> 5) & 0xffe; break;
+	case 1: m_state = tri_state(m_counter); break;
 	case 2: m_state = m_counter & 0x20000 ? 0xfff : 0; break;
 	case 3: if((pc ^ m_counter) & 0x3fe00) m_state = swp.rand() & 0xfff; break;
 	}
@@ -1737,6 +1755,7 @@ s32 swp30_device::volume_apply(s32 level, s32 sample)
 void swp30_device::awm2_step(std::array<s32, 0x40> &samples_per_chan)
 {
 	for(int chan = 0; chan != 0x40; chan++) {
+		peg_step(chan);
 		if(!m_envelope[chan].active()) {
 			samples_per_chan[chan] = 0;
 			continue;
@@ -1744,7 +1763,7 @@ void swp30_device::awm2_step(std::array<s32, 0x40> &samples_per_chan)
 
 		auto &lfo = m_lfo[chan];
 
-		auto [sample1, trigger_release] = m_streaming[chan].step(m_wave_cache, lfo.get_pitch());
+		auto [sample1, trigger_release] = m_streaming[chan].step(m_wave_cache, lfo.get_pitch(), (m_pitch_offset[chan] & 0x4000) ? u16(m_peg_cur[chan] & 0x3fff) : 0);
 		if(trigger_release)
 			m_envelope[chan].trigger_release();
 
@@ -1859,9 +1878,14 @@ void swp30_device::reset()
 
 
 	std::fill(m_mixer.begin(), m_mixer.end(), mixer_slot());
+	m_mix_dirty[0] = m_mix_dirty[1] = ~u64(0);
 
 	for(auto &s : m_streaming)
 		s.clear();
+	m_pitch_offset.fill(0);
+	m_peg_rate.fill(0);
+	m_peg_cur.fill(0);
+	m_peg_reached.fill(0);
 	for(auto &f : m_filter)
 		f.clear();
 	for(auto &i : m_iir1)
@@ -1910,6 +1934,8 @@ u16 swp30_device::read16(offs_t addr)
 	case 0x08: return decay2_r(chan << 6);
 	case 0x09: return release_glo_r(chan << 6);
 	case 0x0a: return lfo_type_step_pitch_r(chan << 6);
+	case 0x0b: return peg_rate_r(chan << 6);
+	case 0x10: return pitch_offset_r(chan << 6);
 	case 0x11: return pitch_r(chan << 6);
 	case 0x12: return start_h_r(chan << 6);
 	case 0x13: return start_l_r(chan << 6);
@@ -2005,6 +2031,8 @@ void swp30_device::write16(offs_t addr, u16 data)
 	case 0x08: decay2_w(chan << 6, data); return;
 	case 0x09: release_glo_w(chan << 6, data); return;
 	case 0x0a: lfo_type_step_pitch_w(chan << 6, data); return;
+	case 0x0b: peg_rate_w(chan << 6, data); return;
+	case 0x10: pitch_offset_w(chan << 6, data); return;
 	case 0x11: pitch_w(chan << 6, data); return;
 	case 0x12: start_h_w(chan << 6, data); return;
 	case 0x13: start_l_w(chan << 6, data); return;
@@ -2116,6 +2144,9 @@ void swp30_device::keyon_w(u16)
 			m_iir1     [chan].keyon();
 			m_envelope [chan].keyon();
 			m_lfo      [chan].keyon(*this);
+			// S-MU2000: ピッチ EG はキーオン前に書かれた初めのレベルから始める
+			m_peg_cur[chan] = s32(util::sext(u32(m_pitch_offset[chan] & 0x3fff), 14));
+			m_peg_reached[chan] = 1;
 
 			if(1)
 				logerror("[%08d] keyon %02x %s\n", m_meg->m_sample_counter, chan, m_streaming[chan].describe());
@@ -2379,6 +2410,58 @@ void swp30_device::pitch_w(offs_t offset, u16 data)
 	m_streaming[offset >> 6].pitch_w(data);
 }
 
+// S-MU2000: チップの中のピッチ EG（doc/upstream.md の 13）。MAME はスロット 0x0B と 0x10 を読み捨てていた。
+// スロット 0x10 は目標で、下の 14bit が符号付き、ピッチ（スロット 0x11）と同じ目盛り。
+// bit 14 が立っているときだけピッチに足す（立っていない声に足すと実機と合わない）。
+// firmware はキーオンの前に初めのレベルを書き、キーオン後に段ごとの目標と速さを書いて、
+// 着いた印（内部ポート 4 の bit 14）を見て次の段へ進む（0x12B81C）
+u16 swp30_device::pitch_offset_r(offs_t offset)
+{
+	return m_pitch_offset[offset >> 6];
+}
+
+void swp30_device::pitch_offset_w(offs_t offset, u16 data)
+{
+	const int chan = offset >> 6;
+	m_pitch_offset[chan] = data;
+	if(m_peg_cur[chan] != s32(util::sext(u32(data & 0x3fff), 14)))
+		m_peg_reached[chan] = 0;
+}
+
+u16 swp30_device::peg_rate_r(offs_t offset)
+{
+	return m_peg_rate[offset >> 6];
+}
+
+void swp30_device::peg_rate_w(offs_t offset, u16 data)
+{
+	m_peg_rate[offset >> 6] = data;
+}
+
+// 今の値を目標へ、速さ（スロット 0x0B の bit 14-8）で近づける。刻みは音量の EG と同じ表を
+// 16 段遅らせて引く（4 分の 1 の速さ）。DuckLead の -375 セント → +100 → 0 と Bund、VoxLead の
+// 鳴り始めが実機と合う。16 より小さい速さは 0 にしている（実機で確かめていない）
+void swp30_device::peg_step(int chan)
+{
+	const s32 target = s32(util::sext(u32(m_pitch_offset[chan] & 0x3fff), 14));
+	s32 cur = m_peg_cur[chan];
+	if(cur == target) {
+		m_peg_reached[chan] = 1;
+		return;
+	}
+	const int rate = std::max(int((m_peg_rate[chan] >> 8) & 0x7f) - 16, 0);
+	const s32 step = m_envelope[chan].level_step(rate, m_meg->m_sample_counter);
+	if(cur < target) {
+		cur += step;
+		if(cur > target) cur = target;
+	} else {
+		cur -= step;
+		if(cur < target) cur = target;
+	}
+	m_peg_cur[chan] = cur;
+	m_peg_reached[chan] = cur == target;
+}
+
 u16 swp30_device::start_h_r(offs_t offset)
 {
 	return m_streaming[offset >> 6].start_h_r();
@@ -2574,6 +2657,7 @@ template<int Sel> u16 swp30_device::vol_r(offs_t offset)
 template<int Sel> void swp30_device::vol_w(offs_t offset, u16 data)
 {
 	m_mixer[(Sel & 0x40) | (offset >> 6)].vol[Sel & 3] = data;
+	mixer_mark((Sel & 0x40) | (offset >> 6));
 }
 
 template<int Sel> u16 swp30_device::route_r(offs_t offset)
@@ -2584,6 +2668,7 @@ template<int Sel> u16 swp30_device::route_r(offs_t offset)
 template<int Sel> void swp30_device::route_w(offs_t offset, u16 data)
 {
 	m_mixer[(Sel & 0x40) | (offset >> 6)].route[Sel & 3] = data;
+	mixer_mark((Sel & 0x40) | (offset >> 6));
 }
 
 u16 swp30_device::lfo_type_step_pitch_r(offs_t offset)
@@ -2624,6 +2709,9 @@ u16 swp30_device::internal_r()
 		return m_envelope[chan].status();
 
 	case 4:
+		// S-MU2000: ピッチ EG が目標に着いたか（bit 14）。firmware はこれを見て次の段へ進む
+		// （0x12B81C）。下の 14bit は今の値にしておく（読まれていない）
+		return (m_peg_reached[chan] ? 0x4000 : 0) | (m_peg_cur[chan] & 0x3fff);
 		// used at 44c4
 		// tests & 0x4000 only
 		//      logerror("read %02x.4\n", chan);
@@ -2755,14 +2843,73 @@ s32 swp30_device::mixer_att(s32 sample, s32 att)
 	return (sample - ((sample * (att & 0xf)) >> 5)) >> (att >> 4);
 }
 
+void swp30_device::mixer_rebuild()
+{
+	for(int mix = 0; mix != 0x60; mix++) {
+		if(!((m_mix_dirty[mix >> 6] >> (mix & 63)) & 1))
+			continue;
+		u64 route = (u64(m_mixer[mix].route[0]) << 32) | (u64(m_mixer[mix].route[1]) << 16) | m_mixer[mix].route[2];
+		const std::array<u16, 3> &vol = m_mixer[mix].vol;
+		auto &taps = m_mix_taps[mix];
+		int n = 0;
+		auto raw = [&](int dst) { taps[n++] = mix_tap{ u8(dst), 1, 0 }; };
+		auto att = [&](int dst, u32 a) { taps[n++] = mix_tap{ u8(dst), 0, u16(a) }; };
+		for(int out = 0; out != 16; out++) {
+			int mode = ((route >> (out+32-2)) & 4) | ((route >> (out+16-1)) & 2) | ((route >> (out+0-0)) & 1);
+			switch(mode) {
+			case 0: // No routing
+				break;
+
+			case 1: // No attenuation, add to both channels
+				raw(out*2);
+				raw(out*2+1);
+				break;
+
+			case 2: // No attenuation, add to left channel
+				raw(out*2);
+				break;
+
+			case 3: // No attenuation, add to right channel
+				raw(out*2+1);
+				break;
+
+			case 4: // Use attenuation slot 0
+				att(out*2,   (vol[0] >> 8)   + (vol[1] >> 8));
+				att(out*2+1, (vol[0] & 0xff) + (vol[1] >> 8));
+				break;
+
+			case 5: // Use attenuation slot 1
+				att(out*2,   (vol[0] >> 8)   + (vol[1] & 0xff));
+				att(out*2+1, (vol[0] & 0xff) + (vol[1] & 0xff));
+				break;
+
+			case 6: // Use attenuation slot 2
+				att(out*2,   (vol[0] >> 8)   + (vol[2] >> 8));
+				att(out*2+1, (vol[0] & 0xff) + (vol[2] >> 8));
+				break;
+
+			case 7: // Use attenuation slot 3
+				att(out*2,   (vol[0] >> 8)   + (vol[2] & 0xff));
+				att(out*2+1, (vol[0] & 0xff) + (vol[2] & 0xff));
+				break;
+			}
+		}
+		m_mix_ntaps[mix] = u8(n);
+	}
+	m_mix_dirty[0] = m_mix_dirty[1] = 0;
+}
+
 void swp30_device::mixer_step(const std::array<s32, 0x40> &samples_per_chan)
 {
+	if(m_mix_dirty[0] | m_mix_dirty[1])
+		mixer_rebuild();
+
 	std::array<s32, 0x20> mixer_out;
 	std::fill(mixer_out.begin(), mixer_out.end(), 0);
 
 	for(int mix = 0; mix != 0x60; mix++) {
-		u64 route = (u64(m_mixer[mix].route[0]) << 32) | (u64(m_mixer[mix].route[1]) << 16) | m_mixer[mix].route[2];
-		if(route == 0)
+		const int n = m_mix_ntaps[mix];
+		if(n == 0)
 			continue;
 
 		s32 input;
@@ -2776,47 +2923,9 @@ void swp30_device::mixer_step(const std::array<s32, 0x40> &samples_per_chan)
 		if(input == 0)
 			continue;
 
-		const std::array<u16, 3> &vol = m_mixer[mix].vol;
-		for(int out = 0; out != 16; out++) {
-			int mode = ((route >> (out+32-2)) & 4) | ((route >> (out+16-1)) & 2) | ((route >> (out+0-0)) & 1);
-			switch(mode) {
-			case 0: // No routing
-				break;
-
-			case 1: // No attenuation, add to both channels
-				mixer_out[out*2  ] += input;
-				mixer_out[out*2+1] += input;
-				break;
-
-			case 2: // No attenuation, add to left channel
-				mixer_out[out*2  ] += input;
-				break;
-
-			case 3: // No attenuation, add to right channel
-				mixer_out[out*2+1] += input;
-				break;
-
-			case 4: // Use attenuation slot 0
-				mixer_out[out*2  ] += mixer_att(input, (vol[0] >> 8)   + (vol[1] >> 8));
-				mixer_out[out*2+1] += mixer_att(input, (vol[0] & 0xff) + (vol[1] >> 8));
-				break;
-
-			case 5: // Use attenuation slot 1
-				mixer_out[out*2  ] += mixer_att(input, (vol[0] >> 8)   + (vol[1] & 0xff));
-				mixer_out[out*2+1] += mixer_att(input, (vol[0] & 0xff) + (vol[1] & 0xff));
-				break;
-
-			case 6: // Use attenuation slot 2
-				mixer_out[out*2  ] += mixer_att(input, (vol[0] >> 8)   + (vol[2] >> 8));
-				mixer_out[out*2+1] += mixer_att(input, (vol[0] & 0xff) + (vol[2] >> 8));
-				break;
-
-			case 7: // Use attenuation slot 3
-				mixer_out[out*2  ] += mixer_att(input, (vol[0] >> 8)   + (vol[2] & 0xff));
-				mixer_out[out*2+1] += mixer_att(input, (vol[0] & 0xff) + (vol[2] & 0xff));
-				break;
-			}
-		}
+		const mix_tap *t = m_mix_taps[mix].data();
+		for(int i = 0; i != n; i++)
+			mixer_out[t[i].dst] += t[i].raw ? input : mixer_att(input, t[i].att);
 	}
 	std::copy(mixer_out.begin() + 0x00, mixer_out.begin() + 0x10, m_melo.begin());
 	std::copy(mixer_out.begin() + 0x10, mixer_out.begin() + 0x20, m_meg->m_m.begin() + 0x20);
@@ -3964,6 +4073,7 @@ void swp30_device::state(state_io &s)
 	s.stdarr(m_envelope);
 	s.stdarr(m_lfo);
 	s.stdarr(m_mixer);
+	m_mix_dirty[0] = m_mix_dirty[1] = ~u64(0);
 	s.stdarr(m_melo);
 	s.stdarr(m_meli);
 	s.stdarr(m_adc);
@@ -3988,4 +4098,16 @@ void swp30_device::state(state_io &s)
 	s.v(m_revram_adr); s.v(m_revram_data);
 	s.v(m_wave_access); s.v(m_revram_enable);
 	s.v(m_keyon_mask); s.v(m_internal_adr);
+	// 版 3 から: ピッチ EG（スロット 0x0B と 0x10、今の値、着いた印）。版 2 の状態には無いので 0 にする
+	if(s.version() >= 3) {
+		s.stdarr(m_pitch_offset);
+		s.stdarr(m_peg_rate);
+		s.stdarr(m_peg_cur);
+		s.stdarr(m_peg_reached);
+	} else if(!s.writing()) {
+		m_pitch_offset.fill(0);
+		m_peg_rate.fill(0);
+		m_peg_cur.fill(0);
+		m_peg_reached.fill(0);
+	}
 }

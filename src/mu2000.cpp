@@ -4,7 +4,9 @@
 
 #include "mu2000.h"
 
+#include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #include <immintrin.h>
@@ -37,8 +39,11 @@ bool read_file(const std::string &path, std::vector<u8> &out, size_t expect)
 } // namespace
 
 
+static std::atomic<int> g_live_instances{0};
+
 mu2000::mu2000()
 {
+	g_live_instances++;
 	// CPU。MAME は 7MHz の水晶を PLL で 4 倍していた
 	m_cpu = &m_config.make<sh7043a_device>(m_cpu_finder, 7000000u * 4);
 
@@ -64,12 +69,36 @@ mu2000::mu2000()
 mu2000::~mu2000()
 {
 	set_threaded(false);
+	g_live_instances--;
 }
 
-// スレーブを別スレッドで回す。1 サンプルの中では 2 個の SWP30 は
-// 互いに独立しているので、並べて走らせても出る音は変わらない
+// スレーブを別スレッドで回すのは、動いている台数が少ないときだけ。
+// 別スレッドは 1 台で 2 コアを回して使う（書き出しは 2 割ほど速い）が、1 つのプロセスで何台も
+// 動かす（DAW に何枚も挿す）とコアの取り合いになる。16 論理コア（8 物理）で dense を並べて回すと、
+// 4 台は別スレッドが速い（2.64 / 1 本 3.19 秒）が、8 台で逆転し（3.97 / 3.48）、16 台では 1 本が
+// 2 倍速い（10.89 / 5.35）。だから動いている台数が論理コア数の 1/4 以下のときだけ別スレッドにする。
+// 台数は途中で変わるので、run_sample がときどき見直す（1 本でも別スレッドでも出る音は同じ）。
+// SMU2000_THREADED_MAX で台数の境を変えられる（0 なら全部 1 本）
+static int threaded_max()
+{
+	static const int n = [] {
+		if (const char *e = std::getenv("SMU2000_THREADED_MAX"))
+			return std::max(0, std::atoi(e));
+		return std::max(1, int(std::thread::hardware_concurrency() / 4));
+	}();
+	return n;
+}
+
 void mu2000::set_threaded(bool on)
 {
+	m_want_threaded = on;
+	apply_threading();
+}
+
+// 頼まれていて、台数が境を超えていなければ別スレッドにする。そうでなければ 1 本に戻す
+void mu2000::apply_threading()
+{
+	const bool on = m_want_threaded && g_live_instances.load(std::memory_order_relaxed) <= threaded_max();
 	if (on == m_slave_thread.joinable())
 		return;
 
@@ -81,7 +110,10 @@ void mu2000::set_threaded(bool on)
 		m_slave_quit = false;
 		return;
 	}
-	m_slave_thread = std::thread([this] { slave_loop(); });
+	// 合図の数は前に回した分だけ進んでいるので、今の数から待ち始める（0 からだと着いた途端に 1 サンプル余計に回す）
+	const u64 seen = m_slave_go.load(std::memory_order_acquire);
+	m_slave_done.store(seen, std::memory_order_release);
+	m_slave_thread = std::thread([this, seen] { slave_loop(seen); });
 }
 
 // 空振りを何回続けたら眠るか。0 以下なら永久に回す（比較用）
@@ -89,9 +121,8 @@ void mu2000::set_threaded(bool on)
 #define SLAVE_SPINS 20000
 #endif
 
-void mu2000::slave_loop()
+void mu2000::slave_loop(u64 seen)
 {
-	u64 seen = 0;
 	for (;;) {
 		// 合図を待つ。1 サンプルの中の待ちは 1 マイクロ秒に満たないので、
 		// まず回して待つ。眠っていては 44100 回/秒には間に合わない。
@@ -714,6 +745,10 @@ void mu2000::midi_step(u64 now)
 
 void mu2000::run_sample(s32 &left, s32 &right)
 {
+	// 台数が変わっていたら別スレッドの使い方を見直す（8192 サンプルごと）
+	if (m_want_threaded && !(++m_thread_check & 0x1fff))
+		apply_threading();
+
 	// SWP30 は 44100Hz で 1 サンプル。CPU はその間に 28MHz/44100 ≒ 634.9 サイクル
 	m_cycle_debt += 28000000;
 	const u64 cycles = m_cycle_debt / 44100;
@@ -784,7 +819,8 @@ namespace {
 
 // 保存の形。中身の並びを変えたら上げる
 constexpr u32 STATE_MAGIC   = 0x554d3253;   // "S2MU"
-constexpr u32 STATE_VERSION = 2;   // 2: MIDI の入口が A/B の 2 口になった
+constexpr u32 STATE_VERSION = 3;   // 2: MIDI の入口が A/B の 2 口になった / 3: SWP30 のピッチ EG
+constexpr u32 STATE_VERSION_OLDEST = 2;
 
 } // namespace
 
@@ -841,6 +877,7 @@ std::vector<u8> mu2000::save_state() const
 	u32 magic = STATE_MAGIC, ver = STATE_VERSION;
 	s.v(magic);
 	s.v(ver);
+	s.set_version(ver);
 	const_cast<mu2000 *>(this)->state(s);
 	return out;
 }
@@ -855,10 +892,11 @@ bool mu2000::load_state(const u8 *p, size_t n, std::string &err)
 		err = "これは S-MU2000 の状態ではない";
 		return false;
 	}
-	if (ver != STATE_VERSION) {
+	if (ver < STATE_VERSION_OLDEST || ver > STATE_VERSION) {
 		err = "状態の形が違う（この版では読めない）";
 		return false;
 	}
+	s.set_version(ver);
 	state(s);
 	if (!s.ok()) {
 		err = s.error();

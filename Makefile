@@ -36,7 +36,7 @@ SRCS := \
 	src/mame/video/hd44780.cpp \
 	src/mame/machine/sci4.cpp \
 	src/mame/cpu/sh.cpp \
-	src/mame/cpu/sh2.cpp \
+	src/mame/cpu/sh2.cpp 	src/mame/cpu/sh2_jit.cpp \
 	src/mame/cpu/sh7042.cpp \
 	src/mame/cpu/sh_adc.cpp \
 	src/mame/cpu/sh_bsc.cpp \

@@ -30,116 +30,93 @@
 #include <cstring>
 #include <vector>
 
+#if SMU2000_MEG_JIT
+#include "x64asm.h"
+#endif
+
 namespace {
 
 #if SMU2000_MEG_JIT
 
-// ---- 小さな x86-64 の組み立て器 ------------------------------------------------------
+using namespace x64asm;
 
-enum : u8 { RAX = 0, RCX, RDX, RBX, RSP, RBP, RSI, RDI, R8, R9, R10, R11, R12, R13, R14, R15, NOREG = 0xff };
-
-struct mem {
-	u8 base;
-	u8 index = NOREG;
-	u8 scale = 1;
-	s32 disp = 0;
-};
-
-class assembler
+// meg_state::revram_encode と同じことをする。入力 eax（u32）、出力 eax（u16）。rcx と rdx を壊す
+void emit_revram_encode(assembler &a)
 {
-public:
-	std::vector<u8> code;
+	a.and32i(RAX, 0x7ffffff);
+	a.xor32(RDX, RDX);                                   // s
+	a.test32ri(RAX, 0x4000000);
+	const size_t pos = a.jcc_fwd(0x84);
+	a.xor32ri(RAX, 0x7ffffff);
+	a.imm32(RDX, 1);
+	a.patch(pos);
+	// e は bit 11〜25 のうち一番上の 1 の位置 - 10。無ければ e = 0 で m = v（v < 0x800）
+	a.mov32(RCX, RAX);
+	a.shr32(RCX, 11);
+	const size_t small = a.jcc_fwd(0x84);
+	a.bsr32(RCX, RAX);
+	a.sub32ri(RCX, 11);                                  // e - 1
+	a.shr32cl(RAX);
+	a.and32i(RAX, 0x7ff);
+	a.add32ri(RCX, 1);
+	a.shl32(RCX, 12);
+	a.or32(RAX, RCX);
+	a.patch(small);
+	a.shl32(RDX, 11);
+	a.or32(RAX, RDX);
+}
 
-	void byte(u8 b) { code.push_back(b); }
-	void d32(u32 v) { for (int i = 0; i < 4; i++) byte(u8(v >> (8 * i))); }
-	void d64(u64 v) { for (int i = 0; i < 8; i++) byte(u8(v >> (8 * i))); }
+// meg_state::m1_expand と同じことをする。入力 eax（下の 16bit が s16）、出力 rax（0〜0x7ffc）。rcx を壊す
+void emit_m1_expand(assembler &a)
+{
+	a.test32ri(RAX, 0x8000);
+	const size_t neg = a.jcc_fwd(0x85);
+	a.mov32(RCX, RAX);
+	a.shr32(RCX, 12);
+	a.and32i(RCX, 7);                                    // s
+	a.and32i(RAX, 0xfff);
+	a.or32ri(RAX, 0x1000);
+	a.cmp32ri(RCX, 5);
+	const size_t done1 = a.jcc_fwd(0x84);                // s == 5
+	const size_t less = a.jcc_fwd(0x82);                 // s < 5（jb）
+	a.sub32ri(RCX, 5);
+	a.shl32cl(RAX);
+	const size_t done2 = a.jmp_fwd();
+	a.patch(less);
+	a.neg32(RCX);
+	a.add32ri(RCX, 5);
+	a.shr32cl(RAX);
+	const size_t done3 = a.jmp_fwd();
+	a.patch(neg);
+	a.xor32(RAX, RAX);
+	a.patch(done1);
+	a.patch(done2);
+	a.patch(done3);
+}
 
-	// 命令の本体。prefix（0 なら無し）、REX.W、命令バイト列、ModRM の reg 欄、相手
-	void rr(u8 prefix, bool w, std::initializer_list<u8> opc, u8 reg, u8 rm)
-	{
-		if (prefix) byte(prefix);
-		u8 rex = 0x40 | (w ? 8 : 0) | ((reg >> 3) & 1) << 2 | ((rm >> 3) & 1);
-		if (rex != 0x40) byte(rex);
-		for (u8 o : opc) byte(o);
-		byte(u8(0xc0 | ((reg & 7) << 3) | (rm & 7)));
-	}
-	void rm(u8 prefix, bool w, std::initializer_list<u8> opc, u8 reg, const mem &m)
-	{
-		if (prefix) byte(prefix);
-		const u8 x = m.index == NOREG ? 0 : (m.index >> 3) & 1;
-		u8 rex = 0x40 | (w ? 8 : 0) | ((reg >> 3) & 1) << 2 | x << 1 | ((m.base >> 3) & 1);
-		if (rex != 0x40) byte(rex);
-		for (u8 o : opc) byte(o);
-		// いつも disp32 の形にする（長さが決まっていて楽）
-		if (m.index == NOREG && (m.base & 7) != RSP) {
-			byte(u8(0x80 | ((reg & 7) << 3) | (m.base & 7)));
-		} else {
-			byte(u8(0x80 | ((reg & 7) << 3) | 4));
-			const u8 ss = m.scale == 1 ? 0 : m.scale == 2 ? 1 : m.scale == 4 ? 2 : 3;
-			const u8 idx = m.index == NOREG ? 4 : (m.index & 7);
-			byte(u8((ss << 6) | (idx << 3) | (m.base & 7)));
-		}
-		d32(u32(m.disp));
-	}
-
-	void mov64(u8 d, u8 s)            { rr(0, true, {0x8b}, d, s); }
-	void load64(u8 d, const mem &m)   { rm(0, true, {0x8b}, d, m); }
-	void store64(const mem &m, u8 s)  { rm(0, true, {0x89}, s, m); }
-	void load32(u8 d, const mem &m)   { rm(0, false, {0x8b}, d, m); }
-	void store32(const mem &m, u8 s)  { rm(0, false, {0x89}, s, m); }
-	void loads32(u8 d, const mem &m)  { rm(0, true, {0x63}, d, m); }          // movsxd
-	void loads16(u8 d, const mem &m)  { rm(0, true, {0x0f, 0xbf}, d, m); }    // movsx r64, m16
-	void loadu16(u8 d, const mem &m)  { rm(0, false, {0x0f, 0xb7}, d, m); }   // movzx r32, m16
-	void loadu8(u8 d, const mem &m)   { rm(0, false, {0x0f, 0xb6}, d, m); }   // movzx r32, m8
-	void store16(const mem &m, u8 s)  { rm(0x66, false, {0x89}, s, m); }
-	void store8i(const mem &m, u8 v)  { rm(0, false, {0xc6}, 0, m); byte(v); }
-	void imm64(u8 d, u64 v)
-	{
-		byte(u8(0x48 | ((d >> 3) & 1)));
-		byte(u8(0xb8 | (d & 7)));
-		d64(v);
-	}
-	void imm32(u8 d, u32 v)
-	{
-		if (d >= 8) byte(0x41);
-		byte(u8(0xb8 | (d & 7)));
-		d32(v);
-	}
-	void add64(u8 d, u8 s) { rr(0, true, {0x01}, s, d); }
-	void sub64(u8 d, u8 s) { rr(0, true, {0x29}, s, d); }
-	void and64(u8 d, u8 s) { rr(0, true, {0x21}, s, d); }
-	void cmp64(u8 a, u8 b) { rr(0, true, {0x39}, b, a); }          // cmp a, b
-	void test64(u8 a, u8 b) { rr(0, true, {0x85}, b, a); }
-	void test32(u8 a, u8 b) { rr(0, false, {0x85}, b, a); }
-	void xor32(u8 d, u8 s) { rr(0, false, {0x31}, s, d); }
-	void add32(u8 d, u8 s) { rr(0, false, {0x01}, s, d); }
-	void sub32(u8 d, u8 s) { rr(0, false, {0x29}, s, d); }
-	void imul64(u8 d, u8 s) { rr(0, true, {0x0f, 0xaf}, d, s); }
-	void imul32i(u8 d, u8 s, u32 v) { rr(0, false, {0x69}, d, s); d32(v); }
-	void add32i(u8 d, u32 v) { rr(0, false, {0x81}, 0, d); d32(v); }
-	void and32i(u8 d, u32 v) { rr(0, false, {0x81}, 4, d); d32(v); }
-	void shl64(u8 d, u8 n) { rr(0, true, {0xc1}, 4, d); byte(n); }
-	void sar64(u8 d, u8 n) { rr(0, true, {0xc1}, 7, d); byte(n); }
-	void shl32(u8 d, u8 n) { rr(0, false, {0xc1}, 4, d); byte(n); }
-	void sar32(u8 d, u8 n) { rr(0, false, {0xc1}, 7, d); byte(n); }
-	void rol32(u8 d, u8 n) { rr(0, false, {0xc1}, 0, d); byte(n); }
-	void neg64(u8 d) { rr(0, true, {0xf7}, 3, d); }
-	void cmovl64(u8 d, u8 s) { rr(0, true, {0x0f, 0x4c}, d, s); }
-	void cmovg64(u8 d, u8 s) { rr(0, true, {0x0f, 0x4f}, d, s); }
-	void cmovs64(u8 d, u8 s) { rr(0, true, {0x0f, 0x48}, d, s); }
-	void setl_mem(const mem &m) { rm(0, false, {0x0f, 0x9c}, 0, m); }
-	void sete_mem(const mem &m) { rm(0, false, {0x0f, 0x94}, 0, m); }
-	void call_reg(u8 r) { rr(0, false, {0xff}, 2, r); }
-	void push(u8 r) { if (r >= 8) byte(0x41); byte(u8(0x50 | (r & 7))); }
-	void pop(u8 r)  { if (r >= 8) byte(0x41); byte(u8(0x58 | (r & 7))); }
-	void subrsp(u32 v) { rr(0, true, {0x81}, 5, RSP); d32(v); }
-	void addrsp(u32 v) { rr(0, true, {0x81}, 0, RSP); d32(v); }
-	void ret() { byte(0xc3); }
-	// jz で先へ飛ぶ。飛び先は後で patch() で埋める
-	size_t jz_fwd() { byte(0x0f); byte(0x84); d32(0); return code.size(); }
-	void patch(size_t at) { const u32 rel = u32(code.size() - at); std::memcpy(&code[at - 4], &rel, 4); }
-	void call_abs(void *fn) { imm64(RAX, u64(uintptr_t(fn))); call_reg(RAX); }
-};
+// meg_state::revram_decode と同じことをする。入力 eax（u16）、出力 eax。rcx rdx r8 を壊す
+void emit_revram_decode(assembler &a)
+{
+	a.mov32(R8, RAX);                                    // v
+	a.mov32(RCX, RAX);
+	a.shr32(RCX, 12);                                    // e
+	a.and32i(RAX, 0x7ff);                                // m
+	a.test32(RCX, RCX);
+	const size_t e0 = a.jcc_fwd(0x84);
+	a.or32ri(RAX, 0x800);
+	a.sub32ri(RCX, 1);
+	a.shl32cl(RAX);
+	a.imm32(RDX, 0xffffffff);
+	a.shl32cl(RDX);
+	const size_t join = a.jmp_fwd();
+	a.patch(e0);
+	a.imm32(RDX, 0xffffffe0);
+	a.patch(join);
+	a.test32ri(R8, 0x800);
+	const size_t no_sign = a.jcc_fwd(0x84);
+	a.xor32(RAX, RDX);
+	a.patch(no_sign);
+}
 
 #endif
 
@@ -163,10 +140,6 @@ struct swp30_device::meg_jit {
 
 #if SMU2000_MEG_JIT
 	static u32 call_lfo(meg_state *ms, u32 lfo) { return ms->get_lfo(int(lfo)); }
-	static s64 call_expand(s64 v) { return ms_expand(s16(v)); }
-	static s64 ms_expand(s16 v) { return meg_state::m1_expand(v); }
-	static u32 call_encode(u32 v) { return meg_state::revram_encode(v); }
-	static u32 call_decode(u32 v) { return meg_state::revram_decode(u16(v)); }
 #endif
 
 	bool build(meg_state &ms, const meg_state::op *ops, swp30_device &swp);
@@ -211,6 +184,48 @@ bool swp30_device::meg_jit_run()
 	m_meg->m_pc = 0;
 	m_meg->m_icount -= 0x180;
 	return true;
+}
+
+// 機械語にしたリバーブ RAM の詰め方・戻し方を、meg_state の関数と全部の入力で突き合わせる。
+// 食い違った入力の数を返す（JIT が無い環境では 0）。make test の verify から呼ぶ
+u64 swp30_device::meg_jit_selftest()
+{
+#if SMU2000_MEG_JIT
+	u64 bad = 0;
+	for (int which = 0; which < 3; which++) {
+		assembler a;
+		a.mov32(RAX, RCX);
+		if (which == 0) emit_revram_encode(a); else if (which == 1) emit_revram_decode(a); else emit_m1_expand(a);
+		a.ret();
+		void *buf = VirtualAlloc(nullptr, a.code.size(), MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+		if (!buf)
+			return ~u64(0);
+		std::memcpy(buf, a.code.data(), a.code.size());
+		const auto fn = reinterpret_cast<u32 (*)(u32)>(buf);
+		if (which == 0) {
+			for (u32 v = 0; v < 0x8000000; v++)        // encode は下の 27bit しか見ない
+				if ((fn(v) & 0xffff) != meg_state::revram_encode(v))
+					bad++;
+			for (u32 v : { 0xffffffffu, 0x80000000u, 0xf8000001u })
+				if ((fn(v) & 0xffff) != meg_state::revram_encode(v))
+					bad++;
+		} else if (which == 1) {
+			for (u32 v = 0; v < 0x10000; v++)
+				if (fn(v) != meg_state::revram_decode(u16(v)))
+					bad++;
+		} else {
+			// 呼ぶ側は loads16 で 64bit に符号拡張した値を渡す。出力は 64bit のまま使う
+			const auto fn64 = reinterpret_cast<s64 (*)(s64)>(buf);
+			for (s32 v = -0x8000; v < 0x8000; v++)
+				if (fn64(v) != s64(meg_state::m1_expand(s16(v))))
+					bad++;
+		}
+		VirtualFree(buf, 0, MEM_RELEASE);
+	}
+	return bad;
+#else
+	return 0;
+#endif
 }
 
 #if !SMU2000_MEG_JIT
@@ -399,10 +414,8 @@ bool swp30_device::meg_jit::build(meg_state &ms, const meg_state::op *ops, swp30
 				a.loads16(RAX, M(o_t + 2 * o.t));
 			else
 				a.loads16(RAX, M(o_const + 2 * s32(k)));
-			if (o.m1_expand) {
-				a.mov64(RCX, RAX);
-				a.call_abs(reinterpret_cast<void *>(&meg_jit::call_expand));
-			}
+			if (o.m1_expand)
+				emit_m1_expand(a);                           // meg_state::m1_expand を機械語で
 			switch (o.mmode) {
 			case 1:
 				a.shl64(RAX, 8 + 15);
@@ -571,14 +584,15 @@ bool swp30_device::meg_jit::build(meg_state &ms, const meg_state::op *ops, swp30
 			a.add32i(RAX, o.addr_base);
 			a.and32i(RAX, 0x3ffff);
 			if (o.memop == 1) {
-				a.store64(mem{RSP, NOREG, 1, 40}, RAX);
-				a.load32(RCX, M(o_ram_write));
-				a.call_abs(reinterpret_cast<void *>(&meg_jit::call_encode));
-				a.load64(RCX, mem{RSP, NOREG, 1, 40});
-				a.store16(mem{RAM, RCX, 2, 0}, RAX);
+				// meg_state::revram_encode を機械語で（関数は呼ばない）。番地は r8 に取っておく
+				a.mov64(R8, RAX);
+				a.load32(RAX, M(o_ram_write));
+				emit_revram_encode(a);
+				a.store16(mem{RAM, R8, 2, 0}, RAX);
 			} else {
-				a.loadu16(RCX, mem{RAM, RAX, 2, 0});
-				a.call_abs(reinterpret_cast<void *>(&meg_jit::call_decode));
+				// meg_state::revram_decode を機械語で（関数は呼ばない）
+				a.loadu16(RAX, mem{RAM, RAX, 2, 0});
+				emit_revram_decode(a);
 				a.store32(M(o_memr_val + 4 * slot2(k)), RAX);
 			}
 		}

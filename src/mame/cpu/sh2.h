@@ -23,6 +23,8 @@
 
 #include "sh.h"
 
+#include <memory>
+
 class sh2_device : public sh_common_execution
 {
 public:
@@ -87,6 +89,24 @@ private:
 
 	uint32_t m_cpu_off = 0;
 	int8_t m_irq_line_state[17] = {};
+
+	// S-MU2000: ROM の上の命令を x86-64 に訳して回す（sh2_jit.cpp）
+	struct jit;
+	static void jit_delete(jit *j);
+	static bool jit_enabled();
+	static void jit_exec(sh2_device *c, u32 opcode);
+	static void jit_irq(sh2_device *c);
+	static bool jit_trace_on();
+	static void jit_trace(sh2_device *c);
+	static u32 jit_rb(sh2_device *c, u32 a);
+	static u32 jit_rw(sh2_device *c, u32 a);
+	static u32 jit_rl(sh2_device *c, u32 a);
+	static void jit_wb(sh2_device *c, u32 a, u32 v);
+	static void jit_ww(sh2_device *c, u32 a, u32 v);
+	static void jit_wl(sh2_device *c, u32 a, u32 v);
+	bool jit_run();
+	void jit_flush();
+	std::unique_ptr<jit, void (*)(jit *)> m_jit{nullptr, &jit_delete};
 };
 
 #endif // MAME_CPU_SH_SH2_H

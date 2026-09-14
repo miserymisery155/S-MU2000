@@ -139,6 +139,13 @@ public:
 		write_word(a + 2, u16(v));
 	}
 
+	// S-MU2000: SH2 の JIT が直に読み書きする熱い領域（fast() / fast_w() と同じもの）
+	const u8 *hot_rom() const { return m_hot_r; }
+	u32 hot_rom_end() const { return m_hot_r_end; }
+	u8 *hot_ram() const { return m_hot_w; }
+	u32 hot_ram_start() const { return m_hot_w_start; }
+	u32 hot_ram_len() const { return m_hot_w_len; }
+
 private:
 	// ---- 熱い 2 つの領域を、スカラで手元に置く
 	//
