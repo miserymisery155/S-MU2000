@@ -3219,6 +3219,10 @@ u16 swp30_device::meg_state::lfo_r(offs_t offset)
 
 void swp30_device::meg_state::lfo_w(offs_t offset, u16 data)
 {
+	// S-MU2000: 書いた LFO は、位相を 0 から数え直す（doc/upstream.md の 25）。MAME は起動から回しっぱなしで、
+	// エフェクトを選んでから鳴らすまでの時間が同じでも、コーラスやフランジャーの揺れの位相が実機と揃わなかった
+	if(offset < m_lfo_counter.size())
+		m_lfo_counter[offset] = 0;
 	m_lfo[offset] = data;
 }
 
