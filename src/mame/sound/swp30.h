@@ -433,8 +433,8 @@ private:
 	// route / vol が書かれたら作り直す（毎サンプル 16 出力ぶんを解くのをやめた）
 	struct mix_tap {
 		u8  dst;       // mixer_out の番号
-		u8  raw;       // 1 なら減衰なしで足す
-		u16 att;       // mixer_att に渡す値
+		u8  frac;      // mixer_att の減衰の下 4 ビット（減衰なしは 0）
+		u8  shift;     // mixer_att の減衰の上 4 ビット
 	};
 	std::array<std::array<mix_tap, 32>, 0x60> m_mix_taps = {};
 	std::array<u8, 0x60> m_mix_ntaps = {};
@@ -474,6 +474,9 @@ private:
 	// S-MU2000: MEG の定数の値が変わるたびに 1 増える（JIT の定数を焼き込んだ版を捨てる印）。
 	// 状態の保存には入れない（meg_state の並びを変えると、前の版で保存した状態が読めなくなる）
 	u32 m_meg_const_gen = 0;
+	// S-MU2000: 分岐のあるプログラムを JIT で回すときの「この命令の手前まで飛ばす」位置（0 なら飛ばさない）。
+	// 1 サンプルの中だけで使う。保存しない
+	u32 m_meg_jit_skip = 0;
 
 	u32 m_sample_counter = 0;
 	u32 m_wave_adr = 0, m_wave_size = 0, m_wave_val = 0, m_revram_adr = 0, m_revram_data = 0;

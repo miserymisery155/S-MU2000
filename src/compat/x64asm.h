@@ -94,6 +94,7 @@ public:
 	void xor32(u8 d, u8 s) { rr(0, false, {0x31}, s, d); }
 	void add32(u8 d, u8 s) { rr(0, false, {0x01}, s, d); }
 	void sub32(u8 d, u8 s) { rr(0, false, {0x29}, s, d); }
+	void and32(u8 d, u8 s) { rr(0, false, {0x21}, s, d); }
 	void imul64(u8 d, u8 s) { rr(0, true, {0x0f, 0xaf}, d, s); }
 	void imul32i(u8 d, u8 s, u32 v) { rr(0, false, {0x69}, d, s); d32(v); }
 	void imul64i(u8 d, u8 s, u32 v) { rr(0, true, {0x69}, d, s); d32(v); }

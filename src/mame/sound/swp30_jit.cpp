@@ -12,7 +12,7 @@
 //   * 定数・番地表・LFO は firmware が動かしている最中にも書くので、実行時に読む
 //   * 乱数（ディザ）は同じ順に同じ回数だけ引く
 //
-// 分岐（bit 0x3f）を含むプログラムは訳さずに run_program() に任せる（LO-FI と DYNA 系だけ）。
+// 分岐（bit 0x3f）を含むプログラム（LO-FI と DYNA 系）は、遅れの輪を毎命令で読み書きする形で訳す。
 // 訳した物はどこにも保存しない（firmware 由来のものを配らない。実行時に作って捨てる）。
 //
 // Windows の x86-64 だけ。ほかでは build() が false を返し、今までどおり解釈実行する。
@@ -40,28 +40,32 @@ namespace {
 
 using namespace x64asm;
 
-// meg_state::revram_encode と同じことをする。入力 eax（u32）、出力 eax（u16）。rcx と rdx を壊す
+// meg_state::revram_encode と同じことをする。入力 eax（u32）、出力 eax（u16）。rcx rdx r11 を壊す。
+// 分岐を使わない。符号は音の値しだいで読めないので、分岐にすると予測の外れで遅くなる
 void emit_revram_encode(assembler &a)
 {
 	a.and32i(RAX, 0x7ffffff);
-	a.xor32(RDX, RDX);                                   // s
-	a.test32ri(RAX, 0x4000000);
-	const size_t pos = a.jcc_fwd(0x84);
-	a.xor32ri(RAX, 0x7ffffff);
-	a.imm32(RDX, 1);
-	a.patch(pos);
+	a.mov32(RDX, RAX);
+	a.shl32(RDX, 5);
+	a.sar32(RDX, 31);                                    // bit 26 が立っていれば -1
+	a.mov32(RCX, RDX);
+	a.and32i(RCX, 0x7ffffff);
+	a.xor32(RAX, RCX);
+	a.and32i(RDX, 1);                                    // s
 	// e は bit 11〜25 のうち一番上の 1 の位置 - 10。無ければ e = 0 で m = v（v < 0x800）
 	a.mov32(RCX, RAX);
-	a.shr32(RCX, 11);
-	const size_t small = a.jcc_fwd(0x84);
-	a.bsr32(RCX, RAX);
-	a.sub32ri(RCX, 11);                                  // e - 1
+	a.or32ri(RCX, 0x400);
+	a.bsr32(RCX, RCX);
+	a.sub32ri(RCX, 10);                                  // e
+	a.xor32(R11, R11);
+	a.test32(RCX, RCX);
+	a.setcc(0x95, R11);                                  // e != 0
+	a.sub32(RCX, R11);                                   // e ? e - 1 : 0
+	a.add32(R11, RCX);                                   // e
 	a.shr32cl(RAX);
 	a.and32i(RAX, 0x7ff);
-	a.add32ri(RCX, 1);
-	a.shl32(RCX, 12);
-	a.or32(RAX, RCX);
-	a.patch(small);
+	a.shl32(R11, 12);
+	a.or32(RAX, R11);
 	a.shl32(RDX, 11);
 	a.or32(RAX, RDX);
 }
@@ -94,28 +98,27 @@ void emit_m1_expand(assembler &a)
 	a.patch(done3);
 }
 
-// meg_state::revram_decode と同じことをする。入力 eax（u16）、出力 eax。rcx rdx r8 を壊す
+// meg_state::revram_decode と同じことをする。入力 eax（u16）、出力 eax。rcx rdx r8 を壊す。分岐を使わない
 void emit_revram_decode(assembler &a)
 {
 	a.mov32(R8, RAX);                                    // v
 	a.mov32(RCX, RAX);
 	a.shr32(RCX, 12);                                    // e
 	a.and32i(RAX, 0x7ff);                                // m
+	a.xor32(RDX, RDX);
 	a.test32(RCX, RCX);
-	const size_t e0 = a.jcc_fwd(0x84);
-	a.or32ri(RAX, 0x800);
-	a.sub32ri(RCX, 1);
+	a.setcc(0x95, RDX);                                  // e != 0
+	a.sub32(RCX, RDX);                                   // e ? e - 1 : 0
+	a.shl32(RDX, 11);
+	a.or32(RAX, RDX);                                    // e ? m | 0x800 : m
 	a.shl32cl(RAX);
 	a.imm32(RDX, 0xffffffff);
-	a.shl32cl(RDX);
-	const size_t join = a.jmp_fwd();
-	a.patch(e0);
-	a.imm32(RDX, 0xffffffff);
-	a.patch(join);
-	a.test32ri(R8, 0x800);
-	const size_t no_sign = a.jcc_fwd(0x84);
+	a.shl32cl(RDX);                                      // 反転の範囲
+	a.mov32(RCX, R8);
+	a.shl32(RCX, 20);
+	a.sar32(RCX, 31);                                    // s ? -1 : 0
+	a.and32(RDX, RCX);
 	a.xor32(RAX, RDX);
-	a.patch(no_sign);
 }
 
 #endif
@@ -294,9 +297,12 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 	size_t &buf_size = cd.buf_size;
 	u32 &d3 = cd.d3, &d2 = cd.d2;
 	fn = nullptr;
+	// 分岐（前へ飛ばすだけ）のあるプログラムは、遅れの輪を解釈実行と同じく毎命令で読み書きする形で訳す。
+	// 飛ばされた命令は、その命令が輪に入れるはずだった書き込みを消し、t の値だけを入れる（run_program と同じ）
+	bool branchy = false;
 	for (u32 pc = 0; pc != 0x180; pc++)
 		if (ops[pc].jump)
-			return false;
+			branchy = true;
 	if (swp.m_reverb_ram.size() < 0x40000)
 		return false;
 
@@ -335,6 +341,7 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 	const s32 o_seed     = off(&swp, &swp.m_rand_seed);
 	const s32 o_flag_n   = off(&swp, &swp.m_meg_flag_n);
 	const s32 o_flag_z   = off(&swp, &swp.m_meg_flag_z);
+	const s32 o_skip     = off(&swp, &swp.m_meg_jit_skip);
 
 	if (sizeof(ms.m_mw_reg[0]) != 1 || sizeof(ms.m_index_active[0]) != 1 || sizeof(ms.m_memw_active[0]) != 1 ||
 	    sizeof(swp.m_meg_flag_n) != 1 || sizeof(ms.m_t_value[0]) != 2 || sizeof(ms.m_const[0]) != 2 ||
@@ -390,8 +397,8 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 			return !(e && e[0] == '0');
 		}();
 		for (u32 x = 1; x != 128; x++) {
-			early_r[x] = early_on && !bad_r[x];
-			early_m[x] = early_on && !bad_m[x];
+			early_r[x] = early_on && !branchy && !bad_r[x];
+			early_m[x] = early_on && !branchy && !bad_m[x];
 		}
 	}
 
@@ -426,6 +433,8 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 	a.imm64(K_MAX, 0x7fffff);                            // pack24 の限界（即値を毎回積まないため）
 	a.imm64(K_MIN, u64(s64(-0x800000)));
 	load_p_limits();
+	if (branchy)
+		a.store32i(mem{SWP, NOREG, 1, o_skip}, 0);
 
 	// p を 24bit に詰める（meg_pack24）。入力 rax、出力 eax
 	const auto pack24 = [&]() {
@@ -467,7 +476,7 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 		const meg_state::op &o = ops[k];
 
 		// ---- 反映（遅れて入る書き込み）----
-		if (k < 3) {
+		if (k < 3 || branchy) {
 			const u32 s = slot3(k);
 			// m
 			a.loadu8(RAX, M(o_mw_reg + s));
@@ -506,7 +515,7 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 				a.store32(M(o_ram_index), RCX);
 			}
 		}
-		if (k < 2) {
+		if (k < 2 || branchy) {
 			const u32 s = slot2(k);
 			a.loadu8(RAX, M(o_memw_act + s));
 			a.test32(RAX, RAX);
@@ -534,6 +543,34 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 				a.store32(M(o_ram_read), RCX);
 			}
 		}
+
+		// ---- 分岐と、飛ばされた命令 ----
+		size_t skip_jump = 0, jump_done = 0;
+		if (branchy) {
+			a.cmp32i_mem(mem{SWP, NOREG, 1, o_skip}, k);
+			skip_jump = a.jcc_fwd(0x87);                             // ja: 飛ばす位置がこの命令より後
+			if (o.jump) {
+				// meg_cond を機械語で
+				size_t no_jump = 0;
+				if (o.cond & 8) {
+					a.loadu8(RAX, mem{SWP, NOREG, 1, o_flag_n});
+					if (!(o.cond & 4))
+						a.xor32ri(RAX, 1);
+					if (o.cond & 2) {
+						a.loadu8(RCX, mem{SWP, NOREG, 1, o_flag_z});
+						a.or32(RAX, RCX);
+					}
+					a.test32(RAX, RAX);
+					no_jump = a.jz_fwd();
+				}
+				if (o.target > k)
+					a.store32i(mem{SWP, NOREG, 1, o_skip}, o.target);
+				if (no_jump)
+					a.patch(no_jump);
+				jump_done = a.jmp_fwd();                             // 分岐の命令そのものも、飛ばされた命令と同じ後始末をする
+			}
+		}
+		if (!(branchy && o.jump)) {
 
 		// ---- ALU ----
 		// bake のときは定数（と、そこから決まる m1）を焼き込む。係数 0 の掛け算は省き、
@@ -732,7 +769,7 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 			} else
 				a.store32(M(o_mw_value + 4 * slot3(k)), RAX);
 		}
-		if (k >= 0x17d)
+		if (k >= 0x17d || branchy)
 			a.store8i(M(o_mw_reg + slot3(k)), o.dm);
 
 		// ---- dr ----
@@ -748,7 +785,7 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 			} else
 				a.store32(M(o_rw_value + 4 * slot3(k)), RAX);
 		}
-		if (k >= 0x17d)
+		if (k >= 0x17d || branchy)
 			a.store8i(M(o_rw_reg + slot3(k)), o.dr);
 
 		// ---- メモリへの書き値 ----
@@ -757,7 +794,7 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 			a.sar64(RAX, 15);
 			a.store32(M(o_memw_val + 4 * slot2(k)), RAX);
 		}
-		if (k >= 0x17e)
+		if (k >= 0x17e || branchy)
 			a.store8i(M(o_memw_act + slot2(k)), o.memw ? 1 : 0);
 
 		// ---- index ----
@@ -766,7 +803,7 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 			a.sar64(RAX, 15 + 8);
 			a.store32(M(o_ix_value + 4 * slot3(k)), RAX);
 		}
-		if (k >= 0x17d)
+		if (k >= 0x17d || branchy)
 			a.store8i(M(o_ix_act + slot3(k)), o.index ? 1 : 0);
 
 		// ---- t ----
@@ -842,8 +879,34 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 		}
 		if (table_done)
 			a.patch(table_done);
-		if (k >= 0x17e)
+		if (k >= 0x17e || branchy)
 			a.store8i(M(o_memr_act + slot2(k)), (o.memop == 2 || o.memop == 3) ? 1 : 0);
+		}   // !(branchy && o.jump)
+
+		if (branchy) {
+			const size_t normal_done = o.jump ? 0 : a.jmp_fwd();
+			a.patch(skip_jump);
+			if (jump_done)
+				a.patch(jump_done);
+			// 飛ばされた命令（と分岐の命令）: 輪に入れる書き込みを消し、t の値を入れる
+			a.store8i(M(o_mw_reg + slot3(k)), 0);
+			a.store8i(M(o_rw_reg + slot3(k)), 0);
+			a.store8i(M(o_memw_act + slot2(k)), 0);
+			a.store8i(M(o_ix_act + slot3(k)), 0);
+			if (need_tval[k]) {
+				a.mov64(RAX, P);
+				a.sar64(RAX, 15 + 8);
+				a.imm64(RCX, u64(s64(-0x8000)));
+				a.cmp64(RAX, RCX);
+				a.cmovl64(RAX, RCX);
+				a.imm64(RCX, 0x7fff);
+				a.cmp64(RAX, RCX);
+				a.cmovg64(RAX, RCX);
+				a.store16(M(o_t_value + 2 * slot2(k)), RAX);
+			}
+			if (normal_done)
+				a.patch(normal_done);
+		}
 	}
 
 	// 出口
