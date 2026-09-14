@@ -2,7 +2,7 @@ name: Sync fork with upstream
 
 on:
   schedule:
-    - cron: '0 * * * *'   # every hour
+    - cron: '0 * * * *'
   workflow_dispatch:
 
 permissions:
@@ -16,7 +16,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: main   # confirm this matches your fork's default branch
+          ref: main 
 
       - name: Add upstream remote
         run: git remote add upstream https://github.com/tarboh/S-MU2000.git
