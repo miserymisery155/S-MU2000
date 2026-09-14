@@ -2,6 +2,8 @@
 
 #include "player.h"
 
+#include <algorithm>
+
 #include <windows.h>
 
 namespace ui {
@@ -37,6 +39,9 @@ bool player::start(const std::string &path, bridge &br, std::string &err)
 	}
 
 	m_events = std::move(evs);
+	m_ports_used = 1;
+	for (const smf::event &e : m_events)
+		m_ports_used = std::max(m_ports_used, int(e.port) + 1);
 	m_len = m_events.back().time;
 	const size_t slash = path.find_last_of("/\\");
 	m_name = (slash == std::string::npos) ? path : path.substr(slash + 1);
@@ -74,12 +79,14 @@ void player::run(bridge &br)
 		const double sec = double(now.QuadPart - t0.QuadPart) / double(f.QuadPart);
 		m_pos.store(sec, std::memory_order_relaxed);
 
-		// 来ている分をまとめて送る。トラックの出し先（SMF の FF 21 のポート指定）が 1 なら口 B へ。
-		// MU2000 の口は 2 つなので、2 以上も口 B にする（render と同じ）
+		// 来ている分をまとめて送る。トラックの出し先（SMF のポート指定）が 0 なら口 A、1 なら口 B。
+		// エミュは A・B の 2 口しか持たない（実機の C・D は未対応）ので、口 3・4 は選んだ扱いに従う（A・B に重ねるか、鳴らさない）
+		const bool fold = m_fold.load(std::memory_order_relaxed);
 		while (at < m_events.size() && m_events[at].time <= sec) {
 			const smf::event &e = m_events[at];
-			if (e.port >= 1) br.send_b(e.bytes.data(), e.bytes.size());
-			else             br.send(e.bytes.data(), e.bytes.size());
+			const int to = smf::mu_port(e.port, fold);
+			if (to == 1)      br.send_b(e.bytes.data(), e.bytes.size());
+			else if (to == 0) br.send(e.bytes.data(), e.bytes.size());
 			at++;
 		}
 		if (at >= m_events.size())

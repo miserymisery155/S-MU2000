@@ -166,8 +166,8 @@ int main(int argc, char **argv)
 			if (ev.size() == 2 && ev[0] == 0xf5)
 				port = std::clamp(int(ev[1]) - 1, 0, mu2000::MIDI_PORTS - 1);
 			else {
-				const int to = port >= 0 ? port
-				             : std::min<int>(events[next].port, mu2000::MIDI_PORTS - 1);
+				// ファイルの口 3・4 は gui の既定と同じく A・B に重ねる
+				const int to = port >= 0 ? port : smf::mu_port(events[next].port, true);
 				for (u8 b : ev)
 					mu.midi_in(b, to);
 			}

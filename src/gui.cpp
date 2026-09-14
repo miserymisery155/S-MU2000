@@ -285,7 +285,7 @@ std::string settings_path()
 void load_settings(std::string &in_name, std::string &in_name_b,
                    std::string &out_name, std::string &out_name_b,
                    std::string &audio_name, float *volume = nullptr,
-                   std::string *out_name_mu = nullptr)
+                   std::string *out_name_mu = nullptr, bool *fold_ports34 = nullptr)
 {
 	const std::string path = settings_path();
 	if (path.empty())
@@ -308,6 +308,7 @@ void load_settings(std::string &in_name, std::string &in_name_b,
 		if (key == "midi_out_b") out_name_b = val;
 		if (key == "midi_out_mu" && out_name_mu) *out_name_mu = val;
 		if (key == "audio_out")  audio_name = val;
+		if (key == "ports34" && fold_ports34) *fold_ports34 = val != "drop";
 		if (key == "volume" && volume && !val.empty())
 			*volume = std::clamp(float(std::atof(val.c_str())), 0.0f, 1.0f);
 	}
@@ -337,6 +338,7 @@ void save_settings()
 	// firmware の RAM には入らないので、こちらで覚える
 	if (g_win.br)
 		std::fprintf(f, "volume=%.3f\n", g_win.br->gain());
+	std::fprintf(f, "ports34=%s\n", g_win.play_file.fold_extra_ports() ? "fold" : "drop");
 	std::fclose(f);
 }
 
@@ -359,7 +361,7 @@ enum : UINT {
 	ID_OUT_NONE = 1900, ID_OUT_BASE = 1901,
 	ID_OUTB_NONE = 2400, ID_OUTB_BASE = 2401,
 	ID_OUTMU_NONE = 3100, ID_OUTMU_BASE = 3101,
-	ID_PLAY_FILE = 2900, ID_STOP_FILE = 2901,
+	ID_PLAY_FILE = 2900, ID_STOP_FILE = 2901, ID_PORTS34_FOLD = 2902, ID_PORTS34_DROP = 2903,
 	ID_FACTORY = 3000,
 	ID_PC_EDITOR = 3001,
 	ID_OVERVIEW = 3002,
@@ -432,6 +434,11 @@ void show_card_menu(HWND hwnd, POINT screen)
 	if (on)
 		stop += "（" + g_win.play_file.name() + "）";
 	add_item(m, MF_STRING | (on ? 0 : MF_GRAYED), ID_STOP_FILE, stop.c_str());
+	AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+	// エミュの口は A・B の 2 つ（実機の C・D は未対応）。3〜4 口の MIDI ファイルの口 3・4 をどうするか
+	const bool fold = g_win.play_file.fold_extra_ports();
+	add_item(m, MF_STRING | (fold ? MF_CHECKED : 0), ID_PORTS34_FOLD, "口 3・4 を A・B に重ねて鳴らす");
+	add_item(m, MF_STRING | (fold ? 0 : MF_CHECKED), ID_PORTS34_DROP, "口 3・4 は鳴らさない");
 	TrackPopupMenu(m, TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON,
 	               screen.x, screen.y, 0, hwnd, nullptr);
 	DestroyMenu(m);
@@ -449,6 +456,9 @@ void play_midi_file(HWND hwnd, const std::string &path)
 		return;
 	}
 	std::printf("再生: %s（%.1f 秒）\n", path.c_str(), g_win.play_file.length());
+	if (g_win.play_file.ports_used() > 2)
+		std::printf("  この曲は %d 口ぶん。C・D は未対応なので、口 3 以降は%s\n", g_win.play_file.ports_used(),
+		            g_win.play_file.fold_extra_ports() ? " A・B に重ねて鳴らす" : "鳴らさない");
 	std::fflush(stdout);
 }
 
@@ -781,6 +791,10 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 		else if (id >= ID_OUTMU_BASE && id < ID_OUTMU_BASE + 256) choose_out_mu(int(id - ID_OUTMU_BASE));
 		else if (id == ID_PLAY_FILE) choose_midi_file(hwnd);
 		else if (id == ID_STOP_FILE) g_win.play_file.stop();
+		else if (id == ID_PORTS34_FOLD || id == ID_PORTS34_DROP) {
+			g_win.play_file.set_fold_extra_ports(id == ID_PORTS34_FOLD);
+			save_settings();
+		}
 		else if (id == ID_FACTORY) choose_factory_reset(hwnd);
 		else if (id == ID_PC_EDITOR) open_window(hwnd, g_win.pc);
 		else if (id == ID_OVERVIEW) open_window(hwnd, g_win.list);
@@ -1134,8 +1148,10 @@ int main(int argc, char **argv)
 		// VOLUME のつまみは前に閉じたときの位置から
 		std::string a, b, c, d, e;
 		float volume = 1.0f;
-		load_settings(a, b, c, d, e, &volume);
+		bool fold34 = true;
+		load_settings(a, b, c, d, e, &volume, nullptr, &fold34);
 		br.set_gain(volume);
+		g_win.play_file.set_fold_extra_ports(fold34);
 	}
 
 	eng.publish();

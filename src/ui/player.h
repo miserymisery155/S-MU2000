@@ -35,6 +35,11 @@ public:
 	void stop();
 
 	bool playing() const { return m_playing.load(std::memory_order_acquire); }
+	// 3 口目以降（口 3・4）を A・B に重ねて鳴らすか（偽なら鳴らさない）。流している途中でも変えられる
+	void set_fold_extra_ports(bool on) { m_fold.store(on, std::memory_order_relaxed); }
+	bool fold_extra_ports() const { return m_fold.load(std::memory_order_relaxed); }
+	// 開いたファイルが使っている口の数（1〜）
+	int ports_used() const { return m_ports_used; }
 	std::string name() const { return m_name; }
 	double position() const { return m_pos.load(std::memory_order_relaxed); }
 	double length() const   { return m_len; }
@@ -47,6 +52,8 @@ private:
 	std::atomic<bool> m_quit{false};
 	std::atomic<bool> m_playing{false};
 	std::atomic<double> m_pos{0};
+	std::atomic<bool> m_fold{true};
+	int         m_ports_used = 1;
 	double      m_len = 0;
 	std::string m_name;
 };

@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cctype>
 #include <cstring>
 
 namespace smf {
@@ -74,6 +75,16 @@ bool load(const std::string &path, std::vector<event> &out, std::string &err)
 					                (u32(d[p]) << 16) | (d[p+1] << 8) | d[p+2], 0 });
 				if (type == 0x21 && l == 1)
 					port = d[p];
+				if (type == 0x09 && l >= 1 && l <= 32) {
+					// 機器名で口を言う流儀。「A」〜「D」か「Port 1」〜「Port 4」（大文字小文字は問わない）だけ見る
+					std::string name(d.begin() + p, d.begin() + std::min(p + size_t(l), end));
+					while (!name.empty() && (name.back() == ' ' || name.back() == 0)) name.pop_back();
+					for (char &c : name) c = char(std::tolower(u8(c)));
+					if (name.size() == 1 && name[0] >= 'a' && name[0] <= 'd')
+						port = u8(name[0] - 'a');
+					else if (name.size() == 6 && name.compare(0, 5, "port ") == 0 && name[5] >= '1' && name[5] <= '4')
+						port = u8(name[5] - '1');
+				}
 				p += size_t(l);
 				continue;
 			}

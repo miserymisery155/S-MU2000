@@ -619,35 +619,40 @@ void swp30_device::streaming_block::dpcm_step(u8 input)
 	m_dpcm_s1 = m_dpcm_s2;
 	m_dpcm_s2 = m_dpcm_s3;
 
-	s32 delta = m_dpcm_delta + dpcm_expand[input];
+	// S-MU2000: 差分は下 8bit の端数を持つ（m_dpcm_delta は 24.8）。積算器へは下へ丸めて足す
+	s32 delta = m_dpcm_delta + dpcm_expand[input] * 256;
 
-	// S-MU2000: **圧縮モード 0-2 の積算器は漏れる**（極が 1 ではない）。
+	// S-MU2000: **圧縮モード 0-2 の積算器は漏れる**（極が 1 ではない）。差分の減り方も MAME と違う。
 	//
-	// MAME は漏れの無い積分器にしているが、それだと ROM のデータが合わない。
 	// モード 0-2 のサンプルは差分が系統的に正へ偏っていて（トランペットの
 	// 上のキーレンジで 5086 バイトの総和が +3119、ループ 1 周あたり +960）、
-	// 漏れずに積むと 0.2 秒で上限に張り付き、直流の塊になる。
+	// 漏れの無い積分器で積むと 0.2 秒で上限に張り付き、直流の塊になる。
 	// モード 3 のサンプルは**ループ 1 周の総和がぴったり 0** に作られていて、
-	// そちらは漏れの無い積分器で合う。だから漏れるのは 0-2 だけ。
+	// そちらは漏れの無い積分器で合う（モード 3 の音は下の変更で**1 ビットも変わらない**）。
 	//
-	// 割合は実機を S/PDIF で録って決めた。トランペット（GM 57）の
-	// 音 52（モード 2）と音 51（モード 3）を 1 音ずつ鳴らして突き合わせ、
-	// 基音と 2・3 倍音の比が実機に乗るところを探した:
+	// 前は漏れ 3/128 と、差分を 0 へ丸めて減らす形にしていた（トランペットの 1 音で合わせた。今の MAME も同じ形）。
+	// 実機を XG モードにして圧縮サンプルの音色を録ると、エミュレータだけ直流が
+	// 実効値の -0.07〜-0.34 ほど寄っていた（実機は ±0.03 以内）。
 	//
-	//   漏れ    h1/h2   h1/h3   15 倍音までの食い違い   30Hz 以下
-	//   実機    0.7357  1.3410        —                  0.13%
-	//   無し    0.8782  1.5637      0.041                27.12%
-	//   4/256   0.7466  1.3827      0.006                11.20%
-	//   6/256   0.7295  1.3446      0.002                 5.32%   ← これ
-	//   8/256   0.7071  1.2948      0.005                 3.07%
+	// 減り方の形は、実機でなく ROM のサンプルそのもので決めた。XG の 134 音色で音域全体を鳴らし、
+	// 使われた 84 本の圧縮サンプルを何百通りもの展開のしかたで同時に展開して、
+	// 直流/実効の中央値を比べた（元の楽器の録音に直流は無いので、正しい展開ほど 0 に近い）。
+	// 差分を k(差分 - 1)/d（k/d = 7/8, 3/4, 1/2）で減らすと、3 つのモードが同じ式で揃う:
 	//
-	// 食い違い 0.002 は、正しく鳴っているモード 3 のサンプル（0.003）より
-	// 良い。モード 3 の音は**1 ビットも変わらない**。
-	// 残りの 30Hz 以下 5.3%（実機 0.13%）はまだ説明できていない
+	//   展開のしかた                     モード 0  モード 1  モード 2
+	//   漏れ無し・0 へ丸め                0.923     0.845     0.814
+	//   漏れ 3/128・0 へ丸め（前、MAME）  0.223     0.146     0.061
+	//   k(差分 - 1)/d、漏れ 1/128         0.010     0.008     0.007
+	//
+	// 漏れの量は直流では決まらない（多いほど 0 に近い）ので、実機の録音で決めた。
+	// 1/128 より少ないと dense の試験曲の Trumpet で 30Hz 以下が実機より多く（1/256 で 7%、
+	// 実機 0.5%）、多いと AltoSax の低い音などで倍音の並びが実機から離れる（3/128 近くで
+	// 1〜8 倍音の食い違いが 0.15 → 0.29dB）。パフォーマンス 100 個の帯の食い違いの平均は
+	// 1.111 → 1.101dB（Stereo Grand 4.4 → 3.5、悪くなったものは無し）
 	s32 acc = m_dpcm_s3;
 	if(mode != 3)
-		acc -= s32((s64(acc) * 3) >> 7);
-	s32 sample = acc + (delta << scale);
+		acc -= acc >> 7;
+	s32 sample = acc + ((delta >> 8) << scale);
 
 	// S-MU2000: MAME は上限に当たると差分を 0 にしていた。そうすると次のサンプルから波形が崩れ、
 	// ループのたびに雑音が出る（XG の Flute の高い音、doc/upstream.md の 17）。上限で切り詰めるだけにする。
@@ -658,10 +663,11 @@ void swp30_device::streaming_block::dpcm_step(u8 input)
 		sample = limit;
 	m_dpcm_s3 = sample;
 
+	// k(差分 - 1)/d を 8bit の端数で下へ丸める（+128 は端数の丸めの寄せ、上の表はこの形で測った）
 	switch(mode) {
-	case 0: delta = delta * 7 / 8; break;
-	case 1: delta = delta * 3 / 4; break;
-	case 2: delta = delta     / 2; break;
+	case 0: delta = (delta * 7 - 7 * 256 + 128) >> 3; break;
+	case 1: delta = (delta * 3 - 3 * 256 + 128) >> 2; break;
+	case 2: delta = (delta     -     256 + 128) >> 1; break;
 	case 3: delta = 0; break;
 	}
 	m_dpcm_delta = delta;
@@ -2003,6 +2009,9 @@ u16 swp30_device::read16(offs_t addr)
 	case 0x74e: return meg_map_r<5>();
 	case 0x78e: return meg_map_r<6>();
 	case 0x7ce: return meg_map_r<7>();
+	// S-MU2000: 書いた値を読み返せる。AUTO PAN 2 は表をリバーブ RAM へ直に書く前に、
+	// ここが 0 でなくなるのを待つ（読めないと firmware が止まる。doc/upstream.md の 22）
+	case 0x80e: return m_revram_enable;
 	case 0x84e: return revram_status_r();
 	case 0x98e: return revram_data_r<1>();
 	case 0x98f: return revram_data_r<0>();
@@ -3491,7 +3500,8 @@ void swp30_device::meg_state::step()
 	const int t  = d.t;
 
 	const u32 mmode = d.mmode;
-	if(mmode != 0) {
+	// S-MU2000: 掛け算の無い形（mmode 0）でも、シフトと飽和は p にかかる（doc/upstream.md の 21）
+	if(mmode != 0 || d.shift || d.clamp) {
 		const u32 m1t = d.m1t;
 		s64 m1 = m1t == 1 || m1t == 2 ? m_t[t] : m_const[m_pc];
 		if(d.m1_expand)
@@ -3501,6 +3511,9 @@ void swp30_device::meg_state::step()
 
 		s64 m;
 		switch(mmode) {
+		case 0:
+			m = 0;
+			break;
 		case 1:
 			m = m1 << (8+15);
 			break;
@@ -3541,7 +3554,9 @@ void swp30_device::meg_state::step()
 			r <<= shift == 3 ? 4 : shift;
 
 		// wrap at 42 bits (27.15)
-		r = util::sext(r, 42);
+		// S-MU2000: 飽和する形（=s など）は折り返さずに止める（doc/upstream.md の 20）
+		if(d.clamp == 0)
+			r = util::sext(r, 42);
 
 		switch(d.clamp) {
 		case 0:
@@ -3712,7 +3727,7 @@ void swp30_device::meg_state::build_ops(op *ops) const
 		const decoded &d = m_decoded[pc];
 		op &o = ops[pc];
 		o = op{};
-		o.alu       = d.mmode != 0;
+		o.alu       = d.mmode != 0 || d.shift || d.clamp;   // mmode 0 でもシフトと飽和はかかる（upstream 21）
 		o.mmode     = d.mmode;
 		o.m1_from_t = d.m1t == 1 || d.m1t == 2;
 		o.m1_expand = d.m1_expand;
@@ -3806,6 +3821,7 @@ void swp30_device::meg_state::run_program(const op *ops)
 
 			s64 m;
 			switch(o.mmode) {
+			case 0:  m = 0; break;
 			case 1:  m = m1 << (8+15); break;
 			case 2:  m = m1 * m2; break;
 			default: m = m2 << 15; break;
@@ -3829,7 +3845,8 @@ void swp30_device::meg_state::run_program(const op *ops)
 			}
 
 			r <<= o.shift;
-			r = util::sext(r, 42);
+			if(o.clamp == 0)
+				r = util::sext(r, 42);
 
 			switch(o.clamp) {
 			case 0:  break;
