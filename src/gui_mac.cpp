@@ -37,16 +37,22 @@
 #include "ui/audio_out.h"
 #include "ui/bridge.h"
 #include "ui/engine.h"
+#include "ui/fx_editor.h"
 #include "ui/layout.h"
 #include "ui/midi_in.h"
 #include "ui/midi_out.h"
+#include "ui/overview.h"
 #include "ui/panel.h"
+#include "ui/part_shapes.h"
+#include "ui/pc_editor.h"
+#include "ui/pc_window_mac.h"
 #include "ui/player.h"
 #include "ui/png.h"
 #include "ui/window_mac.h"
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -67,6 +73,10 @@ enum : int {
 	ID_OUTMU_NONE = 3100, ID_OUTMU_BASE = 3101,
 	ID_PLAY_FILE = 2900, ID_STOP_FILE = 2901,
 	ID_FACTORY = 3000,
+	// The PC editor windows. The same numbers gui.cpp uses, so the two front
+	// ends stay describable by one another
+	ID_PC_EDITOR = 3001,
+	ID_OVERVIEW = 3002,
 	// A/D INPUT (the recording device) and SmartMedia. Same numbers as gui.cpp's.
 	//
 	// They must not land inside another menu's range: a port menu occupies
@@ -268,6 +278,13 @@ public:
 	ui::panel  panel;
 	ui::player play;
 
+	// The PC editor windows. Same contents as on Windows; only the window is
+	// AppKit + Metal (ui/pc_window_mac.mm). F2 / F3 or right-click opens them
+	ui::pc_window pc{ std::make_unique<ui::pc_editor>() };    // PC editor (F2 or right-click)
+	ui::pc_window list{ std::make_unique<ui::overview>() };   // overview (F3 or right-click)
+	ui::pc_window fx{ std::make_unique<ui::fx_editor>() };    // insertion settings (double-click in the overview)
+	ui::pc_window shapes{ std::make_unique<ui::part_shapes>() };  // part voice (double-click a VIB/FILTER/EG/EQ cell in the overview)
+
 	std::string layout_path;
 
 	// ---- mac_app
@@ -277,6 +294,17 @@ public:
 		// The window's timer is where this has to happen: it touches the bridge,
 		// so it must not run on the audio thread (same as gui.cpp's WM_TIMER)
 		panel.tick(br);
+		// the PC editor windows, where the Windows side has its WM_TIMER
+		pc.frame(panel.xg(), panel.ram(), br);
+		list.frame(panel.xg(), panel.ram(), br);
+		fx.frame(panel.xg(), panel.ram(), br);
+		shapes.frame(panel.xg(), panel.ram(), br);
+		// a double-click on an insertion row in the overview asks for this window
+		if (ui::xgui::take_fx_request())
+			open_editor_window(fx);
+		// a double-click on a VIB/FILTER/EG/EQ cell in the overview asks for the part voice
+		if (ui::xgui::take_part_request())
+			open_editor_window(shapes);
 		card_tick();
 		report_drops();
 
@@ -355,6 +383,14 @@ public:
 				reload_layout();
 			return;
 		}
+		if (down && code == ui::MAC_KEY_FUNCTION_BASE + 0x78) {   // F2
+			open_editor_window(pc);
+			return;
+		}
+		if (down && code == ui::MAC_KEY_FUNCTION_BASE + 0x63) {   // F3
+			open_editor_window(list);
+			return;
+		}
 		mu2000::button b = mu2000::button::count;
 		if (key_to_button(code, b))
 			br.press(b, down);
@@ -431,6 +467,12 @@ public:
 		groups.push_back(port_group("A/D INPUT（録音デバイス）", ui::audio_in::list(), ain_dev,
 		                            ID_AIN_NONE, ID_AIN_BASE));
 
+		// The PC editor windows, where Windows' right-click menu has them
+		ui::menu_group ed;
+		ed.items.push_back(item("一覧を開く（F3）", ID_OVERVIEW, false, true));
+		ed.items.push_back(item("エディタを開く（F2）", ID_PC_EDITOR, false, true));
+		groups.push_back(ed);
+
 		// Throwing the settings away reboots the machine, so it is only offered
 		// once the firmware is actually up
 		ui::menu_group g;
@@ -465,6 +507,8 @@ public:
 		else if (id >= ID_CARD_NEW16 && id <= ID_CARD_NEW128)         new_card(16u << (id - ID_CARD_NEW16));
 		else if (id == ID_PORTS34_FOLD)                               set_fold34(true);
 		else if (id == ID_PORTS34_DROP)                               set_fold34(false);
+		else if (id == ID_PC_EDITOR)                                  open_editor_window(pc);
+		else if (id == ID_OVERVIEW)                                   open_editor_window(list);
 		else if (id == ID_FACTORY)                                    factory_reset();
 		else if (id == ID_PLAY_FILE) {
 			const std::string path = ui::open_midi_file_panel();
@@ -480,6 +524,15 @@ public:
 	}
 
 	// ---- the rest
+
+	// An editor window comes up, or says why it could not. Windows' open_window
+	// with its MessageBoxW, in AppKit clothing
+	void open_editor_window(ui::pc_window &w)
+	{
+		std::string err;
+		if (!w.show(err))
+			ui::alert_modal("S-MU2000", ("開けない: " + err).c_str());
+	}
 
 	void set_layout(const std::string &path)
 	{
@@ -919,12 +972,25 @@ int shot(const std::string &path, int w, int h, ui::bridge &br, bool grid,
 } // namespace
 
 
+// A MIDI file dropped on **any** window -- the panel's, or one of the editor
+// windows' -- is played. Windows' play_dropped_file (gui.cpp), in UTF-8
+app *g_gui = nullptr;                  // set once main has made the app
+
+void play_dropped_file(const std::string &path)
+{
+	if (g_gui)
+		g_gui->play_song(path);
+}
+
 int main(int argc, char **argv)
 {
 	smu2000::init_console_utf8();
 
 	std::string dir, shot_path, dump_layout, play_path;
 	std::string layout_path;
+	bool open_editor = false;          // open the PC editor with the panel
+	bool open_list = false;            // open the overview with the panel
+	bool open_fx = false;              // open the insertion settings with the panel
 	int midi_dev = -2;                 // -2 unset (use the remembered one) / -1 unused
 	int midib_dev = -2;
 	int mout_dev = -2;
@@ -984,6 +1050,9 @@ int main(int argc, char **argv)
 		else if (!std::strcmp(argv[i], "--exclusive")) exclusive = true;
 		else if (!std::strcmp(argv[i], "--audio") && i + 1 < argc) audio_dev = argv[++i];
 		else if (!std::strcmp(argv[i], "--factory")) factory = true;
+		else if (!std::strcmp(argv[i], "--editor")) open_editor = true;
+		else if (!std::strcmp(argv[i], "--list-window")) open_list = true;
+		else if (!std::strcmp(argv[i], "--fx-window")) open_fx = true;
 		else if (!std::strcmp(argv[i], "--shot") && i + 1 < argc) shot_path = argv[++i];
 		else if (!std::strcmp(argv[i], "--boot")) boot_for_shot = true;
 		else if (!std::strcmp(argv[i], "--grid")) grid = true;
@@ -1037,6 +1106,9 @@ int main(int argc, char **argv)
 			" [--midiout 番号] [--midiout-b 番号] [--midiout-mu 番号]"
 			" [--latency ミリ秒] [--exclusive] [--layout panel.txt] [--play 曲.mid]\n"
 			"        [--factory]   覚えている設定を捨てて工場出荷状態で起動する\n"
+			"        [--editor]    PC エディタも開く（窓では F2 か右クリック）\n"
+			"        [--list-window] 一覧の窓も開く（窓では F3 か右クリック）\n"
+			"        [--fx-window] インサーションの設定の窓も開く（一覧でインサーションの欄をダブルクリック）\n"
 			"        gui --dump-layout panel.txt   いまの配置を書き出す\n"
 			"        gui --list\n"
 			"        gui [<rom ディレクトリ> --boot] --shot 絵.png [--size 1400x440]\n");
@@ -1052,6 +1124,8 @@ int main(int argc, char **argv)
 		std::fprintf(stderr, "%s\n", eng.message.c_str());
 		return 1;
 	}
+	// the overview reads voice names and instrument icons from the user's ROM (xg/voices.h)
+	ui::xgui::set_voice_rom(eng.mu.program_rom());
 
 	// Picture only, but taken after boot so the LCD has something on it
 	if (!shot_path.empty()) {
@@ -1094,6 +1168,9 @@ int main(int argc, char **argv)
 	// ---- Put the window up
 
 	static app gui(br, midi, midi_b, mout, mout_b, mout_mu);
+	g_gui = &gui;
+	// a MIDI file dropped on any window plays (the panel, the editor, the overview)
+	ui::pc_window::set_drop_handler(play_dropped_file);
 	gui.keep_settings = nomidi;
 	gui.eng = &eng;
 	gui.state = &eng.state;
@@ -1223,7 +1300,24 @@ int main(int argc, char **argv)
 		std::fflush(stdout);
 	});
 
+	// with --editor and friends, open those windows with the panel (same order as gui.cpp)
+	if (open_editor)
+		gui.open_editor_window(gui.pc);
+	if (open_fx)
+		gui.open_editor_window(gui.fx);
+	if (open_list)
+		gui.open_editor_window(gui.list);
+
 	ui::run_window(gui, "S-MU2000", win_w, win_h);
+
+	// tell the editor windows we are closing (unmute the overview, restore its
+	// receive channels, ...). The audio thread drains what we sent, so pause
+	// a moment before stopping it
+	gui.list.shutdown(br);
+	gui.pc.shutdown(br);
+	gui.fx.shutdown(br);
+	gui.shapes.shutdown(br);
+	std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
 	out.stop();
 	ain.stop();

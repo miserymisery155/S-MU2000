@@ -173,28 +173,34 @@ $(BUILD)/panel$(EXE): $(OBJS) $(BUILD)/src/mu2000.o $(BUILD)/src/smf.o $(BUILD)/
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
 
+# PC editor (doc/pc-editor.md). Dear ImGui (MIT), vendored in third_party/imgui.
+# Only the window and the renderer are the platform's job: Windows uses Win32 +
+# Direct3D 11, macOS uses AppKit + Metal (src/ui/pc_window*.cpp/.mm). The views
+# are the same files.
+IMGUI_DIR   := third_party/imgui
+IMGUI_CORE  := $(IMGUI_DIR)/imgui.cpp $(IMGUI_DIR)/imgui_draw.cpp \
+               $(IMGUI_DIR)/imgui_tables.cpp $(IMGUI_DIR)/imgui_widgets.cpp
+IMGUI_FLAGS := -I $(IMGUI_DIR)
+
 # ---- Windows-side ports (audio, MIDI, display) and VST3 ----------------------
 #
 # These still call the Windows APIs directly. The macOS ones are added at each
 # step of the port as src/ui/*_mac.cpp and listed in the branch below
 ifeq ($(PLATFORM),windows)
 
+# no gamepad support, so no XInput
+IMGUI_FLAGS += -DIMGUI_IMPL_WIN32_DISABLE_GAMEPAD
+IMGUI_SRCS := $(IMGUI_CORE) \
+              $(IMGUI_DIR)/backends/imgui_impl_win32.cpp \
+              $(IMGUI_DIR)/backends/imgui_impl_dx11.cpp
+PC_SRCS    := src/ui/pc_editor.cpp src/ui/pc_window.cpp src/ui/xg_ui.cpp src/ui/overview.cpp src/ui/fx_editor.cpp src/ui/fx_help.cpp src/ui/part_shapes.cpp
+PC_OBJS    := $(IMGUI_SRCS:%.cpp=$(BUILD)/imgui/%.o) $(PC_SRCS:%.cpp=$(BUILD)/imgui/%.o)
+
 # gui は実機のフロントパネル風の画面を出す
 UI_SRCS := src/ui/panel.cpp src/ui/editor.cpp src/ui/effects.cpp src/ui/png.cpp \
            src/ui/audio_out.cpp src/ui/audio_in.cpp src/ui/midi_in.cpp src/ui/midi_out.cpp \
            src/ui/layout.cpp src/ui/svg.cpp src/ui/player.cpp src/xg/model.cpp
 UI_OBJS := $(UI_SRCS:%.cpp=$(BUILD)/%.o)
-
-# PC エディタ（doc/pc-editor.md）。Dear ImGui（MIT）を third_party/imgui に取り込んである。
-# 描画は Direct3D 11。ゲームパッドは使わないので XInput は外す
-IMGUI_DIR  := third_party/imgui
-IMGUI_SRCS := $(IMGUI_DIR)/imgui.cpp $(IMGUI_DIR)/imgui_draw.cpp \
-              $(IMGUI_DIR)/imgui_tables.cpp $(IMGUI_DIR)/imgui_widgets.cpp \
-              $(IMGUI_DIR)/backends/imgui_impl_win32.cpp \
-              $(IMGUI_DIR)/backends/imgui_impl_dx11.cpp
-PC_SRCS    := src/ui/pc_editor.cpp src/ui/pc_window.cpp src/ui/xg_ui.cpp src/ui/overview.cpp src/ui/fx_editor.cpp src/ui/fx_help.cpp src/ui/part_shapes.cpp
-PC_OBJS    := $(IMGUI_SRCS:%.cpp=$(BUILD)/imgui/%.o) $(PC_SRCS:%.cpp=$(BUILD)/imgui/%.o)
-IMGUI_FLAGS := -I $(IMGUI_DIR) -DIMGUI_IMPL_WIN32_DISABLE_GAMEPAD
 
 $(BUILD)/imgui/%.o: %.cpp
 	@mkdir -p $(dir $@)
@@ -319,7 +325,8 @@ MAC_FRAMEWORKS := -framework CoreAudio -framework AudioToolbox \
                   -framework CoreMIDI -framework AudioUnit \
                   -framework CoreFoundation -framework CoreGraphics \
                   -framework CoreText -framework Cocoa \
-                  -framework UniformTypeIdentifiers
+                  -framework UniformTypeIdentifiers \
+                  -framework QuartzCore
 
 MAC_IO_OBJS := $(BUILD)/src/ui/audio_out_mac.o $(BUILD)/src/ui/midi_in_mac.o
 
@@ -343,6 +350,26 @@ MAC_GUI_SRCS := src/ui/panel.cpp src/ui/editor.cpp src/ui/effects.cpp \
                 src/ui/midi_in_mac.cpp src/ui/midi_out_mac.cpp \
                 src/xg/model.cpp \
                 src/compat/gdi_mac.cpp src/ui/window_mac.mm src/gui_mac.cpp
+
+# PC editor (doc/pc-editor.md). The views are the same files as on Windows;
+# the window is AppKit + Metal (pc_window_mac.mm). imgui_impl_osx is not used
+# here, because the input would arrive in another window's context
+MAC_IMGUI_SRCS := $(IMGUI_CORE) \
+                  $(IMGUI_DIR)/backends/imgui_impl_metal.mm
+MAC_PC_SRCS    := src/ui/pc_editor.cpp src/ui/pc_window_mac.mm src/ui/xg_ui.cpp \
+                  src/ui/overview.cpp src/ui/fx_editor.cpp src/ui/fx_help.cpp src/ui/part_shapes.cpp
+MAC_PC_OBJS    := $(MAC_IMGUI_SRCS) $(MAC_PC_SRCS)
+MAC_PC_OBJS    := $(MAC_PC_OBJS:%.cpp=$(BUILD)/imgui/%.o)
+MAC_PC_OBJS    := $(MAC_PC_OBJS:%.mm=$(BUILD)/imgui/%.o)
+
+$(BUILD)/imgui/%.o: %.cpp
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) $(IMGUI_FLAGS) -c -o $@ $<
+
+$(BUILD)/imgui/%.o: %.mm
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) $(IMGUI_FLAGS) -fobjc-arc -c -o $@ $<
+
 MAC_GUI_OBJS := $(MAC_GUI_SRCS:%.cpp=$(BUILD)/%.o)
 MAC_GUI_OBJS := $(MAC_GUI_OBJS:%.mm=$(BUILD)/%.o)
 
@@ -350,7 +377,13 @@ $(BUILD)/%.o: %.mm
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -fobjc-arc -c -o $@ $<
 
-$(BUILD)/gui$(EXE): $(OBJS) $(BUILD)/src/mu2000.o $(BUILD)/src/smf.o $(MAC_GUI_OBJS)
+# The macOS front end pulls in the editor's headers (fx_editor.h and friends),
+# which want imgui.h on the include path. Same reason as gui.o on Windows
+$(BUILD)/src/gui_mac.o: CXXFLAGS += $(IMGUI_FLAGS)
+
+MAC_FRAMEWORKS += -framework Metal
+
+$(BUILD)/gui$(EXE): $(OBJS) $(BUILD)/src/mu2000.o $(BUILD)/src/smf.o $(MAC_GUI_OBJS) $(MAC_PC_OBJS)
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS) $(MAC_FRAMEWORKS)
 

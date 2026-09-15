@@ -230,10 +230,14 @@ void overview::cell(const column &c, int part, xg::model &m, const xg_snapshot &
 	if (editable) {
 		if (active && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 0.0f)) {
 			// 横にも縦にも効く。全域を 200px ほどで（Shift で細かく）
-			float &acc = *ImGui::GetStateStorage()->GetFloatRef(id, 0.0f);
+			// a Get*Ref reference goes stale when an insert grows the storage,
+			// so take a value and write it back
+			ImGuiStorage *st = ImGui::GetStateStorage();
+			float acc = st->GetFloat(id, 0.0f);
 			acc += (io.MouseDelta.x - io.MouseDelta.y) * float(hi - lo) / (io.KeyShift ? 800.0f : 200.0f);
 			const int step = int(acc);
 			if (step) { nv = std::clamp(nv + step, lo, hi); acc -= float(step); }
+			st->SetFloat(id, acc);
 		}
 		if (ImGui::IsItemDeactivated())
 			ImGui::GetStateStorage()->SetFloat(id, 0.0f);
@@ -248,13 +252,16 @@ void overview::cell(const column &c, int part, xg::model &m, const xg_snapshot &
 			ImGui::OpenPopup("##type");
 		if (ImGui::BeginPopup("##type")) {
 			ImGui::TextDisabled("%s %s（%d-%d）", master ? "MASTER" : part_name(part).c_str(), p->label, lo, hi);
-			int &typed = *ImGui::GetStateStorage()->GetIntRef(ImGui::GetID("typed"), v);
+			const ImGuiID typed_id = ImGui::GetID("typed");
+			ImGuiStorage *st = ImGui::GetStateStorage();
+			int typed = st->GetInt(typed_id, v);
 			if (ImGui::IsWindowAppearing()) { typed = v; ImGui::SetKeyboardFocusHere(); }
 			ImGui::SetNextItemWidth(fs * 6);
 			if (ImGui::InputInt("##n", &typed, 1, 10, ImGuiInputTextFlags_EnterReturnsTrue)) {
 				nv = std::clamp(typed, lo, hi);
 				ImGui::CloseCurrentPopup();
 			}
+			st->SetInt(typed_id, typed);
 			ImGui::EndPopup();
 		}
 		if (nv != v) {
@@ -494,7 +501,8 @@ void overview::eg_cell(int part, xg::model &m, bridge &br, float w, float h, boo
 	const float xr = xs + lr * squeeze;
 
 	// つかむ点。押した瞬間に一番近い点を選び、離すまで同じ点を動かす
-	int &grab = *ImGui::GetStateStorage()->GetIntRef(id, -1);
+	ImGuiStorage *st = ImGui::GetStateStorage();
+	int grab = st->GetInt(id, -1);
 	if (ImGui::IsItemActivated() && known) {
 		const float mx = io.MousePos.x;
 		const float dists[3] = { std::fabs(mx - xa), std::fabs(mx - xd), std::fabs(mx - xr) };
@@ -502,6 +510,7 @@ void overview::eg_cell(int part, xg::model &m, bridge &br, float w, float h, boo
 	}
 	if (!active)
 		grab = -1;
+	st->SetInt(id, grab);
 	if (active && known && grab >= 0 && io.MouseDelta.x != 0.0f) {
 		// 動かした幅を値に直す。2 倍の長さが 24 目盛り
 		auto apply = [&](const xg::param &p, int v, float from, float to_len) {
@@ -576,11 +585,15 @@ void overview::filter_cell(int part, xg::model &m, bridge &br, float w, float h,
 	const float yq = y_of(db_of_value(vq));
 
 	// つかんだときの、点とマウスのずれを覚えておき、点が指に飛ばないようにする
-	float &gx = *ImGui::GetStateStorage()->GetFloatRef(id, 0.0f);
-	float &gy = *ImGui::GetStateStorage()->GetFloatRef(id + 1, 0.0f);
+	// a Get*Ref reference goes stale when an insert grows the storage, so take
+	// a value and write it back
+	ImGuiStorage *st = ImGui::GetStateStorage();
+	float gx = st->GetFloat(id, 0.0f), gy = st->GetFloat(id + 1, 0.0f);
 	if (ImGui::IsItemActivated() && known) {
 		gx = xc - io.MousePos.x;
 		gy = yq - io.MousePos.y;
+		st->SetFloat(id, gx);
+		st->SetFloat(id + 1, gy);
 	}
 	if (active && known && (io.MouseDelta.x != 0.0f || io.MouseDelta.y != 0.0f)) {
 		const float fx = io.MousePos.x + gx, fy = io.MousePos.y + gy;
@@ -683,9 +696,9 @@ int eq_plot(const char *id, eq_band *bands, int n, xg::model &m, bridge &br, flo
 	auto handle = [&](const eq_band &b) { return ImVec2(x_of(float(HZ[b.vf])), y_of(float(b.vg - 64))); };
 
 	// 押した瞬間に一番近い点を選ぶ。ずれを覚えて、点が指に飛ばないようにする
-	int &grab = *ImGui::GetStateStorage()->GetIntRef(iid, -1);
-	float &gx = *ImGui::GetStateStorage()->GetFloatRef(iid + 1, 0.0f);
-	float &gy = *ImGui::GetStateStorage()->GetFloatRef(iid + 2, 0.0f);
+	ImGuiStorage *st = ImGui::GetStateStorage();
+	int grab = st->GetInt(iid, -1);
+	float gx = st->GetFloat(iid + 1, 0.0f), gy = st->GetFloat(iid + 2, 0.0f);
 	auto nearest = [&]() {
 		int best = -1; float bd = 1e9f;
 		for (int i = 0; i < n; i++) {
@@ -706,6 +719,9 @@ int eq_plot(const char *id, eq_band *bands, int n, xg::model &m, bridge &br, flo
 	}
 	if (!active)
 		grab = -1;
+	st->SetInt(iid, grab);
+	st->SetFloat(iid + 1, gx);
+	st->SetFloat(iid + 2, gy);
 	if (active && grab >= 0 && (io.MouseDelta.x != 0.0f || io.MouseDelta.y != 0.0f)) {
 		const eq_band &b = bands[grab];
 		const float t = (io.MousePos.x + gx - x0) / (x1 - x0);
@@ -864,9 +880,9 @@ void overview::vib_cell(int part, xg::model &m, bridge &br, float w, float h, bo
 	const float xd = x0 + delay;
 	const ImVec2 crest(xd + period * 0.25f, mid - amp);
 
-	int &grab = *ImGui::GetStateStorage()->GetIntRef(id, -1);
-	float &gx = *ImGui::GetStateStorage()->GetFloatRef(id + 1, 0.0f);
-	float &gy = *ImGui::GetStateStorage()->GetFloatRef(id + 2, 0.0f);
+	ImGuiStorage *st = ImGui::GetStateStorage();
+	int grab = st->GetInt(id, -1);
+	float gx = st->GetFloat(id + 1, 0.0f), gy = st->GetFloat(id + 2, 0.0f);
 	if (ImGui::IsItemActivated() && known) {
 		const float dd = std::fabs(io.MousePos.x - xd) + std::fabs(io.MousePos.y - mid);
 		const float dc = std::fabs(io.MousePos.x - crest.x) + std::fabs(io.MousePos.y - crest.y);
@@ -876,6 +892,9 @@ void overview::vib_cell(int part, xg::model &m, bridge &br, float w, float h, bo
 	}
 	if (!active)
 		grab = -1;
+	st->SetInt(id, grab);
+	st->SetFloat(id + 1, gx);
+	st->SetFloat(id + 2, gy);
 	if (active && known && grab >= 0 && (io.MouseDelta.x != 0.0f || io.MouseDelta.y != 0.0f)) {
 		auto value = [](float ratio, const xg::param &p) {
 			return std::clamp(int(std::lround(64 + 24 * std::log2(std::max(ratio, 1e-3f)))), p.min, p.max);

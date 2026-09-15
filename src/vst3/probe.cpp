@@ -6,6 +6,9 @@
 //   vst3probe <DLL> <MIDI ファイル> <出力 wav> [--rate 48000] [--block 512] [--adc-sine]
 //
 // --adc-sine は A/D INPUT（補助の入力バス）に 440Hz の正弦を流す（入力の道が落ちないかを見る）
+// --data-midi は VSTHost 1.58 のまねで、コントロールチェンジやプログラムチェンジも
+//   パラメータではなく DataEvent（システムエクスクルーシブ扱い）で、しかも 3 byte に
+//   詰めて渡す。付けない時と同じ音が出れば、そういうホストでも正しく鳴る
 //
 // DAW に入れる前にここで確かめる。工場が名乗るか、インターフェースが揃うか、
 // MIDI を受けて音が出るか、標本化周波数の変換が効いているか。
@@ -636,7 +639,7 @@ int main(int argc, char **argv)
 
 	if (argc < 2) {
 		std::fprintf(stderr,
-			"使い方: vst3probe <DLL> [<MIDI> <出力 wav>] [--rate 48000] [--block 512]\n");
+			"使い方: vst3probe <DLL> [<MIDI> <出力 wav>] [--rate 48000] [--block 512] [--data-midi]\n");
 		return 1;
 	}
 	std::string dll = argv[1], mid, wav;
@@ -646,6 +649,7 @@ int main(int argc, char **argv)
 	bool torture = false;
 	bool adc_sine = false;
 	bool one_bus = false;    // 比べる用。MIDI ファイルの口 B も A のバスへ流す
+	bool data_midi = false;  // VSTHost のまね。チャンネルメッセージも DataEvent で渡す
 	int  view_seconds = 0;
 	for (int i = 2; i < argc; i++) {
 		if (!std::strcmp(argv[i], "--rate") && i + 1 < argc) rate = std::atof(argv[++i]);
@@ -654,6 +658,7 @@ int main(int argc, char **argv)
 		else if (!std::strcmp(argv[i], "--torture")) torture = true;
 		else if (!std::strcmp(argv[i], "--adc-sine")) adc_sine = true;
 		else if (!std::strcmp(argv[i], "--one-bus")) one_bus = true;
+		else if (!std::strcmp(argv[i], "--data-midi")) data_midi = true;
 		else if (!std::strcmp(argv[i], "--view")) view_seconds =
 		    (i + 1 < argc && argv[i + 1][0] != '-') ? std::atoi(argv[++i]) : 20;
 		else if (mid.empty()) mid = argv[i];
@@ -917,6 +922,22 @@ int main(int argc, char **argv)
 					map->getMidiControllerAssignment(bus, ch, CtrlNumber(ctrl), id);
 				return id;
 			};
+			// VSTHost 1.58 のまね。チャンネルメッセージまで DataEvent に入れ、
+			// プログラムチェンジのような 2 byte のものも 3 byte に詰めて渡してくる。
+			// 余分な 00 をそのまま音源へ流すと走行状態のデータバイトになる
+			if (data_midi && st >= 0x80 && st < 0xf0) {
+				std::vector<uint8> raw(b.begin(), b.end());
+				raw.resize(3, 0);
+				elist.m_sysex.push_back(raw);
+				Event ev{};
+				ev.busIndex = bus; ev.sampleOffset = off; ev.flags = Event::kIsLive;
+				ev.type = Event::kDataEvent;
+				ev.data.size = uint32(elist.m_sysex.back().size());
+				ev.data.type = DataEvent::kMidiSysEx;
+				ev.data.bytes = elist.m_sysex.back().data();
+				elist.addEvent(ev);
+				continue;
+			}
 			if (st == 0xf0) {
 				elist.m_sysex.push_back(std::vector<uint8>(b.begin(), b.end()));
 				Event ev{};

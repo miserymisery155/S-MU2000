@@ -752,12 +752,37 @@ tresult PLUGIN_API mu_plugin::process(ProcessData &data)
 				      uint8(e.polyPressure.pitch & 127), uint8(v));
 				break;
 			}
-			case Event::kDataEvent:
-				if (e.data.type == DataEvent::kMidiSysEx && e.data.bytes && e.data.size &&
-				    m_msgs.size() < m_msgs.capacity())
+			case Event::kDataEvent: {
+				if (e.data.type != DataEvent::kMidiSysEx || !e.data.bytes || !e.data.size)
+					break;
+				// ホストによっては、チャンネルメッセージまでここに入れてくる
+				// （VSTHost 1.58 はプログラムチェンジを C0 xx 00 と 3 byte にして渡す）。
+				// そのまま音源へ流すと、余分な 00 が走行状態のデータバイトになり、
+				// 続けてプログラム 0 が入って音色が戻ってしまう。頭がチャンネルの
+				// ステータスならシステムエクスクルーシブではないので、
+				// 決まった長さだけ取り出して流し、後ろの詰め物は捨てる
+				const uint8 first = e.data.bytes[0];
+				if (first >= 0x80 && first < 0xf0) {
+					for (uint32 at = 0; at < e.data.size;) {
+						const uint8 st = e.data.bytes[at];
+						if (st < 0x80 || st >= 0xf0)
+							break;      // 詰め物。ここから先は読まない
+						const uint32 len = uint32(smu2000::vst3::midi_length(st));
+						if (at + len > e.data.size)
+							break;
+						queue(port, off, st,
+						      len > 1 ? e.data.bytes[at + 1] : uint8(0),
+						      len > 2 ? e.data.bytes[at + 2] : uint8(0), int(len));
+						at += len;
+					}
+					break;
+				}
+				// 本物のシステムエクスクルーシブ（と、その途中の切れ端）はバイト列のまま
+				if (m_msgs.size() < m_msgs.capacity())
 					m_msgs.push_back({ off, int32(m_msgs.size()), uint8(port), 0, { 0, 0, 0 },
 					                   e.data.bytes, e.data.size });
 				break;
+			}
 			default:
 				break;
 			}

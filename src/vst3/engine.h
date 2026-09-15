@@ -35,6 +35,22 @@ namespace vst3 {
 // MU2000 が動く唯一の周波数
 constexpr double NATIVE_RATE = 44100.0;
 
+// MIDI の 1 メッセージの長さ。先頭のバイトで決まる。
+// システムエクスクルーシブ（0xf0）は終わりのバイトまで数えないと分からないので 1 を返す
+inline int midi_length(uint8_t status)
+{
+	switch (status & 0xf0) {
+	case 0xc0: case 0xd0: return 2;
+	case 0xf0:
+		switch (status) {
+		case 0xf1: case 0xf3: return 2;
+		case 0xf2:            return 3;
+		default:              return 1;
+		}
+	default: return 3;
+	}
+}
+
 enum class status {
 	loading,   // ROM を読んで起動している最中。音は出ない
 	ready,

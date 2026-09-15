@@ -12,7 +12,7 @@
 #include <cstring>
 #include <vector>
 
-#include <windows.h>
+#include "compat/paths.h"
 
 namespace ui {
 namespace xgui {
@@ -579,13 +579,12 @@ int   g_lang = 0;
 float g_zoom = 0.625f;                 // 一覧の表示の大きさ
 bool  g_loaded = false;
 
+// Windows: %LOCALAPPDATA%\S-MU2000\editor.ini -- the same place gui.ini lives
+// (compat/paths.h), which is what the macOS side used to lack a path for
 std::string settings_file()
 {
-	char buf[1024];
-	const DWORD n = GetEnvironmentVariableA("LOCALAPPDATA", buf, sizeof(buf));
-	if (n == 0 || n >= sizeof(buf))
-		return {};
-	return std::string(buf) + "\\S-MU2000\\editor.ini";
+	const std::string dir = smu2000::config_dir();
+	return dir.empty() ? std::string() : smu2000::join(dir, "editor.ini");
 }
 
 void load_settings()
@@ -615,7 +614,7 @@ void save_settings()
 	const std::string path = settings_file();
 	if (path.empty())
 		return;
-	CreateDirectoryA(path.substr(0, path.rfind('\\')).c_str(), nullptr);
+	smu2000::ensure_dir(path.substr(0, path.find_last_of("\\/")));
 	if (FILE *f = std::fopen(path.c_str(), "wb")) {
 		std::fprintf(f, "help=%d\nlang=%s\noverview_zoom=%.3f\n", g_help ? 1 : 0, LANGS[g_lang].code, g_zoom);
 		std::fclose(f);

@@ -97,20 +97,8 @@ bool read_all(const clap_istream_t *s, void *p, size_t n)
 	return true;
 }
 
-// MIDI 1 メッセージの長さ。先頭のバイトで決まる
-int midi_length(uint8_t status)
-{
-	switch (status & 0xf0) {
-	case 0xc0: case 0xd0: return 2;
-	case 0xf0:
-		switch (status) {
-		case 0xf1: case 0xf3: return 2;
-		case 0xf2:            return 3;
-		default:              return 1;
-		}
-	default: return 3;
-	}
-}
+// MIDI 1 メッセージの長さ（smu2000::vst3::midi_length）は VST3 版と同じものを使う
+using smu2000::vst3::midi_length;
 
 
 // ---- 本体
