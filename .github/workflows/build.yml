@@ -31,9 +31,10 @@ jobs:
             make
             python
 
-      - name: Build all targets
+      - name: Build all targets (including CLAP)
         run: |
           make -j$(nproc)
+          make clap -j$(nproc)
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
@@ -42,4 +43,5 @@ jobs:
           path: |
             build/*.exe
             build/S-MU2000.vst3/**
+            build/S-MU2000.clap
           if-no-files-found: error
