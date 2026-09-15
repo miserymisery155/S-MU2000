@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include "smartmedia.h"
 #include "state.h"
 #include "compat/mamecompat.h"
 #include "compat/membus.h"
@@ -150,8 +151,15 @@ public:
 	void run_sample(s32 &left, s32 &right);
 
 	// A/D INPUT に入れる音。次の run_sample の 1 サンプルぶんで、16bit の目盛り（±32768 が全振幅）。
-	// 左が AD1、右が AD2。今はサンプリングの録音にだけ使う（録るのは AD1。入力の切り替えはまだ無い）
+	// 左が AD1、右が AD2。A/D パート（スレーブの MELI 6/7）と、サンプリングの録音（REC の InputSrc で選ぶ）、
+	// レベルメーター（CPU の AN0 / AN2）に使う
 	void set_audio_input(s32 ad1, s32 ad2) { m_ad_in[0] = ad1; m_ad_in[1] = ad2; }
+
+	// 前面のカードの差し込み口（SmartMedia）。create / load で差し、eject で抜く。
+	// 中身は状態の保存に入れないので、使う側がファイルに書き出す（take_dirty_blocks / write_blocks）
+	smu2000::smartmedia &card() { return m_card; }
+	// サンプリング RAM（4MB）。確かめる用
+	const std::vector<u8> &sample_ram() const { return m_sampram; }
 
 	sh7043a_device &cpu()  { return *m_cpu; }
 	swp30_device   &swpm() { return m_swpm; }
@@ -217,8 +225,16 @@ private:
 	std::vector<u8>  m_ram;         // ワーク RAM  0x400000-0x43ffff
 	std::vector<u8>  m_dram;        // DRAM        0x1000000-0x107ffff
 	std::vector<u8>  m_iram;        // CPU 内蔵    0xfffff000-0xffffffff
+	smu2000::smartmedia m_card;     // 前面のカードの差し込み口（SmartMedia）
 	std::vector<u8>  m_sampram;     // SWP30 のサンプリング RAM（4MB、SWP30 から見て 0x1000000 語目から）
 	s32 m_ad_in[2] = {};            // A/D INPUT（set_audio_input）
+	s32 m_ad_peak[2] = {};          // A/D INPUT のピーク（レベルメーター、AN0 / AN2）。状態の保存には入れない
+	u16 ad_level_adc(int i) const
+	{
+		// 0xff から引いた値が 0x18（無音）から 0x85（振り切れ）。10bit にして返す
+		const u32 v = 0x18 + u32(m_ad_peak[i]) * (0x85 - 0x18) / 32768;
+		return u16((0xff - v) << 2);
+	}
 
 	// パネルまわり。音そのものには関わらないが、firmware は起動時に触る。
 	// LCD は「要らない」ように見えて必要だった。firmware は初期化のたびに

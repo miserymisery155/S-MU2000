@@ -603,7 +603,14 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 		}
 		if (o.alu && !alu_skip) {
 			if (!(bake && !o.m1_from_t && o.mmode != 3)) {
-			if (o.m1_from_t)
+			if (o.m1_from_t == 2) {
+				// 印（負）が立っていれば t、そうでなければ定数（meg_state::step と同じ、doc/upstream.md の 29）
+				a.loads16(RAX, M(o_t + 2 * o.t));
+				a.loads16(RCX, M(o_const + 2 * s32(k)));
+				a.loadu8(RDX, mem{SWP, NOREG, 1, o_flag_n});
+				a.test32(RDX, RDX);
+				a.cmove64(RAX, RCX);
+			} else if (o.m1_from_t)
 				a.loads16(RAX, M(o_t + 2 * o.t));
 			else
 				a.loads16(RAX, M(o_const + 2 * s32(k)));
@@ -845,7 +852,7 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 		// ---- メモリ操作 ----
 		size_t table_done = 0;
 		if (o.memop >= 2 && o.mem_table) {
-			// 内部の表の 0x000-0x0ff は正弦を読む（meg_state::table_sine、doc/upstream.md の 24）
+			// bit 0x23 の読み出しはリバーブ RAM の絶対番地（meg_state::step、doc/upstream.md の 24）
 			a.loadu16(RAX, M(o_offset + 2 * s32(o.offset_index)));
 			if (o.mem_use_index) {
 				a.load32(RCX, M(o_ram_index));
@@ -853,13 +860,11 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 			}
 			if (o.memop == 3)
 				a.add32i(RAX, 1);
-			a.cmp32ri(RAX, 0x100);
-			const size_t not_table = a.jcc_fwd(0x83);                // jae
-			a.imm64(R8, u64(uintptr_t(meg_state::table_sine().data())));
-			a.load32(RAX, mem{R8, RAX, 4, 0});
+			a.and32i(RAX, 0x3ffff);
+			a.loadu16(RAX, mem{RAM, RAX, 2, 0});
+			emit_revram_decode(a);
 			a.store32(M(o_memr_val + 4 * slot2(k)), RAX);
 			table_done = a.jmp_fwd();
-			a.patch(not_table);
 		}
 		if (o.memop) {
 			a.loadu16(RAX, M(o_offset + 2 * s32(o.offset_index)));

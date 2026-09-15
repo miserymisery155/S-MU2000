@@ -479,6 +479,22 @@ void mu2000::build_bus()
 		m_bus.add_device(d);
 	}
 
+	// c00000: SmartMedia のデータ、d00000: 制御の留め金（smartmedia.h）
+	{
+		mem_bus::device d;
+		d.start = 0xc00000; d.end = 0xc7ffff;
+		d.r8 = [this](offs_t) { return m_card.data_r(); };
+		d.w8 = [this](offs_t, u8 v) { m_card.data_w(v); };
+		m_bus.add_device(d);
+	}
+	{
+		mem_bus::device d;
+		d.start = 0xd00000; d.end = 0xd7ffff;
+		d.r8 = [](offs_t) -> u8 { return 0xff; };
+		d.w8 = [this](offs_t, u8 v) { m_card.control_w(v); };
+		m_bus.add_device(d);
+	}
+
 	// f00000-f0003f: PLG ボード用の SCI4。ボードは挿さないが register は生きている
 	{
 		mem_bus::device d;
@@ -564,6 +580,15 @@ void mu2000::reset()
 	// 最後（128 Gunshot）まで走り、bit16 も一緒に上げると逆に動く
 	m_cpu->read_porta().set([this]() {
 		u32 v = 0xffff;
+		// SmartMedia の線（firmware は 0xFFFF8380 の下の 8bit で見る）:
+		//   PA18 (0x04) 忙しい（0 で準備ができている。firmware は 0 になるのを待つ）/ PA19 (0x08) 差し込まれている /
+		//   PA20 (0x10) 書き込みを禁じていない
+		// 読み書きはその場で済むので、忙しい印は立てない
+		if (m_card.inserted()) {
+			v |= 1u << 19;
+			if (!m_card.write_protected)
+				v |= 1u << 20;
+		}
 		if (m_enc_pending) {
 			if (m_enc_pending < 0) v |= 1u << 16;   // B 相は向きのあいだ立てておく
 			if (m_enc_high) {
@@ -579,9 +604,13 @@ void mu2000::reset()
 
 	// A/D 変換。MAME の配線と同じ。
 	// **電池の残量を返さないと起動画面が「Battery Low!」のままになる**
-	m_cpu->read_adc<0>().set_constant(0);        // アナログ入力 右
+	// AN0 と AN2 は A/D INPUT の大きさ（AD1 と AD2）。サンプリングの REC の画面のレベルメーターとトリガに使う。
+	// firmware は起動から AN0-AN3 を回し続け（ADCSR0 = 0xb3）、ADDR の上 8bit を 0xff から引いて使う（2.01 の 0x116196、0x13b6e6）。
+	// つまり静かなほど値が大きい。引いた値が 0x18 以下でメーター 0、0x85 以上で振り切れる（0x13b78c）。
+	// 実機の検波の回路は分からないので、ピーク（すぐ上がり、0.1 秒で 1/e に下がる）を 0x18 から 0x85 に割り当てる
+	m_cpu->read_adc<0>().set([this]() { return ad_level_adc(0); });
 	m_cpu->read_adc<1>().set_constant(0);
-	m_cpu->read_adc<2>().set_constant(0);        // アナログ入力 左
+	m_cpu->read_adc<2>().set([this]() { return ad_level_adc(1); });
 	m_cpu->read_adc<3>().set_constant(0);
 	m_cpu->read_adc<4>().set_constant(0);        // ホストスイッチ = MIDI
 	m_cpu->read_adc<5>().set_constant(0);
@@ -771,10 +800,6 @@ void mu2000::run_sample(s32 &left, s32 &right)
 
 	run_cycles(cycles);
 
-	// A/D 入力。firmware はスレーブで録音する（どちらのチップにも同じものを入れておく）
-	m_swpm.set_adc_input(m_ad_in[0]);
-	m_swps.set_adc_input(m_ad_in[0]);
-
 	if (m_profile) {
 		QueryPerformanceCounter(&pt1);
 		m_t_cpu += u64(pt1.QuadPart - pt0.QuadPart);
@@ -808,15 +833,26 @@ void mu2000::run_sample(s32 &left, s32 &right)
 	// 結線は MAME の mu1000_state::mu1000() と同じ:
 	//   スレーブ 出力 4..17 -> マスタ  入力 0..13
 	//   マスタ   出力 4..9, 12..13 -> スレーブ 入力 0..5, 8..9
-	// **6 と 7 の線は無い**。実機にも MAME にも無いので繋いではいけない。
+	// **マスタからスレーブの 6 と 7 の線は無い**。実機にも MAME にも無いので繋いではいけない。
 	// 繋ぐと、マスタのミキサ出力 3 番（melo 6/7）がスレーブへ回り込み、
-	// スレーブ→マスタの線と合わせて輪になってしまう
+	// スレーブ→マスタの線と合わせて輪になってしまう（スレーブの 6 と 7 には A/D INPUT が入る。下を参照）
 	// 相互に繋がっているので 1 サンプル遅れで渡す（MAME も同じ）
 	for (int i = 0; i < 14; i++)
 		m_swpm.set_meli(i, m_swps.melo(i));
 	static const int TO_SLAVE[] = { 0, 1, 2, 3, 4, 5, 8, 9 };
 	for (int i : TO_SLAVE)
 		m_swps.set_meli(i, m_swpm.melo(i));
+	// A/D INPUT はスレーブの入力 6（AD1）と 7（AD2）に入る。上のマスタからの線が飛ばしている 2 本で、
+	// A/D パートの音量を上げると firmware がここをミキサに通す（エミュで線を 1 本ずつ試して決めた）。
+	// サンプリングの録音も、この 2 本をミキサの出力 8 に集めて録る（swp30.cpp の sample_step）。
+	// 目盛りは 16bit を 8bit 上げた 24bit にしている（実機の入力の大きさとはまだ突き合わせていない）
+	m_swps.set_meli(6, m_ad_in[0] * 256);
+	m_swps.set_meli(7, m_ad_in[1] * 256);
+	// レベルメーター用の検波（AN0 / AN2）
+	for (int i = 0; i < 2; i++) {
+		const s32 a = std::min(std::abs(m_ad_in[i]), 32767);
+		m_ad_peak[i] = a >= m_ad_peak[i] ? a : m_ad_peak[i] - ((m_ad_peak[i] >> 12) + 1);
+	}
 
 	// スピーカーに出るのはマスタの DAC だけ。
 	// スレーブの DAC はどこにも繋がっていない
@@ -833,7 +869,7 @@ namespace {
 
 // 保存の形。中身の並びを変えたら上げる
 constexpr u32 STATE_MAGIC   = 0x554d3253;   // "S2MU"
-constexpr u32 STATE_VERSION = 4;   // 2: MIDI の入口が A/B の 2 口になった / 3: SWP30 のピッチ EG / 4: サンプリングの録音の位置
+constexpr u32 STATE_VERSION = 5;   // 2: MIDI の入口が A/B の 2 口になった / 3: SWP30 のピッチ EG / 4: サンプリングの録音の位置 / 5: SmartMedia の命令の途中
 constexpr u32 STATE_VERSION_OLDEST = 2;
 
 } // namespace
@@ -848,6 +884,9 @@ void mu2000::state(state_io &s)
 	s.mem(m_dram.data(),    m_dram.size());
 	s.mem(m_iram.data(),    m_iram.size());
 	s.mem(m_sampram.data(), m_sampram.size());
+	// 版 5 から: SmartMedia の命令の途中の状態（カードの中身は入れない）
+	if (s.version() >= 5)
+		m_card.state(s);
 
 	if (m_cpu)  m_cpu->state(s);
 	m_swpm.state(s);

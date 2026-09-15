@@ -31,6 +31,7 @@ BUILD := build
 
 SRCS := \
 	src/compat/compat.cpp \
+	src/smartmedia.cpp \
 	src/mame/sound/swp30.cpp \
 	src/mame/sound/swp30_jit.cpp \
 	src/mame/video/hd44780.cpp \
@@ -102,7 +103,7 @@ $(BUILD)/panel.exe: $(OBJS) $(BUILD)/src/mu2000.o $(BUILD)/src/smf.o $(BUILD)/sr
 
 # gui は実機のフロントパネル風の画面を出す
 UI_SRCS := src/ui/panel.cpp src/ui/editor.cpp src/ui/effects.cpp src/ui/png.cpp \
-           src/ui/audio_out.cpp src/ui/midi_in.cpp src/ui/midi_out.cpp \
+           src/ui/audio_out.cpp src/ui/audio_in.cpp src/ui/midi_in.cpp src/ui/midi_out.cpp \
            src/ui/layout.cpp src/ui/svg.cpp src/ui/player.cpp src/xg/model.cpp
 UI_OBJS := $(UI_SRCS:%.cpp=$(BUILD)/%.o)
 
@@ -167,7 +168,7 @@ vst3: $(VST3_BIN)
 
 $(VST3_BIN): $(OBJS) $(BUILD)/src/mu2000.o $(VST3_OBJS)
 	@mkdir -p $(dir $@)
-	$(CXX) $(CXXFLAGS) -shared -o $@ $^ $(LDFLAGS) -lwinmm -lole32 -lgdi32 -luser32 -lavrt
+	$(CXX) $(CXXFLAGS) -shared -o $@ $^ $(LDFLAGS) -lwinmm -lole32 -lgdi32 -luser32 -lavrt -lcomdlg32
 	@mkdir -p $(VST3_DIR)/Contents/Resources
 	@cp -f doc/vst3-readme.txt $(VST3_DIR)/Contents/Resources/README.txt 2>/dev/null || true
 	# 取り込んだものの著作権表示。BSD-3 はバイナリで配るときも添えろと言っている

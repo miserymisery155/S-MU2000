@@ -2285,7 +2285,8 @@ void swp30_device::wave_access_w(u16 data)
 	// S-MU2000: 0x7000 は録音（sample_step）。位置は 0 から数え直す
 	if(data == 0x7000)
 		m_rec_pos = 0;
-	if(data == 0x8000) {
+	// S-MU2000: 0x9000 は続けて読む（カードへの書き出し）。最初の語をここで用意する
+	if(data == 0x8000 || data == 0x9000) {
 		m_wave_val = m_wave_cache.read_dword(m_wave_adr);
 		logerror("wave read adr=%08x size=%08x -> %08x\n", m_wave_adr, m_wave_size, m_wave_val);
 	}
@@ -2298,12 +2299,23 @@ u16 swp30_device::wave_access_r()
 
 u16 swp30_device::wave_busy_r()
 {
+	// S-MU2000: 続けて読むとき、firmware は下 8bit が 0 でなくなるのを待ってから 0x14e、0x14f の順に 1 語読む。
+	// (値 & 0x40ff) が 0x4000 なら打ち切りとみなすので、残りがある間は 0x0001 を返す
+	if(m_wave_access == 0x9000)
+		return m_wave_size ? 0x0001 : 0xffff;
 	return m_wave_size ? 0 : 0xffff;
 }
 
 template<int Sel> u16 swp30_device::wave_val_r()
 {
-	return m_wave_val >> (16*Sel);
+	const u16 v = m_wave_val >> (16*Sel);
+	// S-MU2000: 続けて読むときは、下の半分を読んだら次の語へ進む
+	if(!Sel && m_wave_access == 0x9000 && m_wave_size) {
+		m_wave_adr ++;
+		m_wave_size --;
+		m_wave_val = m_wave_size ? m_wave_cache.read_dword(m_wave_adr) : 0;
+	}
+	return v;
 }
 
 template<int Sel> void swp30_device::wave_val_w(u16 data)
@@ -2407,14 +2419,16 @@ template<int Sel> void swp30_device::revram_data_w(u16 data)
 	else
 		m_revram_data = (m_revram_data & 0xffff0000) |  data;
 
+	// S-MU2000: 書く値は上の 16bit が Q15（1.0 = 0x7fff）。MEG がメモリへ書く値（p >> 15）は 1.0 が 2^23 なので、
+	// 符号付きで 8bit 落として同じ目盛りにする。MAME は >> 5 で、8 倍（+18dB）大きく入っていた（doc/upstream.md の 24）
 	if(!Sel)
-		m_reverb_cache.write_word(m_revram_adr, meg_state::revram_encode(m_revram_data >> 5));
+		m_reverb_cache.write_word(m_revram_adr, meg_state::revram_encode(u32(s32(m_revram_data) >> 8)));
 }
 
 template<int Sel> u16 swp30_device::revram_data_r()
 {
 	if(Sel)
-		m_revram_data = meg_state::revram_decode(m_reverb_cache.read_word(m_revram_adr)) << 5;
+		m_revram_data = u32(s32(meg_state::revram_decode(m_reverb_cache.read_word(m_revram_adr)) << 5) << 3);
 
 	return Sel ? m_revram_data >> 16 : m_revram_data;
 }
@@ -2678,7 +2692,12 @@ template<int Sel> u16 swp30_device::vol_r(offs_t offset)
 
 template<int Sel> void swp30_device::vol_w(offs_t offset, u16 data)
 {
-	m_mixer[(Sel & 0x40) | (offset >> 6)].vol[Sel & 3] = data;
+	// S-MU2000: firmware は A/D パートのミキサ（MELI 6/7 など 8 個）を同じ値で 1 秒に 2000 回ほど書き直す。
+	// 変わらない書き込みで並びを作り直さない
+	u16 &v = m_mixer[(Sel & 0x40) | (offset >> 6)].vol[Sel & 3];
+	if(v == data)
+		return;
+	v = data;
 	mixer_mark((Sel & 0x40) | (offset >> 6));
 }
 
@@ -2689,7 +2708,10 @@ template<int Sel> u16 swp30_device::route_r(offs_t offset)
 
 template<int Sel> void swp30_device::route_w(offs_t offset, u16 data)
 {
-	m_mixer[(Sel & 0x40) | (offset >> 6)].route[Sel & 3] = data;
+	u16 &r = m_mixer[(Sel & 0x40) | (offset >> 6)].route[Sel & 3];
+	if(r == data)
+		return;
+	r = data;
 	mixer_mark((Sel & 0x40) | (offset >> 6));
 }
 
@@ -2954,6 +2976,7 @@ void swp30_device::mixer_step(const std::array<s32, 0x40> &samples_per_chan)
 		for(int i = 0; i != n; i++)
 			mixer_out[t[i].dst] += (input - ((input * t[i].frac) >> 5)) >> t[i].shift;   // mixer_att と同じ
 	}
+	m_rec_bus = mixer_out[0x10];   // S-MU2000: 録音はミキサの出力 8 の左（sample_step）
 	std::copy(mixer_out.begin() + 0x00, mixer_out.begin() + 0x10, m_melo.begin());
 	std::copy(mixer_out.begin() + 0x10, mixer_out.begin() + 0x20, m_meg->m_m.begin() + 0x20);
 }
@@ -3343,20 +3366,6 @@ u32 swp30_device::meg_state::get_lfo(int lfo)
 
 // Expand the first multiplier input
 
-// S-MU2000: 内部の表の 0x000-0x0ff。bit 0x22-0x23 が 2 の読み出しは、firmware も MEG も書かない区画を +idx で引く。
-// RING MOD の搬送波（位相の上位 8bit を idx に 0x80 を中心に引く）が実機の 1001Hz と合い、音量も合うので、
-// そこは 256 点で 1 周の正弦と決めた。大きさは 0x7fffff。0x100 から上は分からないので、今までどおり RAM を読む
-const std::array<s32, 0x100> &swp30_device::meg_state::table_sine()
-{
-	static const std::array<s32, 0x100> t = [] {
-		std::array<s32, 0x100> v;
-		for(int i = 0; i != 0x100; i++)
-			v[i] = s32(std::lrint(std::sin(2 * 3.141592653589793 * i / 256) * 0x7fffff));
-		return v;
-	}();
-	return t;
-}
-
 s16 swp30_device::meg_state::m1_expand(s16 v)
 {
 	if(v < 0)
@@ -3420,7 +3429,7 @@ void swp30_device::meg_state::decode_program()
 		d.t_write   = BIT(opcode, 0x3b);
 		d.t_from_p  = BIT(opcode, 0x3c);
 		d.mem_use_index = BIT(opcode, 0x21);
-		d.mem_table = BIT(opcode, 0x22, 2) == 2;
+		d.mem_table = BIT(opcode, 0x23);
 	}
 }
 
@@ -3541,7 +3550,8 @@ void swp30_device::meg_state::step()
 	// S-MU2000: 掛け算の無い形（mmode 0）でも、シフトと飽和は p にかかる（doc/upstream.md の 21）
 	if(mmode != 0 || d.shift || d.clamp) {
 		const u32 m1t = d.m1t;
-		s64 m1 = m1t == 1 || m1t == 2 ? m_t[t] : m_const[m_pc];
+		// S-MU2000: 第 1 入力の選び方 2 は、直前に印を立てた結果が負なら t、そうでなければ定数（doc/upstream.md の 29）
+		s64 m1 = m1t == 1 ? m_t[t] : m1t == 2 ? (m_swp->m_meg_flag_n ? m_t[t] : m_const[m_pc]) : m_const[m_pc];
 		if(d.m1_expand)
 			m1 = m1_expand(m1);
 
@@ -3688,10 +3698,11 @@ void swp30_device::meg_state::step()
 		break;
 	}
 	case 2: case 3: {
-		// S-MU2000: 内部の表の 0x000-0x0ff は、RAM でなく 256 点で 1 周の正弦を読む（doc/upstream.md の 24）
-		const s32 ti = s32(m_offset[m_pc/3]) + (d.mem_use_index ? s32(m_ram_index) : 0) + (d.memop == 3 ? 1 : 0);
-		if(d.mem_table && u32(ti) < 0x100) {
-			m_memr_value[m_delay_2] = u32(table_sine()[ti]);
+		// S-MU2000: bit 0x23 の付いた読み出しは、リバーブ RAM の絶対番地（offset + idx）を読む。サンプルの数え上げを引かず、
+		// map も通さない。firmware が種類を読み込むときに、波形や曲線の表をここへ直に書いている（doc/upstream.md の 24）
+		if(d.mem_table) {
+			const u32 address = (u32(m_offset[m_pc/3]) + (d.mem_use_index ? m_ram_index : 0) + (d.memop == 3 ? 1 : 0)) & 0x3ffff;
+			m_memr_value[m_delay_2] = revram_decode(m_swp->m_reverb_ram[address]);
 			m_memr_active[m_delay_2] = true;
 			break;
 		}
@@ -3765,7 +3776,7 @@ void swp30_device::meg_state::build_ops(op *ops) const
 		o = op{};
 		o.alu       = d.mmode != 0 || d.shift || d.clamp;   // mmode 0 でもシフトと飽和はかかる（upstream 21）
 		o.mmode     = d.mmode;
-		o.m1_from_t = d.m1t == 1 || d.m1t == 2;
+		o.m1_from_t = d.m1t == 1 ? 1 : d.m1t == 2 ? 2 : 0;   // 2 は印で t と定数を選ぶ
 		o.m1_expand = d.m1_expand;
 		o.m2_from_m = d.m2_from_m;
 		switch(d.asel) {
@@ -3851,7 +3862,7 @@ void swp30_device::meg_state::run_program(const op *ops)
 		}
 
 		if(o.alu) {
-			s64 m1 = o.m1_from_t ? m_t[o.t] : m_const[pc];
+			s64 m1 = o.m1_from_t == 1 ? m_t[o.t] : o.m1_from_t == 2 ? (flag_n ? m_t[o.t] : m_const[pc]) : m_const[pc];
 			if(o.m1_expand)
 				m1 = m1_expand(m1);
 			s64 m2 = o.m2_from_m ? m_m[o.sm] : m_r[o.sr];
@@ -3947,12 +3958,11 @@ void swp30_device::meg_state::run_program(const op *ops)
 		                        : s16(std::clamp<s64>(p >> (15+8), -0x8000, 0x7fff));
 
 		if(o.memop >= 2 && o.mem_table) {
-			const s32 ti = s32(m_offset[o.offset_index]) + (o.mem_use_index ? s32(m_ram_index) : 0) + (o.memop == 3 ? 1 : 0);
-			if(u32(ti) < 0x100) {
-				m_memr_value[d2] = u32(table_sine()[ti]);
-				m_memr_active[d2] = true;
-				goto mem_done;
-			}
+			// 絶対番地の読み出し（上の step と同じ）
+			const u32 address = (u32(m_offset[o.offset_index]) + (o.mem_use_index ? m_ram_index : 0) + (o.memop == 3 ? 1 : 0)) & 0x3ffff;
+			m_memr_value[d2] = revram_decode(m_swp->m_reverb_ram[address]);
+			m_memr_active[d2] = true;
+			goto mem_done;
 		}
 		if(o.memop) {
 			u32 off = u32(m_offset[o.offset_index]) + u32(o.mem_use_index ? m_ram_index : 0) - sample_counter;
@@ -4071,23 +4081,6 @@ void swp30_device::sample_step()
 {
 	m_meg->flush_writes();
 
-	// S-MU2000: サンプリングの録音。firmware は録音を始めるとき、スレーブに番地（サンプリング RAM の先頭
-	// 0x1000000）と長さ（語数）を書いてから、波形アクセスに 0x7000 を書く。あとは 0x30f（書いた位置の下 16bit）と
-	// 0x10f の bit 14（書き終わり）を見続け、止めるときにアクセスを 0 に戻す。
-	// 1 サンプルごとに A/D 入力を 16bit で書く。32bit の語 1 つに 2 サンプル（下の 16bit が先）で、
-	// 声が 16bit のサンプルを読むとき（streaming_block::read_16）と同じ並び
-	if(m_wave_access == 0x7000 && m_wave_size) {
-		const u16 v = u16(std::clamp<s32>(m_adc_in, -0x8000, 0x7fff));
-		u32 w = m_wave_cache.read_dword(m_wave_adr);
-		w = (m_rec_pos & 1) ? ((w & 0x0000ffff) | (u32(v) << 16)) : ((w & 0xffff0000) | v);
-		m_wave_cache.write_dword(m_wave_adr, w);
-		m_rec_pos++;
-		if(!(m_rec_pos & 1)) {
-			m_wave_adr++;
-			m_wave_size--;
-		}
-	}
-
 	// S-MU2000: MEG の m レジスタ 0x20-0x3f を毎サンプル書き出す（--dump-dac）。
 	// **混ぜる前**なので、ここに出るのは MEG が 384 段回し終わった直後の姿、
 	// つまりエフェクトの出口。次の行の mixer_step が 0x20-0x2f を
@@ -4130,6 +4123,26 @@ void swp30_device::sample_step()
 	adc_step();
 	mixer_step(samples_per_chan);
 	m_meg->lfo_step();
+
+	// S-MU2000: サンプリングの録音。firmware は録音を始めるとき、スレーブに番地（サンプリング RAM の先頭
+	// 0x1000000）と長さ（語数）を書いてから、波形アクセスに 0x7000 を書く。あとは 0x30f（書いた位置の下 16bit）と
+	// 0x10f の bit 14（書き終わり）を見続け、止めるときにアクセスを 0 に戻す。
+	// 1 サンプルごとに、ミキサの出力 8 の左（m_rec_bus）を 16bit で書く。32bit の語 1 つに 2 サンプル（下の 16bit が先）で、
+	// 声が 16bit のサンプルを読むとき（streaming_block::read_16）と同じ並び。
+	// 出力 8 に繋がっているのは A/D INPUT の MELI 6（AD1）と 7（AD2）だけで、REC の InputSrc（AD1 / AD2 / AD1+2）は
+	// その 2 本の音量（0x5b8/0x5b9、0x5f8/0x5f9 に 0x00ff か 0xffff）を切り替えている（firmware 2.01 の 0x13af14）。
+	// MELI は 16bit を 8bit 上げて入れているので、8bit 下げて戻す
+	if(m_wave_access == 0x7000 && m_wave_size) {
+		const u16 v = u16(std::clamp<s32>(m_rec_bus >> 8, -0x8000, 0x7fff));
+		u32 w = m_wave_cache.read_dword(m_wave_adr);
+		w = (m_rec_pos & 1) ? ((w & 0x0000ffff) | (u32(v) << 16)) : ((w & 0xffff0000) | v);
+		m_wave_cache.write_dword(m_wave_adr, w);
+		m_rec_pos++;
+		if(!(m_rec_pos & 1)) {
+			m_wave_adr++;
+			m_wave_size--;
+		}
+	}
 
 	m_meg->m_sample_counter ++;
 }

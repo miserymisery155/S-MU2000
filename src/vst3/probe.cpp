@@ -3,7 +3,9 @@
 // VST3 プラグインを DAW 無しで動かしてみる小さなホスト。
 //
 //   vst3probe <S-MU2000.vst3 の DLL>                         名乗りだけ見る
-//   vst3probe <DLL> <MIDI ファイル> <出力 wav> [--rate 48000] [--block 512]
+//   vst3probe <DLL> <MIDI ファイル> <出力 wav> [--rate 48000] [--block 512] [--adc-sine]
+//
+// --adc-sine は A/D INPUT（補助の入力バス）に 440Hz の正弦を流す（入力の道が落ちないかを見る）
 //
 // DAW に入れる前にここで確かめる。工場が名乗るか、インターフェースが揃うか、
 // MIDI を受けて音が出るか、標本化周波数の変換が効いているか。
@@ -560,6 +562,7 @@ int main(int argc, char **argv)
 	int block = 512;
 	double extra = 3.0;      // 曲の後ろに足す残響ぶん
 	bool torture = false;
+	bool adc_sine = false;
 	bool one_bus = false;    // 比べる用。MIDI ファイルの口 B も A のバスへ流す
 	int  view_seconds = 0;
 	for (int i = 2; i < argc; i++) {
@@ -567,6 +570,7 @@ int main(int argc, char **argv)
 		else if (!std::strcmp(argv[i], "--block") && i + 1 < argc) block = std::atoi(argv[++i]);
 		else if (!std::strcmp(argv[i], "--tail") && i + 1 < argc) extra = std::atof(argv[++i]);
 		else if (!std::strcmp(argv[i], "--torture")) torture = true;
+		else if (!std::strcmp(argv[i], "--adc-sine")) adc_sine = true;
 		else if (!std::strcmp(argv[i], "--one-bus")) one_bus = true;
 		else if (!std::strcmp(argv[i], "--view")) view_seconds =
 		    (i + 1 < argc && argv[i + 1][0] != '-') ? std::atoi(argv[++i]) : 20;
@@ -656,7 +660,15 @@ int main(int argc, char **argv)
 	}
 
 	SpeakerArrangement out_arr = SpeakerArr::kStereo;
-	proc->setBusArrangements(nullptr, 0, &out_arr, 1);
+	SpeakerArrangement in_arr = SpeakerArr::kStereo;
+	std::printf("音声入力バス %d\n", comp->getBusCount(kAudio, kInput));
+	if (adc_sine) {
+		if (proc->setBusArrangements(&in_arr, 1, &out_arr, 1) != kResultTrue)
+			std::printf("入力 1 つの並びを断られた\n");
+		comp->activateBus(kAudio, kInput, 0, true);
+	} else {
+		proc->setBusArrangements(nullptr, 0, &out_arr, 1);
+	}
 	comp->activateBus(kAudio, kOutput, 0, true);
 	for (int32 b = 0; b < comp->getBusCount(kEvent, kInput); b++)
 		comp->activateBus(kEvent, kInput, b, true);
@@ -731,7 +743,13 @@ int main(int argc, char **argv)
 	pd.processMode        = kOffline;
 	pd.symbolicSampleSize = kSample32;
 	pd.numSamples         = block;
-	pd.numInputs          = 0;
+	std::vector<float> il(block), ir(block);
+	float *ichans[2] = { il.data(), ir.data() };
+	AudioBusBuffers ibuf{};
+	ibuf.numChannels = 2;
+	ibuf.channelBuffers32 = ichans;
+	pd.numInputs          = adc_sine ? 1 : 0;
+	pd.inputs             = adc_sine ? &ibuf : nullptr;
 	pd.numOutputs         = 1;
 	pd.outputs            = &abuf;
 	pd.inputEvents        = &elist;
@@ -762,6 +780,9 @@ int main(int argc, char **argv)
 	const DWORD t0 = GetTickCount();
 	while (pos < total) {
 		const int32 n = int32(std::min<int64_t>(block, total - pos));
+		if (adc_sine)
+			for (int32 i = 0; i < n; i++)
+				il[size_t(i)] = ir[size_t(i)] = float(0.3 * std::sin(2 * 3.14159265358979 * 440.0 * double(pos + i) / rate));
 		elist.clear();
 		pchanges.clear();
 

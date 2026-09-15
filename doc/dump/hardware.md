@@ -57,7 +57,7 @@ SWP30 側から見たアドレス空間: ROM 0x0000000–0x07FFFFF（32bit ワ�
 | 0x400000–0x43FFFF | ワーク RAM 256KB（NVRAM 扱い） |
 | 0x800000–0x801FFF | SWP30 マスター レジスタ |
 | 0x802000–0x803FFF | SWP30 スレーブ レジスタ |
-| 0xC00000 / 0xD00000 | SmartMedia（未実装） |
+| 0xC00000 / 0xD00000 | SmartMedia（0xC00000 がデータ、0xD00000 が制御の留め金。`src/smartmedia.h`） |
 | 0xC80000 | LED/スイッチ読み書き |
 | 0xE00000 | LED 書き込み 2 |
 | 0xF00000–0xF0003F | SIO4 (SCI4) |

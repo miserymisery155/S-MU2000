@@ -4,11 +4,15 @@
 
 #include "ui/bridge.h"
 #include "ui/layout.h"
+#include "ui/text.h"
+#include "smartmedia.h"
 
 #include <algorithm>
 #include <cstdio>
+#include <cwchar>
 
 #include <windowsx.h>
+#include <commdlg.h>
 
 using namespace Steinberg;
 
@@ -247,6 +251,20 @@ LRESULT plug_view::handle(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 		// パラメータの層: 音源の返事を読み、見えている面の読み返しを頼む
 		m_panel.tick(br);
 		InvalidateRect(h, nullptr, FALSE);
+		// SmartMedia に書いたものを 2 秒ごとにファイルへ書き戻す（プロジェクトを保存するときと、閉じるときも）
+		if (GetTickCount() - m_last_flush > 2000) {
+			m_last_flush = GetTickCount();
+			m_engine.card_flush();
+		}
+		return 0;
+
+	case WM_RBUTTONUP:
+		if (m_panel.on_card_slot(GET_X_LPARAM(lp), GET_Y_LPARAM(lp)))
+			card_menu(h, GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+		return 0;
+
+	case WM_COMMAND:
+		card_command(h, LOWORD(wp));
 		return 0;
 
 	case WM_ERASEBKGND:
@@ -262,6 +280,11 @@ LRESULT plug_view::handle(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 		return 0;
 
 	case WM_LBUTTONDOWN:
+		// カードの差し込み口は SmartMedia の品書き
+		if (m_panel.on_card_slot(GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) {
+			card_menu(h, GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+			return 0;
+		}
 		SetCapture(h);
 		if (m_panel.press(GET_X_LPARAM(lp), GET_Y_LPARAM(lp), br))
 			InvalidateRect(h, nullptr, FALSE);
@@ -308,6 +331,97 @@ LRESULT plug_view::handle(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 		return 0;
 	}
 	return DefWindowProcA(h, msg, wp, lp);
+}
+
+
+// ---- SmartMedia（カードの差し込み口）。gui.exe の品書きと同じ
+
+namespace {
+
+enum : UINT { ID_CARD_NEW16 = 100, ID_CARD_NEW32, ID_CARD_NEW64, ID_CARD_NEW128, ID_CARD_OPEN = 110, ID_CARD_EJECT = 111 };
+
+void add_item(HMENU m, UINT flags, UINT_PTR id, const char *utf8)
+{
+	const std::wstring w = ui::to_wide(utf8);
+	AppendMenuW(m, flags, id, w.c_str());
+}
+
+std::string ask_card_path(HWND h, bool create)
+{
+	wchar_t file[MAX_PATH] = {};
+	if (create)
+		wcscpy(file, L"smartmedia.img");
+	OPENFILENAMEW o{};
+	o.lStructSize = sizeof(o);
+	o.hwndOwner = h;
+	o.lpstrFilter = L"SmartMedia の中身 (*.img)\0*.img\0すべて (*.*)\0*.*\0";
+	o.lpstrFile = file;
+	o.nMaxFile = MAX_PATH;
+	o.lpstrDefExt = L"img";
+	if (create) {
+		o.lpstrTitle = L"新しい SmartMedia の保存先";
+		o.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+		if (!GetSaveFileNameW(&o))
+			return {};
+	} else {
+		o.lpstrTitle = L"差す SmartMedia";
+		o.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+		if (!GetOpenFileNameW(&o))
+			return {};
+	}
+	return ui::to_utf8(file);
+}
+
+} // namespace
+
+void plug_view::card_menu(HWND h, int x, int y)
+{
+	const std::string path = m_engine.card_path();
+	HMENU m = CreatePopupMenu();
+	HMENU mnew = CreatePopupMenu();
+	add_item(mnew, MF_STRING, ID_CARD_NEW16, "16MB");
+	add_item(mnew, MF_STRING, ID_CARD_NEW32, "32MB");
+	add_item(mnew, MF_STRING, ID_CARD_NEW64, "64MB");
+	add_item(mnew, MF_STRING, ID_CARD_NEW128, "128MB");
+	const UINT ready = m_engine.state() == status::ready ? 0 : MF_GRAYED;
+	add_item(m, MF_POPUP | ready, UINT_PTR(mnew), "新しい SmartMedia を作って差す");
+	add_item(m, MF_STRING | ready, ID_CARD_OPEN, "SmartMedia を差す...");
+	std::string eject = "SmartMedia を抜く";
+	if (!path.empty())
+		eject += "（" + path.substr(path.find_last_of("\\/") + 1) + "）";
+	add_item(m, MF_STRING | (path.empty() ? MF_GRAYED : 0), ID_CARD_EJECT, eject.c_str());
+	POINT pt{ x, y };
+	ClientToScreen(h, &pt);
+	TrackPopupMenu(m, TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON, pt.x, pt.y, 0, h, nullptr);
+	DestroyMenu(m);
+}
+
+void plug_view::card_command(HWND h, UINT id)
+{
+	std::string err;
+	if (id >= ID_CARD_NEW16 && id <= ID_CARD_NEW128) {
+		const std::string path = ask_card_path(h, true);
+		if (path.empty())
+			return;
+		smartmedia card;
+		card.create(16u << (id - ID_CARD_NEW16));
+		if (card.save(path, err) && m_engine.card_insert(path, err)) {
+			MessageBoxW(h, L"空の SmartMedia を差しました。\n"
+			               L"使う前に、本体の UTIL → CARD → Format で書式化してください。",
+			            L"S-MU2000", MB_OK | MB_ICONINFORMATION);
+			return;
+		}
+	} else if (id == ID_CARD_OPEN) {
+		const std::string path = ask_card_path(h, false);
+		if (path.empty() || m_engine.card_insert(path, err))
+			return;
+	} else if (id == ID_CARD_EJECT) {
+		m_engine.card_eject();
+		return;
+	} else {
+		return;
+	}
+	MessageBoxW(h, ui::to_wide(err).c_str(), L"S-MU2000", MB_OK | MB_ICONWARNING);
 }
 
 } // namespace vst3

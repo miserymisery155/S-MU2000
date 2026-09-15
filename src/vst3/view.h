@@ -51,6 +51,8 @@ private:
 	static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
 	LRESULT handle(HWND h, UINT msg, WPARAM wp, LPARAM lp);
 	void paint(HWND h);
+	void card_menu(HWND h, int x, int y);
+	void card_command(HWND h, UINT id);
 
 	engine &m_engine;
 
@@ -60,6 +62,7 @@ private:
 	HDC     m_mem_dc = nullptr;
 	HBITMAP m_mem_bmp = nullptr;
 	int     m_mem_w = 0, m_mem_h = 0;
+	DWORD   m_last_flush = 0;          // SmartMedia を最後に書き戻した時刻
 
 	int m_w = 1400, m_h = 360;
 	Steinberg::int32 m_refs = 1;

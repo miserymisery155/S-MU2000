@@ -5,20 +5,20 @@
  "channels": 2,
  "boot_samples": 352800,
  "frames": 264600,
- "pcm_sha1": "e2d5bc9a7c3cd54304c3c545b9c7fa2619a20ef9",
+ "pcm_sha1": "41363e6f6bf4911d8ac447a08a582c77b52e9059",
  "peak": [
   4762,
   4083
  ],
  "rms": [
   655.15,
-  624.72
+  624.73
  ],
  "dc": [
-  6.7953,
-  6.8124
+  6.796,
+  6.8138
  ],
- "slow_rms": 0.044047,
+ "slow_rms": 0.044049,
  "envelope_ms": 50,
  "envelope": [
   0,

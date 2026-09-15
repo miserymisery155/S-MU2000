@@ -73,6 +73,17 @@ public:
 		return int(std::max<s64>(0, need - m_written));
 	}
 
+	// 今までに入れた分で、あと何フレーム出せるか（録音のように入力が先に来る向きで使う）
+	int output_available() const
+	{
+		if (m_direct)
+			return int(std::max<s64>(0, m_written - s64(m_pos)));
+		const double room = double(m_written - HALF - 1) - m_pos;
+		if (room < 0.0)
+			return 0;
+		return int(std::floor(room / m_step)) + 1;
+	}
+
 	// 16bit 2ch インタリーブで入れる
 	void push(const s16 *in, int frames)
 	{

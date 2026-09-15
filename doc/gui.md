@@ -21,9 +21,41 @@ build/gui.exe <rom> --play 曲.mid         MIDI ファイルを流しながら�
 **パネルの絵は作り直さずに直せる**。位置も色も `panel.txt` という文字
 ファイルに追い出してある。手順は [doc/panel-editing.md](panel-editing.md)。
 
+## SmartMedia
+
+**カードの差し込み口**（左下）を左クリックか右クリックすると品書きが出る。上の 3 つが SmartMedia。
+
+* `新しい SmartMedia を作って差す` → 16MB / 32MB / 64MB / 128MB … 保存先を選ぶと、空のカードのファイル（`.img`）を作って差す。
+  使う前に本体の `UTIL → CARD → Format` で書式化する
+* `SmartMedia を差す...` … 前に作ったカードのファイルを差す
+* `SmartMedia を抜く` … ファイルへ書き戻してから抜く
+
+SAMPLING の SAVE / LOAD（ALL+SEQ など）と UTIL の CARD が使える。firmware が書いたところは 2 秒ごとと、
+抜いたとき・gui を閉じたときにファイルへ書き戻す（書き換えたブロックだけ）。差していたカードは gui.ini に覚え、次に起動したときも差す。
+
+ファイルの中身は SmartMedia の NAND の生の並び（1 ページ 512 バイト + 予備 16 バイト）。PC との出し入れは `tools/smcard.py` で:
+
+```bash
+python tools/smcard.py ls smartmedia.img
+```
+
+```bash
+python tools/smcard.py put smartmedia.img drums.wav
+```
+
+```bash
+python tools/smcard.py get smartmedia.img TAKE001.WAV
+```
+
+`info`（容量と空き）と `rm`（消す）もある。入れた WAV / AIFF は本体の SAMPLING → LOAD → WAV で読み込め、SAMPLING → SAVE → WAV で書いたものは
+`get` で取り出せる。名前は 8.3 だけ（長い名前は作らない）。**gui で差しているカードは書き換えない**こと（gui が 2 秒ごとに書き戻すので、
+どちらかの書き込みが消える）。抜いてから入れ、差し直す。
+
+`render` にも `--card カード.img` がある（終わりに書き戻す）。
+
 ## MIDI ファイルを流す
 
-**カードの差し込み口**（左下）を左クリックか右クリックすると品書きが出る。
+同じ品書きの下半分。
 
 * `MIDI ファイルを再生...` … ファイルを選んで流す
 * `止める` … 止めて、鳴りっぱなしを消す（オールノートオフとダンパ解除）
@@ -71,6 +103,13 @@ build/gui.exe <rom ディレクトリ> --play 曲.mid
 | MIDI OUT | **MU2000 が自分で送り出すもの**。SCI ch0 の送信線で、実機の OUT 端子と同じ。XG の問い合わせやダンプ要求への返事がここから出る。loopMIDI 越しに外のエディタへ返せば、外から読み書きできる |
 | MIDI THRU A | A で受けたものを**そのまま外へ流す**。画面のつまみから出たコントロールチェンジや SysEx も一緒に出る |
 | MIDI THRU B | B で受けたものを外へ。A と混ぜないので、外に繋いだ音源でもパートの割り振りが崩れない |
+
+### A/D INPUT（サンプリングで録る音）
+
+パネルの `A/D INPUT` のジャックを左クリックするか、右クリックの品書きの「A/D INPUT」で、
+**録音デバイス**（WASAPI の共有モード）を選ぶ。左が AD1、右が AD2。44100Hz でなければ中で直す。
+選んだ名前は `gui.ini` の `audio_in` に覚え、次に起動したときに開く。既定は「使わない」。
+サンプリングの録音（SAMPLING → REC）と A/D パートに使う。A/D パートの音量は初期値が 0 なので、入力を鳴らすときは音量を上げる。
 
 **実機と聴き比べるとき**は、MIDI THRU A を実機の 1 番目のポート、
 MIDI THRU B を 2 番目に繋ぐ。並べ機から流した同じものが、こちらと実機の

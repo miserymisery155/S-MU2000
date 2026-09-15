@@ -34,8 +34,6 @@ public:
 	void set_wave_rom(const void *base, size_t bytes);
 	// S-MU2000: サンプリング RAM（SWP30 から見て 0x1000000 語目から。2 チップで同じ物を共有する）
 	void set_sample_ram(u8 *base, size_t bytes) { m_wave_cache.set_overlay(base, 0x1000000, bytes >> 2); }
-	// S-MU2000: A/D 入力の 1 サンプル（16bit の目盛り）。録音（波形アクセス 0x7000）のときに書き込む
-	void set_adc_input(s32 v) { m_adc_in = v; }
 	void set_sintab(const u16 *base, size_t count);
 
 	void reset();
@@ -309,7 +307,7 @@ private:
 			bool m1_expand = false, m2_from_m = false;
 			bool dr_from_r = false, no_noise = false;
 			bool memw = false, index = false, t_write = false, t_from_p = false, mem_use_index = false;
-			bool mem_table = false;   // S-MU2000: bit 0x22-0x23 が 2 の読み出し（内部の表。doc/upstream.md の 24）
+			bool mem_table = false;   // S-MU2000: bit 0x23 の付いた読み出し（リバーブ RAM の絶対番地。doc/upstream.md の 24）
 		};
 		std::array<decoded, 0x180> m_decoded = {};
 		void decode_program();
@@ -393,8 +391,6 @@ private:
 		static u16 revram_encode(u32 v);
 		static u32 revram_decode(u16 v);
 		static s16 m1_expand(s16 v);
-		// S-MU2000: 内部の表の 0x000-0x0ff（256 点で 1 周の正弦）。doc/upstream.md の 24
-		static const std::array<s32, 0x100> &table_sine();
 
 		static void call_rand(void *ms);
 		static void call_revram_encode(void *ms);
@@ -482,10 +478,10 @@ private:
 	// S-MU2000: 分岐のあるプログラムを JIT で回すときの「この命令の手前まで飛ばす」位置（0 なら飛ばさない）。
 	// 1 サンプルの中だけで使う。保存しない
 	u32 m_meg_jit_skip = 0;
-	// S-MU2000: サンプリング。m_adc_in は毎サンプル外から入れる（保存しない）。
+	// S-MU2000: サンプリング。m_rec_bus は録るもの（ミキサの出力 8 の左。同じサンプルの中で作って使うので保存しない）。
 	// m_rec_pos は録音を始めてから書いた 16bit のサンプル数（0x30f で下の 16bit が読める）、
 	// m_rec_ctrl は 0x30e に書かれた値（意味はまだ分からない。firmware は 0x001f を書く）
-	s32 m_adc_in = 0;
+	s32 m_rec_bus = 0;
 	u32 m_rec_pos = 0;
 	u16 m_rec_ctrl = 0;
 	// S-MU2000: プログラムか番地が書かれてから数えたサンプル数（0 なら JIT の作り直しを待っていない）。保存しない

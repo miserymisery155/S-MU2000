@@ -69,6 +69,11 @@ protected:
 		COUNTED = 64
 	};
 
+	// S-MU2000: 割り込みを使わない中速の連続変換（SCAN）は、変換ごとに時計を刻まず、ADDR を読まれたときに
+	// その場で入力を読む。MU2000 は AN0-AN3 と AN4 を起動からずっと回していて、1 変換ごとに刻むと
+	// CPU の実行が 1 サンプルあたり倍より重くなった。firmware から見えるのは読んだときの値と ADF だけ
+	bool free_running() const { return !m_is_hs && (m_mode & REPEAT) && (m_adcsr & F_ADST) && !(m_adcsr & F_ADIE) && !m_next_event; }
+
 	u16 m_addr[8] = {}, m_buf[2] = {};
 	u8 m_adcsr = 0, m_adcr = 0;
 	int m_register_mask = 0;

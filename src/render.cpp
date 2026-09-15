@@ -2,10 +2,11 @@
 //
 // MIDI ファイルを食わせて WAV に書き出す。
 //
-//   render <rom ディレクトリ> <MIDI ファイル> <出力 wav> [秒数] [--adc-in 入力 wav]
+//   render <rom ディレクトリ> <MIDI ファイル> <出力 wav> [秒数] [--adc-in 入力 wav] [--card カード img]
 //
 // --adc-in は A/D INPUT に流す音（16bit PCM、1 か 2 チャンネル、44.1kHz）。MIDI の 0 秒から流す。
 // 左が AD1、右が AD2（1 チャンネルなら両方に同じもの）
+// --card は SmartMedia の中身のファイル（gui で作ったもの）を差す。firmware が書いたブロックは終わりに書き戻す
 //
 // 実機と同じく、MIDI は 31250bps の直列で MIDI IN A に流し込む。
 // 出来た WAV は MAME の録音と突き合わせるためのもの。
@@ -99,6 +100,7 @@ int main(int argc, char **argv)
 	const char *meg_trace = nullptr;   // MEG を 1 命令ずつ追う
 	u32 meg_tr_from = 0, meg_tr_count = 0, meg_tr_pc0 = 0, meg_tr_pc1 = 0x180;
 	const char *adc_path = nullptr;    // A/D INPUT に流す WAV
+	const char *card_path = nullptr;   // 差す SmartMedia
 	for (int i = 4; i < argc; i++) {
 		if (!std::strcmp(argv[i], "--trace-swp") && i + 1 < argc)
 			swptrace = argv[++i];
@@ -122,6 +124,8 @@ int main(int argc, char **argv)
 			single = true;
 		else if (!std::strcmp(argv[i], "--adc-in") && i + 1 < argc)
 			adc_path = argv[++i];
+		else if (!std::strcmp(argv[i], "--card") && i + 1 < argc)
+			card_path = argv[++i];
 		else if (!std::strcmp(argv[i], "-v"))
 			smu2000::g_verbose = true;
 		else
@@ -146,6 +150,8 @@ int main(int argc, char **argv)
 	}
 	if (!mu.load_sintab(dir + "/standin/sin-table.bin"))
 		std::fprintf(stderr, "警告: %s\n", mu.error().c_str());
+
+	if (card_path && !mu.card().load(card_path, err)) { std::fprintf(stderr, "%s\n", err.c_str()); return 1; }
 
 	std::FILE *tf = swptrace ? std::fopen(swptrace, "w") : nullptr;
 	if (tf)
@@ -287,6 +293,15 @@ int main(int argc, char **argv)
 		};
 		report("マスタ", mu.swpm());
 		report("スレーブ", mu.swps());
+	}
+
+	if (card_path) {
+		std::vector<smu2000::smartmedia::block> blocks;
+		mu.card().take_dirty_blocks(blocks);
+		if (!smu2000::smartmedia::write_blocks(card_path, blocks, err))
+			std::fprintf(stderr, "%s\n", err.c_str());
+		else if (!blocks.empty())
+			std::printf("カードに書き戻した: %s（%zu ブロック）\n", card_path, blocks.size());
 	}
 
 	write_wav(wav, pcm, rate);

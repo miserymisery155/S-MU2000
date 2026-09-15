@@ -46,12 +46,17 @@ sh_adc_hs_device::sh_adc_hs_device(const machine_config &mconfig, const char *ta
 
 u16 sh_adc_device::addr_r(offs_t offset)
 {
+	if(free_running() && int(offset) >= m_start_channel && int(offset) <= m_end_channel)
+		m_addr[offset] = m_cpu->do_read_adc(offset + m_port_base);
 	return m_addr[offset] << m_port_shift;
 }
 
 u8 sh_adc_device::adcsr_r()
 {
 	if(V>=1) logerror("adcsr_r %02x\n", m_adcsr);
+	// S-MU2000: 回し続けているあいだは、いつ読んでも 1 周し終えている
+	if(free_running())
+		return m_adcsr | F_ADF;
 	return m_adcsr;
 }
 
@@ -76,6 +81,14 @@ void sh_adc_device::adcsr_w(u8 data)
 			} else
 				done();
 		}
+	}
+
+	// S-MU2000: 時計を刻まずに回していたところで、ADST が下ろされたら止め、割り込みが許されたら刻み始める
+	if(!m_is_hs && (m_mode & REPEAT) && !m_next_event) {
+		if(!(m_adcsr & F_ADST))
+			done();
+		else if(m_adcsr & F_ADIE)
+			conversion_wait(false, false);
 	}
 
 	if(!(prev & F_ADST) && (m_adcsr & F_ADST))
@@ -195,6 +208,11 @@ void sh_adc_device::start_conversion()
 	m_mode = m_start_mode;
 	m_channel = m_start_channel;
 	m_count = m_start_count;
+	if(free_running()) {
+		m_adcsr |= F_ADF;
+		m_analog_powered = true;
+		return;
+	}
 	sampling();
 	conversion_wait(true, !m_analog_powered);
 	m_analog_powered = true;
@@ -247,6 +265,11 @@ void sh_adc_device::timeout(u64 current_time)
 		m_intc->internal_interrupt(m_intc_vector);
 
 	if(m_mode & REPEAT) {
+		// S-MU2000: ADST が下ろされていたら回すのをやめる
+		if(!(m_adcsr & F_ADST)) {
+			done();
+			return;
+		}
 		if(m_suspend_on_interrupt && (m_adcsr & F_ADIE)) {
 			m_mode |= HALTED;
 			return;
@@ -296,16 +319,20 @@ void sh_adc_device::mode_update()
 			m_start_channel = m_end_channel = m_adcsr & 7;
 
 	} else {
+		// S-MU2000: 中速の A/D の ADCSR は bit 4 が SCAN、bit 3 が CKS（H8 と同じ並び）。
+		// SCAN が 1 なら、ADST が立っている間 AN0 から CH まで回り続ける。
+		// 前は bit 3 を見て、しかも m_start_mode を作っていなかったので、1 回の変換しかできなかった
+		// （MU2000 のサンプリングのレベルメーターとトリガは、回し続けた AN0 / AN2 を読む）
 		m_trigger = T_SOFT;
 
-		m_mode = ACTIVE;
-
-		if(m_adcsr & 0x08) {
-			m_mode |= ROTATE;
+		if(m_adcsr & 0x10) {
+			m_start_mode = ACTIVE | REPEAT | ROTATE;
 			m_start_channel = 0;
 			m_end_channel = m_adcsr & 3;
-		} else
+		} else {
+			m_start_mode = ACTIVE;
 			m_start_channel = m_end_channel = m_adcsr & 3;
+		}
 	}
 }
 
