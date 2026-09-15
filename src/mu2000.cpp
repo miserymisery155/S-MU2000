@@ -422,12 +422,17 @@ void mu2000::build_bus()
 		// 書き込み百回ほどが一瞬で終わり、実機より約 64 サンプル長くなっていた。
 		// スレーブは待たせない（2.4kHz の割り込みが毎回ミキサを 7 つ書くので、待たせると CPU の 4 割が
 		// 止まる。待たせると遅れが実機より 10 サンプル余計に長くなり、SLICE の位相も遠ざかる）。
-		// 制御の 2 つ（0x0e / 0x0f：鍵を押す合図、MEG のプログラムの番地と中身、波形やリバーブ RAM の
-		// 直の読み書き）も待たせない
+		// 制御の 2 つ（0x0e / 0x0f）は、中身を書くもの（MEG のプログラムの中身 = チャンネル 0x11・0x12、
+		// リバーブ RAM へ直に書く中身 = 0x26）だけ待たせ、番地・合図・状態は待たせない。エフェクトの種類を
+		// 替えたときの読み込みの時間が、これで実機と合う（SLICE は表を 2052 項目書くので実機で 62ms 長い。
+		// 刻みの位相もこれで合う。doc/upstream.md の 36）
 		const bool waits = base == 0x800000;
 		auto hold = [this, waits](offs_t reg) {
 			const u32 slot = reg & 0x3f;
-			if (waits && slot != 0x0e && slot != 0x0f) {
+			const u32 chan = (reg >> 6) & 0x3f;
+			const bool control = slot == 0x0e || slot == 0x0f;
+			const bool data = chan == 0x11 || chan == 0x12 || chan == 0x26;
+			if (waits && (!control || data)) {
 				m_swp_hold = true;
 				m_cpu->abort_timeslice();
 			}
