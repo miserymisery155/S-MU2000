@@ -873,3 +873,26 @@ S-MU2000 では 2 つ目の idx の値と遅延の輪を meg_state の外（swp3
 
 こちらのコミット: `swp30.cpp` の `decode_program` / `step` / `run_program` / `flush_writes` / `state`、`swp30_jit.cpp` の同じ所
 
+## 33. MAME の MEG の DRC が、インタプリタと 3 か所食い違う（MAME だけ。こちらは DRC を使っていない）
+
+**症状**: MAME で同じ MIDI を `-nodrc` の有り無しで鳴らすと、HALL 1 からして差が信号と同じ大きさになる。
+
+MAME に上の直しを移すときに、DRC とインタプリタを同じ状態から 1 サンプルずつ走らせて比べて見つけた:
+
+* メモリアクセスの番地で、区画の先頭（map の下 8 ビット × 1024）を足してから区画の長さでマスクしていて、
+  先頭が 0 でない区画が RAM の頭へ畳まれる。HALL 1 は 0x30000 の区画を使うので、遅延線が別の場所に入る。
+  `resolve_address` と同じく、マスクしてから先頭を足す
+* idx の値を、32bit の配列へ 16bit の `STORE`（2 倍の目盛り）で書いていて、遅延の輪の 0 番以外が壊れ、
+  値も 16bit に切れる。32bit で書く
+* `r = r` のコピーを 64bit の `DMOV` で 32bit の場所へ書いていて、隣の、まだ入っていない書き込みを潰す
+
+直した後は `-nodrc` の有り無しで、ディザの 1 LSB ほどの差しか残らない。
+
+MAME に投稿した PR（2026-09-15）: 22 は [mamedev/mame#16140](https://github.com/mamedev/mame/pull/16140)、
+33 は [mamedev/mame#16141](https://github.com/mamedev/mame/pull/16141)。
+
+MAME の PR 用ブランチ（tarboh/mame に push 済み。33 より後は前が取り込まれてから投稿）: `swp30-meg-drc-fixes`（33）、`swp30-meg-absolute-reads`（24）、
+`swp30-meg-alu`（18・20・21・23・30）、`swp30-meg-branches`（11・29・31）、`swp30-meg-index2`（32）、`swp30-meg-lfo-phase`（25）。
+この順に積んである。MAME の試験では、手元の sin 表の代替品が 0 から始まる形だとコーラスやロータリーが合わないので、
+中心から始まる形に作り直した表で測った。
+
