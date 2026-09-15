@@ -562,6 +562,10 @@ XG の圧縮サンプルの音色を並べた実機の録音 2 本で、帯の�
 
 余り r は、状態の並びを変えないよう `m_dpcm_delta` の下 8bit に -r として入れた（上は差分）。
 
+MAME の PR 用ブランチ: `swp30-dpcm-remainder`（tarboh/mame に push 済み、まだ投稿していない）。MAME では余りを
+`m_dpcm_rem` として別に持つ。MAME の最新（6941dc5ce6）に入れて同じ録音と比べると、m2 の 10〜150Hz が
+-52〜-55dB → -78〜-85dB（実機 -75〜-82dB）、倍音の位相の 1/f の項が -149Hz → -0.3Hz。
+
 こちらのコミット: `swp30.cpp` の `streaming_block::dpcm_step`
 
 ## 20. MEG の飽和する命令が、止める前に 42bit で折り返している（直した）

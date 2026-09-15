@@ -131,7 +131,7 @@ make install-vst3   VST3 の置き場へ複製する
 make probe          DAW 無しで読み込みと発音を確かめる
 ```
 
-CLAP にも対応した（Windows のみ）。中身は VST3 版と同じで、MIDI はバイト列のまま
+CLAP にも対応した（Windows で確かめた。macOS 用の `make clap` も書いてあるが、まだ macOS のホストで試していない）。中身は VST3 版と同じで、MIDI はバイト列のまま
 受け取る。ノートの入力は MIDI IN A（パート 1-16）と B（パート 17-32）の 2 本。
 置き場は `C:\Program Files\Common Files\CLAP`（全員）か
 `%LOCALAPPDATA%\Programs\Common\CLAP`（利用者ごと）。ROM の置き場は

@@ -101,6 +101,9 @@ void draw_keys(ImDrawList *dl, ImVec2 pos, float w, float h, F color)
 
 } // namespace
 
+// 小さなマスの説明に足す一言
+constexpr const char *BIG_HINT = "\nダブルクリックで大きな窓に出す";
+
 struct overview::column {
 	const char *title;
 	src from;
@@ -148,16 +151,23 @@ void overview::cell(const column &c, int part, xg::model &m, const xg_snapshot &
 	if (wide(c.from) || c.from == src::ins) {
 		if (part < 0)
 			ImGui::Dummy(ImVec2(w, h));
-		else if (c.from == src::eg)
-			eg_cell(part, m, br, w, h);
-		else if (c.from == src::filter)
-			filter_cell(part, m, br, w, h);
-		else if (c.from == src::eq)
-			eq_cell(part, m, br, w, h);
-		else if (c.from == src::vib)
-			vib_cell(part, m, br, w, h);
-		else
+		else if (c.from == src::ins)
 			ins_cell(part, m, br, h);
+		else {
+			if (c.from == src::eg)
+				eg_cell(part, m, br, w, h, true);
+			else if (c.from == src::filter)
+				filter_cell(part, m, br, w, h, true);
+			else if (c.from == src::eq)
+				eq_cell(part, m, br, w, h, true);
+			else
+				vib_cell(part, m, br, w, h, true);
+			// 小さなマスでは点をつまみにくいので、ダブルクリックでパートの音色の窓に大きく出す
+			if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+				m_part = part;
+				request_part(part);
+			}
+		}
 		return;
 	}
 
@@ -450,7 +460,7 @@ void overview::ins_cell(int part, xg::model &m, bridge &br, float h)
 // 3 つの点をつまんで横に動かすと、アタック・ディケイ・リリースが変わる。
 // XG の値は音色の元の値に対する増減（64 が音色のまま）。形の長さは 2 の (値 - 64) / 24 乗で伸び縮みさせ、
 // 真ん中の値で各区間が同じくらいの長さになるようにした（見た目だけ。実際の秒数ではない）
-void overview::eg_cell(int part, xg::model &m, bridge &br, float w, float h)
+void overview::eg_cell(int part, xg::model &m, bridge &br, float w, float h, bool compact)
 {
 	ImGuiIO &io = ImGui::GetIO();
 	const float fs = ImGui::GetFontSize();
@@ -528,8 +538,9 @@ void overview::eg_cell(int part, xg::model &m, bridge &br, float w, float h)
 	}
 
 	if ((hovered || active) && known)
-		ImGui::SetItemTooltip("Attack %s   Decay %s   Release %s\n点を横につまんで動かす（右へ長く、左へ短く）",
-		                      xg::format(pa, va).c_str(), xg::format(pd, vd).c_str(), xg::format(pr, vr).c_str());
+		ImGui::SetItemTooltip("Attack %s   Decay %s   Release %s\n点を横につまんで動かす（右へ長く、左へ短く）%s",
+		                      xg::format(pa, va).c_str(), xg::format(pd, vd).c_str(), xg::format(pr, vr).c_str(),
+		                      compact ? BIG_HINT : "");
 	ImGui::PopID();
 }
 
@@ -538,7 +549,7 @@ void overview::eg_cell(int part, xg::model &m, bridge &br, float w, float h)
 // 横軸は値に比例（64 が真ん中 = 音色のまま）で、1 マスの幅が 8 オクターブ。
 // 点の高さは、カットオフでの持ち上がり 20log10(Q) dB。Q = 2 の (値 - 64) / 16 乗なので、
 // 高さも値に比例する。どちらも見た目だけで、実際の周波数や Q ではない
-void overview::filter_cell(int part, xg::model &m, bridge &br, float w, float h)
+void overview::filter_cell(int part, xg::model &m, bridge &br, float w, float h, bool compact)
 {
 	ImGuiIO &io = ImGui::GetIO();
 	const float fs = ImGui::GetFontSize();
@@ -619,8 +630,8 @@ void overview::filter_cell(int part, xg::model &m, bridge &br, float w, float h)
 	}
 
 	if ((hovered || active) && known)
-		ImGui::SetItemTooltip("Cutoff %s   Resonance %s\n点をつまんで、横でカットオフ（右へ明るく）、縦でレゾナンス（上へ強く）",
-		                      xg::format(pc, vc).c_str(), xg::format(pq, vq).c_str());
+		ImGui::SetItemTooltip("Cutoff %s   Resonance %s\n点をつまんで、横でカットオフ（右へ明るく）、縦でレゾナンス（上へ強く）%s",
+		                      xg::format(pc, vc).c_str(), xg::format(pq, vq).c_str(), compact ? BIG_HINT : "");
 	ImGui::PopID();
 }
 
@@ -773,13 +784,14 @@ int eq_plot(const char *id, eq_band *bands, int n, xg::model &m, bridge &br, flo
 
 
 // パートの EQ の 1 マス。低音（シェルフ）と高音（シェルフ）の 2 つの点
-void overview::eq_cell(int part, xg::model &m, bridge &br, float w, float h)
+void overview::eq_cell(int part, xg::model &m, bridge &br, float w, float h, bool compact)
 {
 	eq_band bands[] = {
 		{ band_shape::low_shelf,  &P("part.eq_bass_gain"),   &P("part.eq_bass_freq"),   nullptr, part, 64, 12, 0, false },
 		{ band_shape::high_shelf, &P("part.eq_treble_gain"), &P("part.eq_treble_freq"), nullptr, part, 64, 54, 0, false },
 	};
-	eq_plot("eq", bands, 2, m, br, w, h, "点をつまんで、横で周波数、縦でゲイン（1 が低音、2 が高音）");
+	eq_plot("eq", bands, 2, m, br, w, h, compact ? "点をつまんで、横で周波数、縦でゲイン（1 が低音、2 が高音）\nダブルクリックで大きな窓に出す"
+	                                            : "点をつまんで、横で周波数、縦でゲイン（1 が低音、2 が高音）");
 }
 
 
@@ -824,7 +836,7 @@ void overview::master_eq_cell(xg::model &m, bridge &br, float h)
 // そのあとの波の山の点をつまんで、横で速さ（山が近いほど速い）、縦で深さ。
 // 平らな所の終わりの点を横に動かすと Delay。どれも音色の元の値に対する増減（64 が音色のまま）で、
 // 形は 2 の (値 - 64) / 24 乗で伸び縮みさせた見た目だけのもの
-void overview::vib_cell(int part, xg::model &m, bridge &br, float w, float h)
+void overview::vib_cell(int part, xg::model &m, bridge &br, float w, float h, bool compact)
 {
 	ImGuiIO &io = ImGui::GetIO();
 	const float fs = ImGui::GetFontSize();
@@ -900,8 +912,9 @@ void overview::vib_cell(int part, xg::model &m, bridge &br, float w, float h)
 		dl->AddText(ImVec2(pos.x + (w - ts.x) * 0.5f, pos.y + (h - ts.y) * 0.5f), col(ImGuiCol_TextDisabled), "--");
 	}
 	if ((hovered || active) && known)
-		ImGui::SetItemTooltip("Rate %s   Depth %s   Delay %s\n波の山の点: 横で速さ、縦で深さ\n平らな所の終わりの点: 横で掛かり始めるまでの時間",
-		                      xg::format(pr, vr).c_str(), xg::format(pd, vd).c_str(), xg::format(pl, vl).c_str());
+		ImGui::SetItemTooltip("Rate %s   Depth %s   Delay %s\n波の山の点: 横で速さ、縦で深さ\n平らな所の終わりの点: 横で掛かり始めるまでの時間%s",
+		                      xg::format(pr, vr).c_str(), xg::format(pd, vd).c_str(), xg::format(pl, vl).c_str(),
+		                      compact ? BIG_HINT : "");
 	ImGui::PopID();
 }
 
@@ -1409,10 +1422,26 @@ void overview::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 	ImGui::Begin("overview", nullptr, wf);
 	ImGui::PopStyleVar();
 
+	// 表示の大きさ。32 パートを見渡すための窓なので、既定は小さめ（文字 10px）。
+	// 棒や絵も文字の大きさから決まるので、全部が一緒に縮む
+	float &zoom = overview_zoom();
+	help_checkbox();
+	ImGui::SameLine();
+	ImGui::TextDisabled("|");
+	ImGui::SameLine();
+	if (ImGui::SmallButton("-"))
+		set_overview_zoom(zoom - 0.125f);
+	ImGui::SameLine();
+	ImGui::Text("%d%%", int(std::lround(zoom * 100)));
+	ImGui::SameLine();
+	if (ImGui::SmallButton("+"))
+		set_overview_zoom(zoom + 0.125f);
+	ImGui::SameLine();
+	ImGui::TextDisabled("表示の大きさ（小さな絵はダブルクリックで大きな窓に出る）");
+
+	ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * zoom);
 	const float fs = ImGui::GetFontSize();
 	const float h = fs * 2.3f;
-
-	help_checkbox();
 
 	// マスターの表（見出しは別）。インサーションとバリエーションの設定もここ
 	master_pane(m, ram, br);
@@ -1438,6 +1467,7 @@ void overview::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 		ImGui::EndTable();
 	}
 	ImGui::PopStyleVar();
+	ImGui::PopFont();
 	ImGui::End();
 
 	if (ImGui::GetIO().MouseWheel != 0.0f && !m_wheel_taken)

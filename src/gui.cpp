@@ -35,6 +35,7 @@
 #include "ui/panel.h"
 #include "ui/fx_editor.h"
 #include "ui/overview.h"
+#include "ui/part_shapes.h"
 #include "ui/pc_editor.h"
 #include "ui/pc_window.h"
 #include "ui/player.h"
@@ -75,6 +76,7 @@ struct window_state {
 	ui::pc_window pc{ std::make_unique<ui::pc_editor>() };    // PC エディタ（F2 か右クリック）
 	ui::pc_window list{ std::make_unique<ui::overview>() };   // 一覧（F3 か右クリック）
 	ui::pc_window fx{ std::make_unique<ui::fx_editor>() };    // インサーションの設定（一覧でダブルクリック）
+	ui::pc_window shapes{ std::make_unique<ui::part_shapes>() };   // パートの音色（一覧の絵をダブルクリック）
 	ui::bridge *br = nullptr;
 	engine     *eng = nullptr;
 	ui::audio_out *out = nullptr;
@@ -713,9 +715,13 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 			g_win.pc.frame(g_win.panel.xg(), g_win.panel.ram(), *g_win.br);
 			g_win.list.frame(g_win.panel.xg(), g_win.panel.ram(), *g_win.br);
 			g_win.fx.frame(g_win.panel.xg(), g_win.panel.ram(), *g_win.br);
+			g_win.shapes.frame(g_win.panel.xg(), g_win.panel.ram(), *g_win.br);
 			// 一覧でインサーションの欄をダブルクリックされたら、設定の窓を出す
 			if (ui::xgui::take_fx_request())
 				open_window(hwnd, g_win.fx);
+			// 一覧で VIB・FILTER・EG・EQ の絵をダブルクリックされたら、パートの音色の窓を出す
+			if (ui::xgui::take_part_request())
+				open_window(hwnd, g_win.shapes);
 		}
 		InvalidateRect(hwnd, nullptr, FALSE);
 		// SmartMedia に書いたものを 2 秒ごとにファイルへ書き戻す（抜いたとき・閉じたときも）
@@ -1346,6 +1352,7 @@ int main(int argc, char **argv)
 		g_win.list.shutdown(*g_win.br);
 		g_win.pc.shutdown(*g_win.br);
 		g_win.fx.shutdown(*g_win.br);
+		g_win.shapes.shutdown(*g_win.br);
 		Sleep(100);
 	}
 

@@ -283,7 +283,21 @@ void engine::boot()
 		m_roms = shared;
 	}
 
-	mu->set_threaded(true);
+	// SWP30 のスレーブを別スレッドで回すか。既定は回す（挿した枚数が論理コアの 1/4 を超えたら自動で 1 本）。
+	// DAW の中では、DAW が管理しない糸が 1 本増える。嫌う DAW や、自分でコアを割り振りたい人のために、
+	// %LOCALAPPDATA%\S-MU2000\plugin.ini に threaded=0 と書けば 1 本で回す
+	bool threaded = true;
+	if (const std::string local = smu2000::config_dir(); !local.empty())
+		if (std::FILE *f = std::fopen(smu2000::join(local, "plugin.ini").c_str(), "rb")) {
+			char line[256];
+			while (std::fgets(line, sizeof(line), f))
+				if (!std::strncmp(line, "threaded=", 9))
+					threaded = line[9] != '0';
+			std::fclose(f);
+		}
+	mu->set_threaded(threaded);
+	if (!threaded)
+		logf("plugin.ini: threaded=0（スレーブを別スレッドにしない）");
 	// gui / live が残した設定で起動する。**読むだけで書かない。**VST3 の中で
 	// 変えたものは DAW のプロジェクトに残るし、何枚も挿されたときに
 	// 同じファイルを取り合わずに済む

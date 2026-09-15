@@ -186,7 +186,7 @@ IMGUI_SRCS := $(IMGUI_DIR)/imgui.cpp $(IMGUI_DIR)/imgui_draw.cpp \
               $(IMGUI_DIR)/imgui_tables.cpp $(IMGUI_DIR)/imgui_widgets.cpp \
               $(IMGUI_DIR)/backends/imgui_impl_win32.cpp \
               $(IMGUI_DIR)/backends/imgui_impl_dx11.cpp
-PC_SRCS    := src/ui/pc_editor.cpp src/ui/pc_window.cpp src/ui/xg_ui.cpp src/ui/overview.cpp src/ui/fx_editor.cpp src/ui/fx_help.cpp
+PC_SRCS    := src/ui/pc_editor.cpp src/ui/pc_window.cpp src/ui/xg_ui.cpp src/ui/overview.cpp src/ui/fx_editor.cpp src/ui/fx_help.cpp src/ui/part_shapes.cpp
 PC_OBJS    := $(IMGUI_SRCS:%.cpp=$(BUILD)/imgui/%.o) $(PC_SRCS:%.cpp=$(BUILD)/imgui/%.o)
 IMGUI_FLAGS := -I $(IMGUI_DIR) -DIMGUI_IMPL_WIN32_DISABLE_GAMEPAD
 
@@ -411,6 +411,40 @@ install-vst3: $(VST3_BIN)
 	mkdir -p "$(VST3_INSTALL)"
 	cp -r $(VST3_DIR) "$(VST3_INSTALL)/"
 	@echo "入れた: $(VST3_INSTALL)/S-MU2000.vst3"
+
+# ---- CLAP plug-in (macOS)
+#
+# The same src/clap/plugin.cpp as on Windows, around the VST3 engine and view.
+# On macOS a CLAP is a bundle like the VST3: the binary in Contents/MacOS, found
+# through Contents/Info.plist. Not in `all` yet -- it has not been tried in a
+# macOS host
+CLAP_DIR  := $(BUILD)/S-MU2000.clap
+CLAP_BIN  := $(CLAP_DIR)/Contents/MacOS/S-MU2000
+CLAP_INC  := -I third_party/clap $(VST3_INC)
+CLAP_OBJS := $(BUILD)/clapobj/src/clap/plugin.o $(filter-out $(BUILD)/vst3obj/src/vst3/plugin.o,$(VST3_OBJS))
+
+$(BUILD)/clapobj/%.o: %.cpp
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) $(CLAP_INC) -c -o $@ $<
+
+clap: $(CLAP_BIN)
+
+$(CLAP_BIN): $(OBJS) $(BUILD)/src/mu2000.o $(CLAP_OBJS)
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -bundle -o $@ $^ $(LDFLAGS) $(MAC_FRAMEWORKS)
+	@mkdir -p $(CLAP_DIR)/Contents/Resources
+	@cp -f LICENSE $(CLAP_DIR)/Contents/Resources/LICENSE.txt
+	@cp -f NOTICE.txt $(CLAP_DIR)/Contents/Resources/NOTICE.txt
+	@cp -f packaging/clap-macos-Info.plist $(CLAP_DIR)/Contents/Info.plist
+	@printf 'BNDL????' > $(CLAP_DIR)/Contents/PkgInfo
+
+CLAP_INSTALL ?= $(HOME)/Library/Audio/Plug-Ins/CLAP
+
+install-clap: $(CLAP_BIN)
+	rm -rf "$(CLAP_INSTALL)/S-MU2000.clap"
+	mkdir -p "$(CLAP_INSTALL)"
+	cp -r $(CLAP_DIR) "$(CLAP_INSTALL)/"
+	@echo "入れた: $(CLAP_INSTALL)/S-MU2000.clap"
 
 # Small tool that pretends to be a host. Same as the Windows one, except that the
 # module is opened with CFBundle and the parent window is probe_host_mac.mm

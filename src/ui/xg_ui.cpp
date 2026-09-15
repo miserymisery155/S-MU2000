@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -175,6 +176,16 @@ void request_fx(int slot) { g_fx_slot = std::clamp(slot, 1, 4); g_fx_request = t
 bool take_fx_request() { const bool r = g_fx_request; g_fx_request = false; return r; }
 int  fx_window_slot() { return g_fx_slot; }
 void set_fx_window_slot(int slot) { g_fx_slot = std::clamp(slot, 1, 4); }
+
+namespace {
+int  g_shape_part = 0;
+bool g_part_request = false;
+}
+
+void request_part(int part) { g_shape_part = std::clamp(part, 0, 31); g_part_request = true; }
+bool take_part_request() { const bool r = g_part_request; g_part_request = false; return r; }
+int  shape_window_part() { return g_shape_part; }
+void set_shape_window_part(int part) { g_shape_part = std::clamp(part, 0, 31); }
 
 const xg::param &P(const char *key)
 {
@@ -563,9 +574,10 @@ const help_text HELP[] = {
 		"Bank select LSB. Picks variations of the same voice number." } },
 };
 
-bool g_help = true;
-int  g_lang = 0;
-bool g_loaded = false;
+bool  g_help = true;
+int   g_lang = 0;
+float g_zoom = 0.625f;                 // 一覧の表示の大きさ
+bool  g_loaded = false;
 
 std::string settings_file()
 {
@@ -588,6 +600,8 @@ void load_settings()
 		line[std::strcspn(line, "\r\n")] = 0;
 		if (!std::strncmp(line, "help=", 5))
 			g_help = line[5] != '0';
+		else if (!std::strncmp(line, "overview_zoom=", 14))
+			g_zoom = std::clamp(float(std::atof(line + 14)), 0.5f, 1.5f);
 		else if (!std::strncmp(line, "lang=", 5))
 			for (int i = 0; i < NLANG; i++)
 				if (!std::strcmp(line + 5, LANGS[i].code))
@@ -603,7 +617,7 @@ void save_settings()
 		return;
 	CreateDirectoryA(path.substr(0, path.rfind('\\')).c_str(), nullptr);
 	if (FILE *f = std::fopen(path.c_str(), "wb")) {
-		std::fprintf(f, "help=%d\nlang=%s\n", g_help ? 1 : 0, LANGS[g_lang].code);
+		std::fprintf(f, "help=%d\nlang=%s\noverview_zoom=%.3f\n", g_help ? 1 : 0, LANGS[g_lang].code, g_zoom);
 		std::fclose(f);
 	}
 }
@@ -628,6 +642,22 @@ int help_lang()
 {
 	ensure_loaded();
 	return g_lang;
+}
+
+float &overview_zoom()
+{
+	ensure_loaded();
+	return g_zoom;
+}
+
+void set_overview_zoom(float zoom)
+{
+	ensure_loaded();
+	const float z = std::clamp(zoom, 0.5f, 1.5f);
+	if (z != g_zoom) {
+		g_zoom = z;
+		save_settings();
+	}
 }
 
 bool &help_on()
