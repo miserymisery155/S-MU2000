@@ -131,6 +131,17 @@ make install-vst3   VST3 の置き場へ複製する
 make probe          DAW 無しで読み込みと発音を確かめる
 ```
 
+CLAP にも対応した（Windows のみ）。中身は VST3 版と同じで、MIDI はバイト列のまま
+受け取る。ノートの入力は MIDI IN A（パート 1-16）と B（パート 17-32）の 2 本。
+置き場は `C:\Program Files\Common Files\CLAP`（全員）か
+`%LOCALAPPDATA%\Programs\Common\CLAP`（利用者ごと）。ROM の置き場は
+`S-MU2000.clap` のすぐ横の `roms.txt` か、`%LOCALAPPDATA%\S-MU2000\roms.txt` に 1 行書く。
+
+```
+make clap           build/S-MU2000.clap ができる
+make install-clap   CLAP の置き場へ複製する
+```
+
 `live` は音声デバイスが要求した分だけ音源を進める。自分で時計を持たないので、
 外部と同期させてもずれない（MAME が破綻したのはここ）。CPU 使用率はおよそ 38%。
 
@@ -250,6 +261,9 @@ VST3 のインターフェース定義（`third_party/vst3/pluginterfaces`）は
 ものだが **MIT** で配られている。GPLv3 の `public.sdk` は使っていないので、
 プラグインの土台は全部このリポジトリの中にある。
 くわしくは [third_party/vst3/README.md](third_party/vst3/README.md)。
+
+CLAP のヘッダ（`third_party/clap`、Alexandre BIQUE、**MIT**）も手を加えずに取り込んだ。
+くわしくは [third_party/clap/README.md](third_party/clap/README.md)。
 
 gui.exe の PC エディタの窓は Dear ImGui（`third_party/imgui`、Omar Cornut、**MIT**）で
 描いている。手を加えずに取り込んだ。

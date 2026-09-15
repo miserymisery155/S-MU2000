@@ -115,7 +115,7 @@ private:
 		s32 m_pos_dec = 0;
 		s16 m_dpcm_s0 = 0, m_dpcm_s1 = 0, m_dpcm_s2 = 0, m_dpcm_s3 = 0;
 		u32 m_dpcm_pos = 0;
-		s32 m_dpcm_delta = 0;
+		s32 m_dpcm_delta = 0;             // S-MU2000: 上 24bit が差分、下 8bit が持ち越す余り（-r）
 
 		bool m_first = false, m_finetune_active = false, m_done = false;
 		s16 m_last = 0;

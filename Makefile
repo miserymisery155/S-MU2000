@@ -110,7 +110,7 @@ ifeq ($(PLATFORM),windows)
 all: $(BUILD)/verify$(EXE) $(BUILD)/boot$(EXE) $(BUILD)/render$(EXE) \
      $(BUILD)/live$(EXE) $(BUILD)/midisend$(EXE) $(BUILD)/panel$(EXE) $(BUILD)/gui$(EXE) \
      $(BUILD)/statetest$(EXE) $(BUILD)/rec$(EXE) $(BUILD)/blocktime$(EXE) \
-     vst3 $(BUILD)/vst3probe$(EXE)
+     vst3 $(BUILD)/vst3probe$(EXE) clap
 else
 # macOS. vst3 and vst3probe are defined below
 all: $(BUILD)/verify$(EXE) $(BUILD)/boot$(EXE) $(BUILD)/render$(EXE) \
@@ -266,6 +266,35 @@ $(BUILD)/vst3probe$(EXE): $(BUILD)/vst3obj/src/vst3/probe.o $(BUILD)/vst3obj/src
 
 probe: $(BUILD)/vst3probe$(EXE) $(VST3_BIN)
 	$(BUILD)/vst3probe$(EXE) $(VST3_BIN)
+
+# ---- CLAP プラグイン
+#
+# CLAP の口の定義（MIT）を third_party/clap に取り込んである。中身は VST3 版の
+# engine と画面をそのまま使い、口だけ src/clap/plugin.cpp に書いた。
+#
+#   make clap          build/S-MU2000.clap を作る（CLAP は DLL 1 本）
+#   make install-clap  それを CLAP の置き場へ複製する
+
+CLAP_BIN  := $(BUILD)/S-MU2000.clap
+CLAP_INC  := -I third_party/clap $(VST3_INC)
+CLAP_OBJS := $(BUILD)/clapobj/src/clap/plugin.o $(filter-out $(BUILD)/vst3obj/src/vst3/plugin.o,$(VST3_OBJS))
+
+$(BUILD)/clapobj/%.o: %.cpp
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) $(CLAP_INC) -c -o $@ $<
+
+clap: $(CLAP_BIN)
+
+$(CLAP_BIN): $(OBJS) $(BUILD)/src/mu2000.o $(CLAP_OBJS)
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -shared -o $@ $^ $(LDFLAGS) -lwinmm -lole32 -lgdi32 -luser32 -lavrt -lcomdlg32
+
+CLAP_INSTALL ?= $(PROGRAMFILES)/Common Files/CLAP
+
+install-clap: $(CLAP_BIN)
+	mkdir -p "$(CLAP_INSTALL)"
+	cp -f $(CLAP_BIN) "$(CLAP_INSTALL)/"
+	@echo "入れた: $(CLAP_INSTALL)/S-MU2000.clap"
 
 # The Audio Unit is a macOS port; nothing to build here
 au install-au au-probe check-au:
@@ -508,4 +537,4 @@ clean:
 # 別の場所を触りに行っていた）。だから build の下にある .d を全部拾う
 -include $(shell find $(BUILD) -name '*.d' 2>/dev/null)
 
-.PHONY: all clean regen check test test-update vst3 install-vst3 probe au install-au au-probe check-au
+.PHONY: all clean regen check test test-update vst3 install-vst3 probe clap install-clap au install-au au-probe check-au
