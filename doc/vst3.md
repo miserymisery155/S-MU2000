@@ -184,7 +184,34 @@ initialize/terminate を往復する、22050 から 192000 まで全部の周波
 
 ## まだ無いもの
 
-- 状態の保存。DAW に保存されるのは出力レベルだけで、音色設定は残らない。
-  曲を開き直すと、音色は MIDI トラックの頭から作り直しになる
 - 個別出力（実機の 6 系統）。今はステレオ 1 系統だけ
 - 64bit 浮動小数の処理（`kSample32` のみ）
+
+## macOS
+
+macOS 版も同じ中身で作れる。バンドルの形と口の名前だけが違う。
+
+```
+make vst3                    build/S-MU2000.vst3 を作る
+make probe                   ホストのふりをして読み込む
+make install-vst3            ~/Library/Audio/Plug-Ins/VST3 へ複製
+
+build/vst3probe build/S-MU2000.vst3                  素性を見る
+build/vst3probe build/S-MU2000.vst3 song.mid out.wav 鳴らす
+build/vst3probe build/S-MU2000.vst3 --torture        乱暴に扱う
+build/vst3probe build/S-MU2000.vst3 --view 20        画面を出す
+```
+
+バンドルは `Contents/MacOS/S-MU2000`（実行体）と `Contents/Info.plist`。
+ホストは `dlopen` ではなく `CFBundle` で開き、`bundleEntry` を呼ぶ。
+画面は `src/vst3/view_mac.mm`（`NSView`）で、ホストの親ビューの中に 1 枚
+足す。描画は gui と同じ `compat/gdi_mac.cpp` を通るので、**panel.cpp は
+Windows 版と同じソース**のまま。
+
+ROM は `S_MU2000_ROMS`、バンドルの隣の `roms.txt`、
+`~/Library/Application Support/S-MU2000/roms` の順に探す。
+
+同じ engine を使った Audio Unit（AUv2, `aumu`）も作れる（`make au`）。
+そちらは `src/au/plugin.cpp`。
+
+移植の全体は [porting-macos.md](porting-macos.md) にまとめてある。

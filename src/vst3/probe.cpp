@@ -20,25 +20,58 @@
 #include "pluginterfaces/vst/ivstevents.h"
 #include "pluginterfaces/vst/ivstparameterchanges.h"
 
+#include "probe_host.h"
 #include "smf.h"
+
+#include "compat/console.h"
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
 
+// A VST3 module is opened differently on each platform: a Windows DLL by
+// LoadLibrary, a .vst3 directory by CFBundle. Both ends the same way, with a
+// pointer to GetPluginFactory
+#if defined(_WIN32)
 #include <windows.h>
+#elif defined(__APPLE__)
+#include <CoreFoundation/CoreFoundation.h>
+#endif
 
 using namespace Steinberg;
 using namespace Steinberg::Vst;
 
+// The host window stand-in (probe_host.h). Named here so the code below reads
+// the same on both platforms
+using smu2000::vst3::probe_host;
+using smu2000::vst3::probe_host_create;
+
 namespace {
+
+// A monotonic millisecond clock.
+//
+// This used to be GetTickCount, which only exists on Windows and only counts to
+// 32 bits. steady_clock is QueryPerformanceCounter underneath there and
+// mach_absolute_time here, so one clock serves both and it does not wrap
+long long now_ms()
+{
+	return std::chrono::duration_cast<std::chrono::milliseconds>(
+		std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+void sleep_ms(int ms)
+{
+	std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+}
 
 void print16(const char16 *s)
 {
@@ -201,21 +234,11 @@ private:
 // ---- 画面を窓に出してみる。
 // ホストのふりをして親ウィンドウを作り、そこへプラグインの画面を貼る。
 // 音は出さないが、LCD が動くよう process を実時間で回しておく
+//
+// The window itself is per platform (probe_host.h); standing in for a host
+// otherwise means the same thing on both, so the rest is shared
 
 std::atomic<bool> g_view_quit{false};
-
-LRESULT CALLBACK host_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
-{
-	if (msg == WM_DESTROY) { PostQuitMessage(0); return 0; }
-	if (msg == WM_SIZE) {
-		// 親が変わったら中身も合わせる（DAW も同じことをする）
-		HWND child = GetWindow(h, GW_CHILD);
-		if (child)
-			MoveWindow(child, 0, 0, LOWORD(lp), HIWORD(lp), TRUE);
-		return 0;
-	}
-	return DefWindowProcA(h, msg, wp, lp);
-}
 
 int run_view(IComponent *comp, IAudioProcessor *proc, IEditController *ctrl, int seconds)
 {
@@ -226,8 +249,9 @@ int run_view(IComponent *comp, IAudioProcessor *proc, IEditController *ctrl, int
 	if (!view) { std::printf("NG: 画面を作れない\n"); return 1; }
 	std::printf("OK: createView\n");
 
-	if (view->isPlatformTypeSupported(kPlatformTypeHWND) != kResultTrue) {
-		std::printf("NG: HWND に対応していない\n");
+	std::unique_ptr<probe_host> host(probe_host_create());
+	if (view->isPlatformTypeSupported(host->platform_type()) != kResultTrue) {
+		std::printf("NG: %s に対応していない\n", host->platform_type());
 		view->release();
 		return 1;
 	}
@@ -236,29 +260,19 @@ int run_view(IComponent *comp, IAudioProcessor *proc, IEditController *ctrl, int
 	std::printf("OK: 大きさ %d × %d、伸縮 %s\n", vr.getWidth(), vr.getHeight(),
 	            view->canResize() == kResultTrue ? "できる" : "できない");
 
-	WNDCLASSA wc{};
-	wc.lpfnWndProc   = host_proc;
-	wc.hInstance     = GetModuleHandleA(nullptr);
-	wc.hCursor       = LoadCursor(nullptr, IDC_ARROW);
-	wc.lpszClassName = "SMU2000ProbeHost";
-	RegisterClassA(&wc);
-
-	RECT want{ 0, 0, vr.getWidth(), vr.getHeight() };
-	AdjustWindowRect(&want, WS_OVERLAPPEDWINDOW, FALSE);
-	HWND host = CreateWindowA("SMU2000ProbeHost", "S-MU2000 probe host",
-	                          WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
-	                          want.right - want.left, want.bottom - want.top,
-	                          nullptr, nullptr, wc.hInstance, nullptr);
-	if (!host) { std::printf("NG: 親の窓を作れない\n"); view->release(); return 1; }
-
-	if (view->attached(host, kPlatformTypeHWND) != kResultOk) {
+	if (!host->create(vr.getWidth(), vr.getHeight())) {
+		std::printf("NG: 親の窓を作れない\n");
+		view->release();
+		return 1;
+	}
+	if (!host->attach(view)) {
 		std::printf("NG: attached\n");
-		DestroyWindow(host);
+		host->destroy();
 		view->release();
 		return 1;
 	}
 	std::printf("OK: attached\n");
-	ShowWindow(host, SW_SHOW);
+	host->show();
 
 	// LCD が動くよう、実時間で process を回す
 	std::thread pump([&] {
@@ -271,27 +285,19 @@ int run_view(IComponent *comp, IAudioProcessor *proc, IEditController *ctrl, int
 		pd.numSamples = 512; pd.numOutputs = 1; pd.outputs = &ab;
 		while (!g_view_quit.load()) {
 			proc->process(pd);
-			Sleep(11);                     // 512 / 44100 ≒ 11.6ms
+			// 512 / 44100 ≒ 11.6ms
+			std::this_thread::sleep_for(std::chrono::milliseconds(11));
 		}
 	});
 
-	const DWORD end = GetTickCount() + DWORD(seconds) * 1000;
-	MSG msg;
-	while (GetTickCount() < end) {
-		while (PeekMessageA(&msg, nullptr, 0, 0, PM_REMOVE)) {
-			if (msg.message == WM_QUIT) goto stop;
-			TranslateMessage(&msg);
-			DispatchMessageA(&msg);
-		}
-		Sleep(10);
-	}
-stop:
+	host->pump(seconds);
+
 	g_view_quit.store(true);
 	pump.join();
 
 	view->removed();
 	std::printf("OK: removed\n");
-	DestroyWindow(host);
+	host->destroy();
 	view->release();
 	std::printf("---- 画面はここまで ----\n");
 	return 0;
@@ -415,7 +421,7 @@ int run_torture(IPluginFactory *fac, const TUID cid)
 					break;
 				if (st.size() >= 1000)
 					break;
-				Sleep(50);
+				sleep_ms(50);
 			}
 			if (st.size() < 1000) {
 				std::printf("NG: getState が %zu バイトしかない"
@@ -480,11 +486,11 @@ int run_torture(IPluginFactory *fac, const TUID cid)
 				mem_stream s;
 				c->getState(&s);
 				if (s.size() >= 1000) break;
-				Sleep(50);
+				sleep_ms(50);
 			}
 			int saved = 0, restored = 0, small = 0;
-			const DWORD end = GetTickCount() + 8000;
-			for (int round = 0; GetTickCount() < end; round++) {
+			const long long end = now_ms() + 8000;
+			for (int round = 0; now_ms() < end; round++) {
 				p->setProcessing(false);
 				c->setActive(false);
 				mem_stream st;
@@ -584,7 +590,7 @@ int run_torture(IPluginFactory *fac, const TUID cid)
 		}
 		std::printf("4 個ぶん起動を待つ...");
 		std::fflush(stdout);
-		Sleep(12000);
+		sleep_ms(12000);
 
 		std::vector<float> l(512), rr(512);
 		float *ch[2] = { l.data(), rr.data() };
@@ -593,14 +599,14 @@ int run_torture(IPluginFactory *fac, const TUID cid)
 		pd.symbolicSampleSize = kSample32; pd.numSamples = 512;
 		pd.numOutputs = 1; pd.outputs = &ab;
 
-		const DWORD t0 = GetTickCount();
+		const long long t0 = now_ms();
 		double peak = 0.0;
 		for (int blk = 0; blk < 200; blk++)
 			for (int i = 0; i < 4; i++) {
 				ps[i]->process(pd);
 				for (float v : l) peak = std::max(peak, std::fabs(double(v)));
 			}
-		const DWORD t1 = GetTickCount();
+		const long long t1 = now_ms();
 		const double audio = 200.0 * 512.0 / 48000.0;
 		std::printf(" 4 個同時に %.2f 秒ぶん作って実時間 %.2f 秒（1 個あたり CPU %.0f%%）\n",
 		            audio, (t1 - t0) / 1000.0, 100.0 * (t1 - t0) / 1000.0 / audio / 4.0);
@@ -624,7 +630,7 @@ int run_torture(IPluginFactory *fac, const TUID cid)
 
 int main(int argc, char **argv)
 {
-	SetConsoleOutputCP(CP_UTF8);
+	smu2000::init_console_utf8();
 	// プラグインが落ちても、どこまで進んだかが残るように
 	std::setvbuf(stdout, nullptr, _IONBF, 0);
 
@@ -654,14 +660,47 @@ int main(int argc, char **argv)
 		else if (wav.empty()) wav = argv[i];
 	}
 
+	// ---- Open the module
+	//
+	// On Windows the argument is a DLL and the entry points are InitDll and
+	// GetPluginFactory. On macOS it is the .vst3 directory, opened with CFBundle
+	// the way a host opens it, and the entry point is bundleEntry
+	bool (*init)() = nullptr;
+	IPluginFactory *(PLUGIN_API *getf)() = nullptr;
+
+#if defined(_WIN32)
 	HMODULE lib = LoadLibraryA(dll.c_str());
 	if (!lib) {
 		std::fprintf(stderr, "DLL を読めない: %s (エラー %lu)\n", dll.c_str(), GetLastError());
 		return 1;
 	}
-	auto init = reinterpret_cast<bool (*)()>(GetProcAddress(lib, "InitDll"));
-	auto getf = reinterpret_cast<IPluginFactory *(PLUGIN_API *)()>(
+	init = reinterpret_cast<bool (*)()>(GetProcAddress(lib, "InitDll"));
+	getf = reinterpret_cast<IPluginFactory *(PLUGIN_API *)()>(
 		GetProcAddress(lib, "GetPluginFactory"));
+#elif defined(__APPLE__)
+	CFURLRef url = CFURLCreateFromFileSystemRepresentation(
+		nullptr, reinterpret_cast<const UInt8 *>(dll.c_str()), dll.size(), true);
+	CFBundleRef bundle = url ? CFBundleCreate(nullptr, url) : nullptr;
+	if (url)
+		CFRelease(url);
+	if (!bundle) {
+		std::fprintf(stderr, "バンドルを開けない: %s\n", dll.c_str());
+		return 1;
+	}
+	if (!CFBundleLoadExecutable(bundle)) {
+		std::fprintf(stderr, "バンドルを読めない: %s\n", dll.c_str());
+		return 1;
+	}
+	// bundleEntry is the macOS host's entry point, so call it as a host would.
+	// There is no InitDll here; `init` stays null
+	auto entry = reinterpret_cast<bool (*)(CFBundleRef)>(
+		CFBundleGetFunctionPointerForName(bundle, CFSTR("bundleEntry")));
+	if (entry)
+		entry(bundle);
+	getf = reinterpret_cast<IPluginFactory *(PLUGIN_API *)()>(
+		CFBundleGetFunctionPointerForName(bundle, CFSTR("GetPluginFactory")));
+#endif
+
 	if (!getf) {
 		std::fprintf(stderr, "GetPluginFactory が無い\n");
 		return 1;
@@ -833,19 +872,19 @@ int main(int argc, char **argv)
 
 	std::printf("起動待ち...");
 	std::fflush(stdout);
-	const DWORD t_wait = GetTickCount();
+	const long long t_wait = now_ms();
 	for (;;) {
-		Sleep(50);
-		if (GetTickCount() - t_wait > 60000) {
+		sleep_ms(50);
+		if (now_ms() - t_wait > 60000) {
 			std::printf(" 60 秒待っても始まらない\n");
 			break;
 		}
 		// パラメータの読み書きでは分からないので、鳴らして確かめる代わりに
 		// 一定時間待つ。起動は実測 2 秒前後
-		if (GetTickCount() - t_wait > 8000)
+		if (now_ms() - t_wait > 8000)
 			break;
 	}
-	std::printf(" %lu ms\n", GetTickCount() - t_wait);
+	std::printf(" %ld ms\n", long(now_ms() - t_wait));
 
 	const int64_t total = int64_t((length + extra) * rate);
 	std::vector<int16_t> pcm;
@@ -853,7 +892,7 @@ int main(int argc, char **argv)
 
 	size_t next = 0;
 	int64_t pos = 0;
-	const DWORD t0 = GetTickCount();
+	const long long t0 = now_ms();
 	while (pos < total) {
 		const int32 n = int32(std::min<int64_t>(block, total - pos));
 		if (adc_sine)
@@ -939,7 +978,7 @@ int main(int argc, char **argv)
 		}
 		pos += n;
 	}
-	const DWORD t1 = GetTickCount();
+	const long long t1 = now_ms();
 
 	write_wav(wav, pcm, uint32_t(rate));
 	double peak = 0.0, sum = 0.0;

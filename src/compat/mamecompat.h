@@ -317,12 +317,13 @@ public:
 	virtual void device_add_mconfig(machine_config &) {}
 
 	// MAME の timer_alloc(FUNC(cb), this)。呼び出し側の running_machine に預ける
+	//
+	// The body is written below, once running_machine is a complete type. Putting
+	// it here makes **Clang reject it as member access into an incomplete type**:
+	// the machine() call does not depend on the template arguments, so unlike GCC
+	// it is checked at definition time rather than deferred to instantiation.
 	template <typename T, typename U>
-	emu_timer *timer_alloc(void (T::*cb)(s32), const char *, U *obj)
-	{
-		T *self = static_cast<T *>(obj);
-		return machine().make_timer([self, cb](s32 p) { (self->*cb)(p); });
-	}
+	emu_timer *timer_alloc(void (T::*cb)(s32), const char *, U *obj);
 
 private:
 	u32 m_clock = 0;
@@ -693,6 +694,15 @@ private:
 	u64 m_cycles = 0;
 	std::vector<std::unique_ptr<emu_timer>> m_timers;
 };
+
+// device_t::timer_alloc body, now that running_machine is a complete type.
+// MSYS2's GCC accepts this inside the class definition; Clang does not (see above).
+template <typename T, typename U>
+inline emu_timer *device_t::timer_alloc(void (T::*cb)(s32), const char *, U *obj)
+{
+	T *self = static_cast<T *>(obj);
+	return machine().make_timer([self, cb](s32 p) { (self->*cb)(p); });
+}
 
 inline void emu_timer::adjust(const attotime &when, s32 param)
 {

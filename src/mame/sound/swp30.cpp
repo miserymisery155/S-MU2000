@@ -423,7 +423,8 @@ void swp30_device::streaming_block::scale_and_clamp(s16 &val0, s16 &val1, s16 &v
 
 void swp30_device::streaming_block::read_16(memory_access<25, 2, -2, ENDIANNESS_LITTLE>::cache &wave, s16 &val0, s16 &val1, s16 &val2, s16 &val3)
 {
-	s32 spos = m_loop & 0x80000000 ? -m_pos : m_pos;
+	// S-MU2000: 逆向きのときは 1 つ手前から読み、step() で並びを裏返す（doc/upstream.md の 35）
+	s32 spos = m_loop & 0x80000000 ? -m_pos - 1 : m_pos;
 	offs_t base_address = m_address & 0x1ffffff;
 	offs_t adr = base_address + (spos >> 1);
 	switch(spos & 1) {
@@ -458,7 +459,8 @@ void swp30_device::streaming_block::read_16(memory_access<25, 2, -2, ENDIANNESS_
 
 void swp30_device::streaming_block::read_12(memory_access<25, 2, -2, ENDIANNESS_LITTLE>::cache &wave, s16 &val0, s16 &val1, s16 &val2, s16 &val3)
 {
-	s32 spos = m_loop & 0x80000000 ? -m_pos : m_pos;
+	// S-MU2000: 逆向きのときは 1 つ手前から読み、step() で並びを裏返す（doc/upstream.md の 35）
+	s32 spos = m_loop & 0x80000000 ? -m_pos - 1 : m_pos;
 	offs_t base_address = m_address & 0x1ffffff;
 	offs_t adr = base_address + (spos >> 3)*3;
 	switch(spos & 7) {
@@ -559,7 +561,8 @@ void swp30_device::streaming_block::read_12(memory_access<25, 2, -2, ENDIANNESS_
 
 void swp30_device::streaming_block::read_8(memory_access<25, 2, -2, ENDIANNESS_LITTLE>::cache &wave, s16 &val0, s16 &val1, s16 &val2, s16 &val3)
 {
-	s32 spos = m_loop & 0x80000000 ? -m_pos : m_pos;
+	// S-MU2000: 逆向きのときは 1 つ手前から読み、step() で並びを裏返す（doc/upstream.md の 35）
+	s32 spos = m_loop & 0x80000000 ? -m_pos - 1 : m_pos;
 	offs_t base_address = m_address & 0x1ffffff;
 	offs_t adr = base_address + (spos >> 2);
 	switch(spos & 3) {
@@ -724,6 +727,14 @@ std::pair<s16, bool> swp30_device::streaming_block::step(memory_access<25, 2, -2
 	case 1: read_12(wave, val0, val1, val2, val3); break;
 	case 2: read_8 (wave, val0, val1, val2, val3); break;
 	case 3: read_8c(wave, val0, val1, val2, val3); break;
+	}
+	// S-MU2000: 逆向きに鳴らすサンプルは、読んだ 4 つが番地の順（再生の順とは逆）に並ぶ。
+	// MAME はそのまま補間していたので、端数が増えるほど 1 つ前の値へ寄っていき、ぎざぎざの雑音が
+	// 高い帯に出ていた（Electro Kit の 28 番で 10〜20kHz が実機より +14〜25dB）。1 つ手前から読んで
+	// 裏返すと、前・今・次・その次の順になる（doc/upstream.md の 35）
+	if((m_loop & 0x80000000) && (m_address >> 30) != 3) {
+		std::swap(val0, val3);
+		std::swap(val1, val2);
 	}
 	if(m_first)
 		val0 = 0;

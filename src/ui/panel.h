@@ -25,7 +25,9 @@
 #include <string>
 #include <vector>
 
-#include <windows.h>
+// Real GDI on Windows, the CoreGraphics shim on macOS. Either way the panel
+// only ever draws in GDI's coordinates.
+#include "compat/gdi.h"
 
 namespace ui {
 

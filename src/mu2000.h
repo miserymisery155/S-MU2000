@@ -269,6 +269,8 @@ private:
 	u64 m_cycle_debt = 0;
 	// 命令の途中で止まれず走りすぎた分。次の呼び出しから引く
 	u64 m_overrun = 0;
+	// SWP30 のレジスタに書いたので、このサンプルの残りは CPU を止める（run_cycles の説明）
+	bool m_swp_hold = false;
 	bool m_profile = false;
 
 	// スレーブ用のスレッド。合図は atomic の回し合いで、錠は使わない。
