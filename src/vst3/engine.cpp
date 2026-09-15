@@ -353,6 +353,8 @@ void engine::build_table()
 
 void engine::set_output_rate(double rate)
 {
+	// 変換器の入れ物を作り直すので、音声スレッドと重ならないようにする
+	std::lock_guard<std::mutex> lock(m_machine);
 	if (rate <= 0.0)
 		rate = NATIVE_RATE;
 	m_direct = std::fabs(rate - NATIVE_RATE) < 1e-6;
@@ -396,16 +398,25 @@ void engine::midi(const uint8_t *bytes, size_t n, int port)
 {
 	port = port == 1 ? 1 : 0;
 	const status s = state();
-	if (s == status::ready) {
-		for (size_t i = 0; i < n; i++) {
-			m_mu->midi_in(bytes[i], port);
-			m_drv.watch(bytes[i], port);
-		}
-		return;
-	}
 	if (s == status::failed)
 		return;
-	// 起動待ち。あふれるようなら捨てる
+	if (s == status::ready) {
+		std::unique_lock<std::mutex> lock(m_machine, std::try_to_lock);
+		if (lock.owns_lock()) {
+			// 溜まっていた分を先に流して、順番を保つ
+			for (uint8_t b : m_pending[port]) {
+				m_mu->midi_in(b, port);
+				m_drv.watch(b, port);
+			}
+			m_pending[port].clear();
+			for (size_t i = 0; i < n; i++) {
+				m_mu->midi_in(bytes[i], port);
+				m_drv.watch(bytes[i], port);
+			}
+			return;
+		}
+	}
+	// 起動待ちか、機械を他が使っている。あふれるようなら捨てる
 	std::vector<uint8_t> &pending = m_pending[port];
 	if (pending.size() + n > 65536)
 		return;
@@ -459,15 +470,17 @@ void engine::fill(float *left, float *right, int n, const float *in_l, const flo
 {
 	if (n <= 0)
 		return;
-	push_input(in_l, in_r, n);
-	if (state() != status::ready) {
+	// 音声スレッドは待たない。保存などで機械が使われていれば、この区間は無音
+	std::unique_lock<std::mutex> lock(m_machine, std::try_to_lock);
+	if (!lock.owns_lock() || state() != status::ready) {
 		std::memset(left,  0, size_t(n) * sizeof(float));
 		std::memset(right, 0, size_t(n) * sizeof(float));
+		if (lock.owns_lock())
+			push_input(in_l, in_r, n);
 		return;
 	}
-	// 頼まれている保存と復元を、ここ（音声スレッド）で片づける
-	m_fill_tick.fetch_add(1, std::memory_order_release);
-	serve_state();
+	push_input(in_l, in_r, n);
+	apply_deferred_state();
 
 	m_drv.apply_buttons(*m_mu, m_bridge);
 	m_drv.pump_midi(*m_mu, m_bridge);
@@ -536,123 +549,58 @@ void engine::fill(float *left, float *right, int n, const float *in_l, const flo
 
 // ---- 状態の保存と復元
 //
-// 機械に触れてよいのは、音を作っているあいだは音声スレッドだけ。
-// だから頼み事を置いておいて、fill() の頭で片づける。止まっているときは
-// 誰も触っていないので、その場でやってしまう。
+// どれも m_machine を取ってその場でやる。音声スレッドは取れない区間を無音にして待たない
 
-void engine::serve_state()
+void engine::apply_deferred_state()
 {
-	int want = 1;
-	if (m_fn_req.compare_exchange_strong(want, 3, std::memory_order_acq_rel)) {
-		if (m_mu && m_fn)
-			(*m_fn)(*m_mu);
-		m_fn_req.store(2, std::memory_order_release);
-	}
-	if (m_load_req.load(std::memory_order_acquire) == 1) {
-		std::string err;
-		if (m_mu)
-			m_mu->load_state(m_load_buf.data(), m_load_buf.size(), err);
-		m_load_req.store(0, std::memory_order_release);
-	}
-	if (m_save_req.load(std::memory_order_acquire) == 1) {
-		m_save_buf = m_mu ? m_mu->save_state() : std::vector<u8>();
-		m_save_req.store(2, std::memory_order_release);
-	}
+	if (m_deferred_state.empty() || state() != status::ready || !m_mu)
+		return;
+	std::string err;
+	if (!m_mu->load_state(m_deferred_state.data(), m_deferred_state.size(), err))
+		log_line(("状態を読み戻せない: " + err).c_str());
+	m_deferred_state.clear();
+	m_deferred_state.shrink_to_fit();
 }
 
 std::vector<uint8_t> engine::save_state()
 {
-	if (state() != status::ready || !m_mu)
-		return {};
-	if (!m_processing.load(std::memory_order_acquire)) {
-		// 誰も触っていない。その場で
-		return m_mu->save_state();
+	std::lock_guard<std::mutex> lock(m_machine);
+	if (state() != status::ready || !m_mu) {
+		// 起動が終わる前に保存されたら、戻す予定だった状態をそのまま返す
+		return m_deferred_state;
 	}
-	// 「動いている」と言われていても、実際に fill() が回っていないことがある
-	// （止めたばかり、ホストが呼んでいない）。回っていなければその場でやる
-	const uint64_t t0 = m_fill_tick.load(std::memory_order_acquire);
-	m_save_req.store(1, std::memory_order_release);
-	for (int i = 0; i < 200; i++) {          // 2 秒まで待つ
-		if (m_save_req.load(std::memory_order_acquire) == 2)
-			break;
-		Sleep(10);
-	}
-	if (m_save_req.load(std::memory_order_acquire) != 2) {
-		m_save_req.store(0, std::memory_order_release);
-		if (m_fill_tick.load(std::memory_order_acquire) == t0)
-			return m_mu->save_state();   // 誰も回していない
-		log_line("状態を保存できなかった（音声スレッドが応じない）");
-		return {};
-	}
-	std::vector<uint8_t> out;
-	out.swap(m_save_buf);
-    m_save_req.store(0, std::memory_order_release);
-	return out;
+	apply_deferred_state();
+	return m_mu->save_state();
 }
 
 bool engine::load_state(const uint8_t *p, size_t n)
 {
-	if (state() != status::ready || !m_mu || !p || !n)
+	if (!p || !n)
 		return false;
-	if (!m_processing.load(std::memory_order_acquire)) {
-		std::string err;
-		const bool ok = m_mu->load_state(p, n, err);
-		if (!ok)
-			log_line(("状態を読み戻せない: " + err).c_str());
-		return ok;
+	std::lock_guard<std::mutex> lock(m_machine);
+	if (state() == status::failed)
+		return false;
+	if (state() != status::ready || !m_mu) {
+		m_deferred_state.assign(p, p + n);
+		return true;
 	}
-	const uint64_t t0 = m_fill_tick.load(std::memory_order_acquire);
-	m_load_buf.assign(p, p + n);
-	m_load_req.store(1, std::memory_order_release);
-	for (int i = 0; i < 200; i++) {
-		if (m_load_req.load(std::memory_order_acquire) == 0)
-			return true;
-		Sleep(10);
-	}
-	m_load_req.store(0, std::memory_order_release);
-	if (m_fill_tick.load(std::memory_order_acquire) == t0) {
-		std::string err;
-		return m_mu->load_state(p, n, err);   // 誰も回していない
-	}
-	log_line("状態を読み戻せなかった（音声スレッドが応じない）");
-	return false;
+	m_deferred_state.clear();
+	std::string err;
+	const bool ok = m_mu->load_state(p, n, err);
+	if (!ok)
+		log_line(("状態を読み戻せない: " + err).c_str());
+	return ok;
 }
 
 
-// ---- 機械に触る仕事を頼む（SmartMedia の差し替えなど）
+// ---- 機械に触る仕事（SmartMedia の差し替えなど）
 
 bool engine::on_machine(const std::function<void(mu2000 &)> &fn)
 {
+	std::lock_guard<std::mutex> lock(m_machine);
 	if (state() != status::ready || !m_mu)
 		return false;
-	if (!m_processing.load(std::memory_order_acquire)) {
-		fn(*m_mu);
-		return true;
-	}
-	const uint64_t t0 = m_fill_tick.load(std::memory_order_acquire);
-	m_fn = &fn;
-	m_fn_req.store(1, std::memory_order_release);
-	for (int i = 0; i < 200; i++) {
-		if (m_fn_req.load(std::memory_order_acquire) == 2)
-			break;
-		Sleep(10);
-	}
-	int want = 1;
-	if (m_fn_req.compare_exchange_strong(want, 0, std::memory_order_acq_rel)) {
-		// 音声スレッドは手を付けていない。回っていなければその場でやる
-		m_fn = nullptr;
-		if (m_fill_tick.load(std::memory_order_acquire) == t0) {
-			fn(*m_mu);
-			return true;
-		}
-		log_line("カードの差し替えができなかった（音声スレッドが応じない）");
-		return false;
-	}
-	// 始めていれば終わるまで待つ（fn はこの関数の中にある）
-	while (m_fn_req.load(std::memory_order_acquire) != 2)
-		Sleep(1);
-	m_fn_req.store(0, std::memory_order_release);
-	m_fn = nullptr;
+	fn(*m_mu);
 	return true;
 }
 

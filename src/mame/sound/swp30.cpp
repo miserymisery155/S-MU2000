@@ -1756,7 +1756,13 @@ s32 swp30_device::volume_apply(s32 level, s32 sample)
 	s32 e = level >> 10;
 	s32 m = level & 0x3ff;
 	s64 mul = (0x4000000 - (m << 15)) >> e;
-	return (sample * mul) >> 26;
+	// S-MU2000: 掛けた結果は、16.6 の下 8bit（整数部の下 2bit まで）を 0 の側へ切り捨てる（doc/upstream.md の 34）。
+	// MAME は端数を全部残していて、深く絞った声がいつまでも小さく鳴り続けた。実機は減衰量が 45dB を超えると
+	// 理屈より小さくなりはじめ、約 64dB で全く 0 になる（Organ を CC7 で絞ると、24/16/12 で -1.3/-2.9/-4.5dB、8 で無音）。
+	// 刻みは、試験の曲の piano の 10kHz の帯（静かな音に乗る切り捨ての雑音）が実機と釣り合う 256 にした
+	// （128 だと足りず、512 だと多すぎる）。0 の側へ切り捨てるので、無音になるときはぴったり 0 になる
+	const s64 r = (sample * mul) >> 26;
+	return s32(r / 256 * 256);
 }
 
 void swp30_device::awm2_step(std::array<s32, 0x40> &samples_per_chan)

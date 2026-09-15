@@ -438,6 +438,80 @@ int run_torture(IPluginFactory *fac, const TUID cid)
 		if (c) c->release();
 	}
 
+	// 3.6 FL Studio の「Reset plugin when FL Studio resets」の形（issue #9）。
+	// 音声スレッドは process を回し続け、別のスレッドが保存のたびに
+	// setProcessing(false) → setActive(false) → getState → setActive(true) → setProcessing(true)
+	// を呼び、ときどき setState で戻す。機械に 2 つのスレッドが同時に触ると落ちるか、壊れた状態が出る
+	{
+		IComponent *c = nullptr;
+		fac->createInstance(reinterpret_cast<FIDString>(cid),
+		                    reinterpret_cast<FIDString>(IComponent::iid.toTUID()), (void **)&c);
+		IAudioProcessor *p = nullptr;
+		if (c) c->queryInterface(IAudioProcessor::iid.toTUID(), (void **)&p);
+		if (c && p) {
+			c->initialize(nullptr);
+			ProcessSetup su{};
+			su.processMode = kRealtime;
+			su.symbolicSampleSize = kSample32;
+			su.maxSamplesPerBlock = 256;
+			su.sampleRate = 44100.0;
+			p->setupProcessing(su);
+			c->setActive(true);
+			p->setProcessing(true);
+
+			std::atomic<bool> quit{false};
+			std::atomic<uint64_t> blocks{0};
+			std::thread audio([&] {
+				std::vector<float> l(256), rr(256);
+				float *ch[2] = { l.data(), rr.data() };
+				AudioBusBuffers ab{};
+				ab.numChannels = 2; ab.channelBuffers32 = ch;
+				ProcessData pd{};
+				pd.symbolicSampleSize = kSample32;
+				pd.numOutputs = 1; pd.outputs = &ab;
+				pd.numSamples = 256;
+				while (!quit.load()) {
+					p->process(pd);          // 止めろと言われても呼び続ける
+					blocks.fetch_add(1);
+				}
+			});
+			// 起動を待つ
+			for (int t = 0; t < 300; t++) {
+				mem_stream s;
+				c->getState(&s);
+				if (s.size() >= 1000) break;
+				Sleep(50);
+			}
+			int saved = 0, restored = 0, small = 0;
+			const DWORD end = GetTickCount() + 8000;
+			for (int round = 0; GetTickCount() < end; round++) {
+				p->setProcessing(false);
+				c->setActive(false);
+				mem_stream st;
+				if (c->getState(&st) == kResultOk && st.size() >= 1000) saved++; else small++;
+				c->setActive(true);
+				p->setProcessing(true);
+				if (round % 3 == 2 && st.size() >= 1000) {
+					st.rewind();
+					if (c->setState(&st) == kResultOk) restored++;
+				}
+			}
+			quit.store(true);
+			audio.join();
+			if (small) {
+				std::printf("NG: 保存中のリセットで、中身の無い状態が %d 回\n", small);
+				bad++;
+			}
+			std::printf("OK: 保存中のリセットを %d 回（戻し %d 回）、そのあいだ process %llu 回\n",
+			            saved, restored, (unsigned long long)blocks.load());
+			p->setProcessing(false);
+			c->setActive(false);
+			c->terminate();
+		}
+		if (p) p->release();
+		if (c) c->release();
+	}
+
 	// 4. パラメータの問い合わせを全部
 	{
 		IComponent *c = nullptr;
@@ -551,6 +625,8 @@ int run_torture(IPluginFactory *fac, const TUID cid)
 int main(int argc, char **argv)
 {
 	SetConsoleOutputCP(CP_UTF8);
+	// プラグインが落ちても、どこまで進んだかが残るように
+	std::setvbuf(stdout, nullptr, _IONBF, 0);
 
 	if (argc < 2) {
 		std::fprintf(stderr,
