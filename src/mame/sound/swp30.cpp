@@ -1886,6 +1886,8 @@ void swp30_device::reset()
 {
 	m_rand_seed = m_rand_seed_base;
 	m_keyon_mask = 0;
+	m_meg_flag_n = m_meg_flag_z = false;
+	m_meg_ix2_value.fill(0); m_meg_ix2_act.fill(0); m_meg_ram_index2 = 0;
 
 
 	std::fill(m_mixer.begin(), m_mixer.end(), mixer_slot());
@@ -3421,11 +3423,12 @@ void swp30_device::meg_state::decode_program()
 		d.m2_from_m = BIT(opcode, 0x12);
 		d.dr_from_r = BIT(opcode, 0x37);
 		d.no_noise  = BIT(opcode, 0x0a);
-		// S-MU2000: idx にも書く命令（bit 0x3e）では、bit 0x3d はメモリへの書き値を取り込まない（doc/upstream.md の 26）。
-		// DUAL ROTR は「mw = p ; idx = p」の命令をメモリを読む 2 命令前に置き、その間にメモリへ書く。取り込むと、
-		// 書き値が音ではなく idx の値に入れ替わり、ロータの遅延線に雑音が入って 16〜25dB 小さくなっていた
-		d.index     = BIT(opcode, 0x3e);
-		d.memw      = BIT(opcode, 0x3d) && !d.index;
+		// S-MU2000: idx（bit 0x3e）と mw（bit 0x3d）が両方立った命令は、どちらでもなく 2 つ目の idx に書く（doc/upstream.md の 32）。
+		// ロータリーの系統と V-FLANGER・MULTI COMP が、bit 0x22 の付いた読み出しでこれを足す。upstream 26 の「mw を取り込まない」は、このためだった
+		d.index     = BIT(opcode, 0x3e) && !BIT(opcode, 0x3d);
+		d.index2    = BIT(opcode, 0x3e) && BIT(opcode, 0x3d);
+		d.memw      = BIT(opcode, 0x3d) && !BIT(opcode, 0x3e);
+		d.mem_use_index2 = BIT(opcode, 0x22);
 		d.t_write   = BIT(opcode, 0x3b);
 		d.t_from_p  = BIT(opcode, 0x3c);
 		d.mem_use_index = BIT(opcode, 0x21);
@@ -3487,6 +3490,8 @@ void swp30_device::meg_state::step()
 	// Index is similarly delayed
 	if(m_index_active[m_delay_3])
 		m_ram_index = m_index_value[m_delay_3];
+	if(m_swp->m_meg_ix2_act[m_delay_3])
+		m_swp->m_meg_ram_index2 = m_swp->m_meg_ix2_value[m_delay_3];
 
 	// Memory read and write ports are delayed by 2 cycles
 	if(m_memw_active[m_delay_2]) {
@@ -3505,6 +3510,7 @@ void swp30_device::meg_state::step()
 			m_rw_reg[m_delay_3] = 0;
 			m_memw_active[m_delay_2] = false;
 			m_index_active[m_delay_3] = false;
+			m_swp->m_meg_ix2_act[m_delay_3] = 0;
 			m_t_value[m_delay_2] = s16(std::clamp<s64>(m_p >> (15+8), -0x8000, 0x7fff));
 			m_delay_3 = m_delay_3 == 2 ? 0 : m_delay_3 + 1;
 			m_delay_2 ^= 1;
@@ -3523,10 +3529,14 @@ void swp30_device::meg_state::step()
 			if(target > m_pc)
 				m_swp->m_meg_skip_to = target;
 		}
+		// S-MU2000: 分岐の命令も t を書く（DYNA 系は分岐と同時に「大きさ - 包絡線」を t に入れる。doc/upstream.md の 31）
+		if(m_decoded[m_pc].t_write)
+			m_t[m_decoded[m_pc].t] = m_decoded[m_pc].t_from_p ? m_t_value[m_delay_2] : m_const[m_pc];
 		m_mw_reg[m_delay_3] = 0;
 		m_rw_reg[m_delay_3] = 0;
 		m_memw_active[m_delay_2] = false;
 		m_index_active[m_delay_3] = false;
+		m_swp->m_meg_ix2_act[m_delay_3] = 0;
 		m_t_value[m_delay_2] = s16(std::clamp<s64>(m_p >> (15+8), -0x8000, 0x7fff));
 		m_delay_3 = m_delay_3 == 2 ? 0 : m_delay_3 + 1;
 		m_delay_2 ^= 1;
@@ -3547,8 +3557,8 @@ void swp30_device::meg_state::step()
 	const int t  = d.t;
 
 	const u32 mmode = d.mmode;
-	// S-MU2000: 掛け算の無い形（mmode 0）でも、シフトと飽和は p にかかる（doc/upstream.md の 21）
-	if(mmode != 0 || d.shift || d.clamp) {
+	// S-MU2000: 掛け算の無い形（mmode 0）でも、加算器・シフト・飽和は p にかかる（doc/upstream.md の 21 と 30）
+	if(mmode != 0 || d.shift || d.clamp || d.rop) {
 		const u32 m1t = d.m1t;
 		// S-MU2000: 第 1 入力の選び方 2 は、直前に印を立てた結果が負なら t、そうでなければ定数（doc/upstream.md の 29）
 		s64 m1 = m1t == 1 ? m_t[t] : m1t == 2 ? (m_swp->m_meg_flag_n ? m_t[t] : m_const[m_pc]) : m_const[m_pc];
@@ -3673,6 +3683,9 @@ void swp30_device::meg_state::step()
 		m_index_value[m_delay_3] = m_p >> (15+8);
 	} else
 		m_index_active[m_delay_3] = false;
+	m_swp->m_meg_ix2_act[m_delay_3] = d.index2;
+	if(d.index2)
+		m_swp->m_meg_ix2_value[m_delay_3] = m_p >> (15+8);
 
 	// T write lookups the p value from two cycles before, but which
 	// bits depends on the presence of index setting
@@ -3685,13 +3698,13 @@ void swp30_device::meg_state::step()
 	// t は 16bit。p を 23bit 落としたものがそのまま入るが、p が飽和して
 	// いると 0x8000 になって符号が裏返る。ここも上下で止める
 	// （index 付きのときは 15bit の切り出しで、別の使い方）
-	m_t_value[m_delay_2] = d.index ? s16((m_p >> 8) & 0x7fff)
+	m_t_value[m_delay_2] = (d.index || d.index2) ? s16((m_p >> 8) & 0x7fff)
 	                               : s16(std::clamp<s64>(m_p >> (15+8), -0x8000, 0x7fff));
 
 	// Memory access
 	switch(d.memop) {
 	case 1: {
-		u32 address = resolve_address(m_pc, m_offset[m_pc/3] + (d.mem_use_index ? m_ram_index : 0) - m_sample_counter);
+		u32 address = resolve_address(m_pc, m_offset[m_pc/3] + (d.mem_use_index ? m_ram_index : 0) + (d.mem_use_index2 ? m_swp->m_meg_ram_index2 : 0) - m_sample_counter);
 		if(address != 0xffffffff)
 			// S-MU2000: リバーブ RAM も実体は素の配列。18bit ぶんで折り返す
 			m_swp->m_reverb_ram[address & 0x3ffff] = revram_encode(m_ram_write);
@@ -3701,12 +3714,12 @@ void swp30_device::meg_state::step()
 		// S-MU2000: bit 0x23 の付いた読み出しは、リバーブ RAM の絶対番地（offset + idx）を読む。サンプルの数え上げを引かず、
 		// map も通さない。firmware が種類を読み込むときに、波形や曲線の表をここへ直に書いている（doc/upstream.md の 24）
 		if(d.mem_table) {
-			const u32 address = (u32(m_offset[m_pc/3]) + (d.mem_use_index ? m_ram_index : 0) + (d.memop == 3 ? 1 : 0)) & 0x3ffff;
+			const u32 address = (u32(m_offset[m_pc/3]) + (d.mem_use_index ? m_ram_index : 0) + (d.mem_use_index2 ? m_swp->m_meg_ram_index2 : 0) + (d.memop == 3 ? 1 : 0)) & 0x3ffff;
 			m_memr_value[m_delay_2] = revram_decode(m_swp->m_reverb_ram[address]);
 			m_memr_active[m_delay_2] = true;
 			break;
 		}
-		u32 address = resolve_address(m_pc, m_offset[m_pc/3] + (d.mem_use_index ? m_ram_index : 0) - m_sample_counter + (d.memop == 3 ? 1 : 0));
+		u32 address = resolve_address(m_pc, m_offset[m_pc/3] + (d.mem_use_index ? m_ram_index : 0) + (d.mem_use_index2 ? m_swp->m_meg_ram_index2 : 0) - m_sample_counter + (d.memop == 3 ? 1 : 0));
 		if(address != 0xffffffff) {
 			const u16 val = m_swp->m_reverb_ram[address & 0x3ffff];
 			m_memr_value[m_delay_2] = revram_decode(val);
@@ -3759,9 +3772,12 @@ void swp30_device::meg_state::flush_writes()
 			m_r[m_rw_reg[k]] = m_rw_value[k];
 		if(m_index_active[k])
 			m_ram_index = m_index_value[k];
+		if(m_swp->m_meg_ix2_act[k])
+			m_swp->m_meg_ram_index2 = m_swp->m_meg_ix2_value[k];
 		m_mw_reg[k] = 0;
 		m_rw_reg[k] = 0;
 		m_index_active[k] = false;
+		m_swp->m_meg_ix2_act[k] = 0;
 	}
 }
 
@@ -3774,7 +3790,7 @@ void swp30_device::meg_state::build_ops(op *ops) const
 		const decoded &d = m_decoded[pc];
 		op &o = ops[pc];
 		o = op{};
-		o.alu       = d.mmode != 0 || d.shift || d.clamp;   // mmode 0 でもシフトと飽和はかかる（upstream 21）
+		o.alu       = d.mmode != 0 || d.shift || d.clamp || d.rop;   // mmode 0 でも加算器・シフト・飽和はかかる（upstream 21・30）
 		o.mmode     = d.mmode;
 		o.m1_from_t = d.m1t == 1 ? 1 : d.m1t == 2 ? 2 : 0;   // 2 は印で t と定数を選ぶ
 		o.m1_expand = d.m1_expand;
@@ -3794,6 +3810,8 @@ void swp30_device::meg_state::build_ops(op *ops) const
 		o.dr_from_r = d.dr_from_r;
 		o.memw      = d.memw;
 		o.index     = d.index;
+		o.index2    = d.index2;
+		o.mem_use_index2 = d.mem_use_index2;
 		o.t_write   = d.t_write;
 		o.t_from_p  = d.t_from_p;
 		o.memop     = d.memop;
@@ -3825,6 +3843,9 @@ void swp30_device::meg_state::run_program(const op *ops)
 	s64 p = m_p;
 	const u32 sample_counter = m_sample_counter;
 	bool flag_n = m_swp->m_meg_flag_n, flag_z = m_swp->m_meg_flag_z;
+	auto &ix2_value = m_swp->m_meg_ix2_value;
+	auto &ix2_act = m_swp->m_meg_ix2_act;
+	s32 &ram_index2 = m_swp->m_meg_ram_index2;
 	u32 skip_to = 0;
 
 	for(u32 pc = 0; pc != 0x180; pc++) {
@@ -3836,6 +3857,8 @@ void swp30_device::meg_state::run_program(const op *ops)
 			m_r[m_rw_reg[d3]] = m_rw_value[d3];
 		if(m_index_active[d3])
 			m_ram_index = m_index_value[d3];
+		if(ix2_act[d3])
+			ram_index2 = ix2_value[d3];
 		if(m_memw_active[d2]) {
 			m_ram_write = m_memw_value[d2];
 			m_memw_active[d2] = false;
@@ -3851,10 +3874,14 @@ void swp30_device::meg_state::run_program(const op *ops)
 		if(skip_to || o.jump) {
 			if(!skip_to && meg_cond(o.cond, flag_n, flag_z) && o.target > pc)
 				skip_to = o.target;
+			// 分岐の命令も t を書く（step() と同じ）
+			if(o.jump && o.t_write)
+				m_t[o.t] = o.t_from_p ? m_t_value[d2] : m_const[pc];
 			m_mw_reg[d3] = 0;
 			m_rw_reg[d3] = 0;
 			m_memw_active[d2] = false;
 			m_index_active[d3] = false;
+			ix2_act[d3] = 0;
 			m_t_value[d2] = s16(std::clamp<s64>(p >> (15+8), -0x8000, 0x7fff));
 			d3 = d3 == 2 ? 0 : d3 + 1;
 			d2 ^= 1;
@@ -3951,21 +3978,24 @@ void swp30_device::meg_state::run_program(const op *ops)
 		m_index_active[d3] = o.index;
 		if(o.index)
 			m_index_value[d3] = p >> (15+8);
+		ix2_act[d3] = o.index2;
+		if(o.index2)
+			ix2_value[d3] = p >> (15+8);
 
 		if(o.t_write)
 			m_t[o.t] = o.t_from_p ? m_t_value[d2] : m_const[pc];
-		m_t_value[d2] = o.index ? s16((p >> 8) & 0x7fff)
+		m_t_value[d2] = (o.index || o.index2) ? s16((p >> 8) & 0x7fff)
 		                        : s16(std::clamp<s64>(p >> (15+8), -0x8000, 0x7fff));
 
 		if(o.memop >= 2 && o.mem_table) {
 			// 絶対番地の読み出し（上の step と同じ）
-			const u32 address = (u32(m_offset[o.offset_index]) + (o.mem_use_index ? m_ram_index : 0) + (o.memop == 3 ? 1 : 0)) & 0x3ffff;
+			const u32 address = (u32(m_offset[o.offset_index]) + (o.mem_use_index ? m_ram_index : 0) + (o.mem_use_index2 ? ram_index2 : 0) + (o.memop == 3 ? 1 : 0)) & 0x3ffff;
 			m_memr_value[d2] = revram_decode(m_swp->m_reverb_ram[address]);
 			m_memr_active[d2] = true;
 			goto mem_done;
 		}
 		if(o.memop) {
-			u32 off = u32(m_offset[o.offset_index]) + u32(o.mem_use_index ? m_ram_index : 0) - sample_counter;
+			u32 off = u32(m_offset[o.offset_index]) + u32(o.mem_use_index ? m_ram_index : 0) + u32(o.mem_use_index2 ? ram_index2 : 0) - sample_counter;
 			if(o.memop == 3)
 				off += 1;
 			const u32 address = ((off & o.addr_mask) + o.addr_base) & 0x3ffff;
@@ -4203,6 +4233,14 @@ void swp30_device::state(state_io &s)
 	s.v(m_revram_adr); s.v(m_revram_data);
 	s.v(m_wave_access); s.v(m_revram_enable);
 	s.v(m_keyon_mask); s.v(m_internal_adr);
+	// 版 6 から: MEG の印（分岐と乗算器の第 1 入力の選び方 2 が使う）と 2 つ目の idx（doc/upstream.md の 29・32）
+	if(s.version() >= 6) {
+		s.v(m_meg_flag_n); s.v(m_meg_flag_z);
+		s.stdarr(m_meg_ix2_value); s.stdarr(m_meg_ix2_act); s.v(m_meg_ram_index2);
+	} else if(!s.writing()) {
+		m_meg_flag_n = m_meg_flag_z = false;
+		m_meg_ix2_value.fill(0); m_meg_ix2_act.fill(0); m_meg_ram_index2 = 0;
+	}
 	// 版 4 から: サンプリングの録音の位置
 	if(s.version() >= 4) {
 		s.v(m_rec_pos); s.v(m_rec_ctrl);

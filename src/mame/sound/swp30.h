@@ -307,6 +307,7 @@ private:
 			bool m1_expand = false, m2_from_m = false;
 			bool dr_from_r = false, no_noise = false;
 			bool memw = false, index = false, t_write = false, t_from_p = false, mem_use_index = false;
+			bool index2 = false, mem_use_index2 = false;   // S-MU2000: 2 つ目の idx（doc/upstream.md の 32）
 			bool mem_table = false;   // S-MU2000: bit 0x23 の付いた読み出し（リバーブ RAM の絶対番地。doc/upstream.md の 24）
 		};
 		std::array<decoded, 0x180> m_decoded = {};
@@ -324,6 +325,7 @@ private:
 			u8  sm, sr, dm, dr, t;
 			u8  dm_src, no_noise, dr_from_r;
 			u8  memw, index, t_write, t_from_p;
+			u8  index2, mem_use_index2;
 			u8  memop, mem_use_index, mem_table;
 			u8  lfo, offset_index;
 			u32 addr_mask, addr_base;   // resolve_address() を解いたもの
@@ -458,6 +460,11 @@ private:
 	// S-MU2000: MEG の分岐の状態（doc/upstream.md の 11）。飛び越しは 1 サンプルの中で終わり、
 	// 覚えた符号も次の比較で上書きされるので、状態の保存には入れない
 	bool m_meg_flag_n = false, m_meg_flag_z = false;
+	// S-MU2000: 2 つ目の idx（doc/upstream.md の 32）。idx と mw の両方が立った命令が 3 命令遅れで書き、
+	// bit 0x22 の付いた読み出しが足す。meg_state の並びを変えないよう、こちらに置く
+	std::array<s32, 3> m_meg_ix2_value = {};
+	std::array<u8,  3> m_meg_ix2_act = {};
+	s32 m_meg_ram_index2 = 0;
 	u16  m_meg_skip_to = 0;
 
 	// S-MU2000: MEG のプログラムを機械語にしたもの（swp30_jit.cpp）。命令表と同じく保存しない。

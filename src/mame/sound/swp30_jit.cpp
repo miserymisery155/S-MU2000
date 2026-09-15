@@ -350,6 +350,9 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 	const s32 o_seed     = off(&swp, &swp.m_rand_seed);
 	const s32 o_flag_n   = off(&swp, &swp.m_meg_flag_n);
 	const s32 o_flag_z   = off(&swp, &swp.m_meg_flag_z);
+	const s32 o_ix2_value = off(&swp, swp.m_meg_ix2_value.data());   // 2 つ目の idx（doc/upstream.md の 32）
+	const s32 o_ix2_act   = off(&swp, swp.m_meg_ix2_act.data());
+	const s32 o_ram_index2 = off(&swp, &swp.m_meg_ram_index2);
 	const s32 o_skip     = off(&swp, &swp.m_meg_jit_skip);
 
 	if (sizeof(ms.m_mw_reg[0]) != 1 || sizeof(ms.m_index_active[0]) != 1 || sizeof(ms.m_memw_active[0]) != 1 ||
@@ -508,6 +511,13 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 			a.load32(RCX, M(o_ix_value + 4 * s));
 			a.store32(M(o_ram_index), RCX);
 			a.patch(j3);
+			// 2 つ目の index
+			a.loadu8(RAX, mem{SWP, NOREG, 1, o_ix2_act + s});
+			a.test32(RAX, RAX);
+			size_t j4 = a.jz_fwd();
+			a.load32(RCX, mem{SWP, NOREG, 1, o_ix2_value + 4 * s32(s)});
+			a.store32(mem{SWP, NOREG, 1, o_ram_index2}, RCX);
+			a.patch(j4);
 		} else {
 			const meg_state::op &w = ops[k - 3];
 			const u32 s = slot3(k);
@@ -522,6 +532,10 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 			if (w.index) {
 				a.load32(RCX, M(o_ix_value + 4 * s));
 				a.store32(M(o_ram_index), RCX);
+			}
+			if (w.index2) {
+				a.load32(RCX, mem{SWP, NOREG, 1, o_ix2_value + 4 * s32(s)});
+				a.store32(mem{SWP, NOREG, 1, o_ram_index2}, RCX);
 			}
 		}
 		if (k < 2 || branchy) {
@@ -821,6 +835,13 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 		}
 		if (k >= 0x17d || branchy)
 			a.store8i(M(o_ix_act + slot3(k)), o.index ? 1 : 0);
+		if (o.index2) {
+			a.mov64(RAX, P);
+			a.sar64(RAX, 15 + 8);
+			a.store32(mem{SWP, NOREG, 1, o_ix2_value + 4 * s32(slot3(k))}, RAX);
+		}
+		if (k >= 0x17d || branchy)
+			a.store8i(mem{SWP, NOREG, 1, o_ix2_act + s32(slot3(k))}, o.index2 ? 1 : 0);
 
 		// ---- t ----
 		if (o.t_write) {
@@ -834,7 +855,7 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 		}
 		if (need_tval[k]) {
 			a.mov64(RAX, P);
-			if (o.index) {
+			if (o.index || o.index2) {
 				a.sar64(RAX, 8);
 				a.and32i(RAX, 0x7fff);
 			} else {
@@ -858,6 +879,10 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 				a.load32(RCX, M(o_ram_index));
 				a.add32(RAX, RCX);
 			}
+			if (o.mem_use_index2) {
+				a.load32(RCX, mem{SWP, NOREG, 1, o_ram_index2});
+				a.add32(RAX, RCX);
+			}
 			if (o.memop == 3)
 				a.add32i(RAX, 1);
 			a.and32i(RAX, 0x3ffff);
@@ -870,6 +895,10 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 			a.loadu16(RAX, M(o_offset + 2 * s32(o.offset_index)));
 			if (o.mem_use_index) {
 				a.load32(RCX, M(o_ram_index));
+				a.add32(RAX, RCX);
+			}
+			if (o.mem_use_index2) {
+				a.load32(RCX, mem{SWP, NOREG, 1, o_ram_index2});
 				a.add32(RAX, RCX);
 			}
 			a.sub32(RAX, SC);
@@ -903,10 +932,19 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 			if (jump_done)
 				a.patch(jump_done);
 			// 飛ばされた命令（と分岐の命令）: 輪に入れる書き込みを消し、t の値を入れる
+			if (o.jump && o.t_write) {
+				// 分岐の命令も t を書く（meg_state::step と同じ、doc/upstream.md の 31）
+				if (o.t_from_p)
+					a.loadu16(RAX, M(o_t_value + 2 * slot2(k)));
+				else
+					a.loadu16(RAX, M(o_const + 2 * s32(k)));
+				a.store16(M(o_t + 2 * o.t), RAX);
+			}
 			a.store8i(M(o_mw_reg + slot3(k)), 0);
 			a.store8i(M(o_rw_reg + slot3(k)), 0);
 			a.store8i(M(o_memw_act + slot2(k)), 0);
 			a.store8i(M(o_ix_act + slot3(k)), 0);
+			a.store8i(mem{SWP, NOREG, 1, o_ix2_act + s32(slot3(k))}, 0);
 			if (need_tval[k]) {
 				a.mov64(RAX, P);
 				a.sar64(RAX, 15 + 8);
