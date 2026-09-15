@@ -2,7 +2,7 @@
 //
 // 実機のフロントパネル風の画面で MU2000 を動かす。
 //
-//   gui <rom ディレクトリ> [--midi 番号] [--midi-b 番号]
+//   gui <rom ディレクトリ> [--midi 番号] [--midi-b 番号] [--fast-midi]
 //       [--midiout 番号] [--midiout-b 番号] [--midiout-mu 番号] [--latency ミリ秒]
 //   gui --list                             MIDI の入口と出口の一覧
 //   gui <rom ディレクトリ> --shot 絵.png    窓を出さずに絵だけ書き出す（見た目の確認用）
@@ -73,6 +73,7 @@ using ui::engine;
 
 struct window_state {
 	ui::panel   panel;
+	bool lcd_only = false;
 	ui::pc_window pc{ std::make_unique<ui::pc_editor>() };    // PC エディタ（F2 か右クリック）
 	ui::pc_window list{ std::make_unique<ui::overview>() };   // 一覧（F3 か右クリック）
 	ui::pc_window fx{ std::make_unique<ui::fx_editor>() };    // インサーションの設定（一覧でダブルクリック）
@@ -800,6 +801,8 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 	}
 
 	case WM_LBUTTONDOWN: {
+		if (g_win.lcd_only)
+			return 0;
 		const int mx = GET_X_LPARAM(lp), my = GET_Y_LPARAM(lp);
 		// パネルの MIDI IN A のジャックを押したら、口を選ぶ品書きを出す
 		if (g_win.panel.on_midi_jack(mx, my)) {
@@ -829,6 +832,8 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 	}
 
 	case WM_RBUTTONUP: {
+		if (g_win.lcd_only)
+			return 0;
 		const int mx = GET_X_LPARAM(lp), my = GET_Y_LPARAM(lp);
 		POINT pt{ mx, my };
 		ClientToScreen(hwnd, &pt);
@@ -895,17 +900,23 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 	}
 
 	case WM_MOUSEMOVE:
+		if (g_win.lcd_only)
+			return 0;
 		if (g_win.panel.drag(GET_X_LPARAM(lp), GET_Y_LPARAM(lp), *g_win.br))
 			InvalidateRect(hwnd, nullptr, FALSE);
 		return 0;
 
 	case WM_LBUTTONUP:
+		if (g_win.lcd_only)
+			return 0;
 		g_win.panel.release(*g_win.br);
 		ReleaseCapture();
 		InvalidateRect(hwnd, nullptr, FALSE);
 		return 0;
 
 	case WM_MOUSEWHEEL: {
+		if (g_win.lcd_only)
+			return 0;
 		POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
 		ScreenToClient(hwnd, &pt);
 		const int delta = GET_WHEEL_DELTA_WPARAM(wp) / WHEEL_DELTA;
@@ -915,6 +926,8 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 	}
 
 	case WM_KEYDOWN: {
+		if (g_win.lcd_only)
+			return 0;
 		if (lp & (1 << 30))                     // 押しっぱなしの繰り返しは無視
 			return 0;
 		if (wp == VK_F2) {                      // PC エディタ
@@ -958,7 +971,7 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 // ---- 窓を出さずに絵だけ書き出す。見た目を直すときに使う
 
 int shot(const std::string &path, int w, int h, ui::bridge &br, bool grid,
-         const std::string &layout_path)
+         bool lcd_only, const std::string &layout_path)
 {
 	ui::panel p;
 	std::string lerr;
@@ -966,6 +979,7 @@ int shot(const std::string &path, int w, int h, ui::bridge &br, bool grid,
 		std::fprintf(stderr, "配置: %s を開けない\n", layout_path.c_str());
 	if (!lerr.empty())
 		std::fprintf(stderr, "%s", lerr.c_str());
+	p.set_lcd_only(lcd_only);
 	p.resize(w, h);
 	p.set_grid(grid);
 
@@ -1020,6 +1034,9 @@ int main(int argc, char **argv)
 	bool open_list = false;            // 起動したら一覧も出す
 	bool open_fx = false;              // 起動したらインサーションの設定の窓も出す
 	int win_w = 1000, win_h = 400;   // パネルの論理寸法（1000 × 400）と同じ比
+	bool size_given = false;
+	bool lcd_only = false;
+	bool fast_midi = false;
 	bool grid = false;
 	std::string layout_path, dump_layout, play_path;
 	bool boot_for_shot = false;
@@ -1064,6 +1081,8 @@ int main(int argc, char **argv)
 		else if (!std::strcmp(argv[i], "--editor")) open_editor = true;
 		else if (!std::strcmp(argv[i], "--list-window")) open_list = true;
 		else if (!std::strcmp(argv[i], "--fx-window")) open_fx = true;
+		else if (!std::strcmp(argv[i], "--lcd")) lcd_only = true;
+		else if (!std::strcmp(argv[i], "--fast-midi")) fast_midi = true;
 		else if (!std::strcmp(argv[i], "--shot") && i + 1 < argc) shot_path = argv[++i];
 		else if (!std::strcmp(argv[i], "--boot")) boot_for_shot = true;
 		else if (!std::strcmp(argv[i], "--grid")) grid = true;
@@ -1077,8 +1096,13 @@ int main(int argc, char **argv)
 		}
 		else if (!std::strcmp(argv[i], "--size") && i + 1 < argc) {
 			if (std::sscanf(argv[++i], "%dx%d", &win_w, &win_h) != 2) { win_w = 1000; win_h = 400; }
+			size_given = true;
 		}
 		else if (dir.empty()) dir = argv[i];
+	}
+	if (lcd_only && !size_given) {
+		win_w = 898;
+		win_h = 290;
 	}
 
 	// --layout が無ければ、決まった場所を順に探す
@@ -1108,14 +1132,14 @@ int main(int argc, char **argv)
 		ui::snapshot s;
 		std::snprintf(s.message, sizeof(s.message), "S-MU2000");
 		br.publish(s);
-		return shot(shot_path, win_w, win_h, br, grid, layout_path);
+		return shot(shot_path, win_w, win_h, br, grid, lcd_only, layout_path);
 	}
 
 	if (dir.empty()) {
 		std::fprintf(stderr,
 			"使い方: gui <rom ディレクトリ> [--midi 番号] [--midi-b 番号]"
 			" [--midiout 番号] [--midiout-b 番号] [--midiout-mu 番号]"
-			" [--latency ミリ秒] [--exclusive] [--layout panel.txt] [--play 曲.mid]\n"
+			" [--latency ミリ秒] [--exclusive] [--layout panel.txt] [--play 曲.mid] [--lcd] [--fast-midi]\n"
 			"        [--factory]   覚えている設定を捨てて工場出荷状態で起動する\n"
 			"        [--editor]    PC エディタも開く（窓では F2 か右クリック）\n"
 			"        [--list-window] 一覧の窓も開く（窓では F3 か右クリック）\n"
@@ -1127,6 +1151,7 @@ int main(int argc, char **argv)
 	}
 
 	static engine eng(br, midi);
+	eng.mu.set_fast_midi(fast_midi);
 	eng.midi_b = &midi_b;
 	eng.mout_b = &mout_b;
 	eng.mout_mu = &mout_mu;
@@ -1173,7 +1198,7 @@ int main(int argc, char **argv)
 		}
 
 		eng.publish();
-		return shot(shot_path, win_w, win_h, br, grid, layout_path);
+		return shot(shot_path, win_w, win_h, br, grid, lcd_only, layout_path);
 	}
 
 	// ---- 窓を出す
@@ -1204,6 +1229,8 @@ int main(int argc, char **argv)
 
 	g_win.br   = &br;
 	g_win.eng  = &eng;
+	g_win.lcd_only = lcd_only;
+	g_win.panel.set_lcd_only(lcd_only);
 	// 窓を出すときだけ、覚えている設定で起動する（--shot は毎回同じ絵にしたい）
 	eng.use_nvram = !factory;
 	if (factory)
@@ -1229,11 +1256,11 @@ int main(int argc, char **argv)
 
 	eng.publish();
 	ShowWindow(hwnd, SW_SHOW);
-	if (open_editor)
+	if (open_editor && !lcd_only)
 		open_window(hwnd, g_win.pc);
-	if (open_fx)
+	if (open_fx && !lcd_only)
 		open_window(hwnd, g_win.fx);
-	if (open_list)
+	if (open_list && !lcd_only)
 		open_window(hwnd, g_win.list);
 	UpdateWindow(hwnd);
 

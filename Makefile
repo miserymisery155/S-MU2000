@@ -15,7 +15,8 @@ CXXFLAGS ?= -std=c++20 -O3 -Wall -Wno-unused-variable -Wno-unused-but-set-variab
 
 # ---- Platform ----------------------------------------------------------------
 #
-# The same file builds on Windows (MSYS2/MinGW-w64) and on macOS.
+# The same file builds on Windows (MSYS2/MinGW-w64), Linux with a MinGW cross
+# compiler, and macOS.
 #   Windows ... OS holds Windows_NT
 #   macOS   ... uname -s answers Darwin
 PLATFORM := unknown
@@ -23,6 +24,11 @@ ifeq ($(OS),Windows_NT)
 PLATFORM := windows
 else ifeq ($(shell uname -s),Darwin)
 PLATFORM := macos
+else ifneq ($(shell command -v x86_64-w64-mingw32-g++ 2>/dev/null),)
+PLATFORM := windows
+ifeq ($(origin CXX),default)
+CXX := x86_64-w64-mingw32-g++
+endif
 endif
 
 ifeq ($(PLATFORM),windows)

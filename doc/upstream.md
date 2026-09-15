@@ -562,7 +562,7 @@ XG の圧縮サンプルの音色を並べた実機の録音 2 本で、帯の�
 
 余り r は、状態の並びを変えないよう `m_dpcm_delta` の下 8bit に -r として入れた（上は差分）。
 
-MAME の PR 用ブランチ: `swp30-dpcm-remainder`（tarboh/mame に push 済み、まだ投稿していない）。MAME では余りを
+MAME に投稿した PR（2026-09-16）: [mamedev/mame#16150](https://github.com/mamedev/mame/pull/16150)（ブランチ `swp30-dpcm-remainder`）。MAME では余りを
 `m_dpcm_rem` として別に持つ。MAME の最新（6941dc5ce6）に入れて同じ録音と比べると、m2 の 10〜150Hz が
 -52〜-55dB → -78〜-85dB（実機 -75〜-82dB）、倍音の位相の 1/f の項が -149Hz → -0.3Hz。
 
@@ -950,6 +950,7 @@ MAME に投稿した PR（2026-09-15）: 22 は [mamedev/mame#16140](https://git
 
 MAME の PR 用ブランチ（tarboh/mame に push 済み。33 より後は前が取り込まれてから投稿）: `swp30-meg-drc-fixes`（33）、`swp30-meg-absolute-reads`（24）、
 `swp30-meg-alu`（18・20・21・23・30）、`swp30-meg-branches`（11・29・31）、`swp30-meg-index2`（32）、`swp30-meg-lfo-phase`（25）。
+2026-09-16: #16142 が取り込まれたので、`swp30-meg-alu` を MAME の最新に載せ直して [mamedev/mame#16151](https://github.com/mamedev/mame/pull/16151) に出した。残りの 3 本は、これが取り込まれてから載せ直す。
 この順に積んである。MAME の試験では、手元の sin 表の代替品が 0 から始まる形だとコーラスやロータリーが合わないので、
 中心から始まる形に作り直した表で測った。
 

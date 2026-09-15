@@ -83,6 +83,7 @@ public:
 
 	// 論理座標の方眼を重ねる。絵の位置を直すときの物差し（doc/panel-editing.md）
 	void set_grid(bool on) { m_grid = on; }
+	void set_lcd_only(bool on) { m_lcd_only = on; }
 
 	// 配置。**作り直さずに文字ファイルで直せる**（doc/panel-editing.md）。
 	// 読み直したら resize() をやり直すこと
@@ -174,6 +175,7 @@ private:
 	// 目盛りの番号用。バー 1 本ぶんの幅に 2 桁を収める
 	HFONT m_font_tiny  = nullptr;
 	bool   m_grid = false;
+	bool   m_lcd_only = false;
 	layout m_lay;
 };
 

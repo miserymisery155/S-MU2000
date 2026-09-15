@@ -717,13 +717,13 @@ void mu2000::run_cycles(u64 n)
 			chunk = ev - now;
 		if (tmr != ~u64(0) && tmr - now < chunk)
 			chunk = tmr - now;
-		for (const midi_line &m : m_midi)
-			if (m.bit >= 0 || !m.queue.empty()) {
-				const u64 left = m.next > now ? m.next - now : 1;
-				if (left < chunk)
-					chunk = left;
-			}
-
+		if (!m_fast_midi)
+			for (const midi_line &m : m_midi)
+				if (m.bit >= 0 || !m.queue.empty()) {
+					const u64 left = m.next > now ? m.next - now : 1;
+					if (left < chunk)
+						chunk = left;
+				}
 		// SWP30 に書いた後は、このサンプルの残りを命令を進めずに過ごす（上の swp の説明）。
 		// 周辺のタイマや MIDI の送出は、区切りごとにここまでで進めている
 		if (m_swp_hold) {
@@ -784,6 +784,16 @@ void mu2000::midi_step(u64 now)
 	for (int port = 0; port < MIDI_PORTS; port++) {
 		midi_line &m = m_midi[port];
 		sh_sci_device *sci = m_cpu->sci(port);
+		if (m_fast_midi) {
+			if (!m.queue.empty() && sci->rx_can_accept()) {
+				const u8 byte = m.queue.front();
+				m.queue.pop_front();
+				logerror("midi in %c %02x @ %llu (fast)\n", 'A' + port, byte,
+				         (unsigned long long)now);
+				sci->receive_byte(byte);
+			}
+			continue;
+		}
 
 		if (m.bit < 0) {
 			// 直前のバイトのストップビットぶんは空けてから次を出す

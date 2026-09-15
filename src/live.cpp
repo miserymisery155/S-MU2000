@@ -3,7 +3,7 @@
 // Windows の MIDI 入力を受けて、そのまま音を鳴らす。
 //
 //   live --list                          MIDI 入力の一覧
-//   live <rom ディレクトリ> [--midi 番号] [--latency ミリ秒]
+//   live <rom ディレクトリ> [--midi 番号] [--latency ミリ秒] [--fast-midi]
 //   live <rom ディレクトリ> --waveout    古い方式（WinMM）で鳴らす
 //   live <rom ディレクトリ> --factory    覚えている設定を捨てて工場出荷状態で起動する
 //
@@ -441,6 +441,7 @@ int main(int argc, char **argv)
 	bool raw = false;                 // エンジンの信号処理を飛ばす
 	double seconds = 0.0;   // 0 なら Ctrl+C まで
 	bool nomidi = false, use_waveout = false, single = false, factory = false;
+	bool fast_midi = false;
 	const char *wav = nullptr;
 	std::string dir;
 
@@ -467,6 +468,7 @@ int main(int argc, char **argv)
 		else if (!std::strcmp(argv[i], "--waveout")) use_waveout = true;
 		else if (!std::strcmp(argv[i], "--nomidi")) nomidi = true;
 		else if (!std::strcmp(argv[i], "--factory")) factory = true;
+		else if (!std::strcmp(argv[i], "--fast-midi")) fast_midi = true;
 		else if (!std::strcmp(argv[i], "--single"))
 			single = true;
 		else if (!std::strcmp(argv[i], "-v")) smu2000::g_verbose = true;
@@ -474,7 +476,7 @@ int main(int argc, char **argv)
 	}
 	if (dir.empty()) {
 		std::fprintf(stderr,
-			"使い方: live <rom ディレクトリ> [--midi 番号] [--latency ミリ秒]\n"
+			"使い方: live <rom ディレクトリ> [--midi 番号] [--latency ミリ秒] [--fast-midi]\n"
 			"        [--exclusive]  デバイスを独り占めして待ち時間を詰める\n"
 			"        [--factory]    覚えている設定を捨てて工場出荷状態で起動する\n"
 #if defined(_WIN32)
@@ -495,6 +497,7 @@ int main(int argc, char **argv)
 		std::fprintf(stderr, "警告: %s\n", mu.error().c_str());
 
 	mu.set_threaded(!single);
+	mu.set_fast_midi(fast_midi);
 	if (factory)
 		std::printf("工場出荷状態で起動する（覚えていた設定は終わるときに上書きされる）\n");
 	else if (smu2000::nvram::load(mu))
