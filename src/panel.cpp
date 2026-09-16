@@ -171,6 +171,7 @@ int main(int argc, char **argv)
 	double play = 0.0;
 	bool watch = false;
 	double settle = 1.0;
+	bool usb = false;
 
 	for (int i = 1; i < argc; i++) {
 		if (!std::strcmp(argv[i], "--keys") && i + 1 < argc) keys = argv[++i];
@@ -180,6 +181,7 @@ int main(int argc, char **argv)
 		else if (!std::strcmp(argv[i], "--settle") && i + 1 < argc) settle = std::atof(argv[++i]);
 		else if (!std::strcmp(argv[i], "--mid") && i + 2 < argc) { midfile = argv[++i]; play = std::atof(argv[++i]); }
 		else if (!std::strcmp(argv[i], "--watch")) watch = true;
+		else if (!std::strcmp(argv[i], "--usb")) usb = true;
 		else if (dir.empty()) dir = argv[i];
 	}
 
@@ -215,6 +217,8 @@ int main(int argc, char **argv)
 		std::fprintf(stderr, "警告: %s\n", mu.error().c_str());
 
 	mu.set_threaded(true);
+	// HOST SELECT を USB にして起動する（gui・plugin の既定と同じ）
+	mu.set_usb_host(usb);
 	mu.reset();
 
 	std::printf("起動中...");

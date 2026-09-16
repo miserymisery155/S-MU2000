@@ -161,7 +161,7 @@ public:
 	// A・B も USB 側を通る（実機で DIN が黙るのと同じ）
 	void set_usb_host(bool on) { m_usb_host = on; }
 	bool usb_host() const { return m_usb_host; }
-	bool usb_idle() const { return m_usb.rx.empty() && !m_usb.have; }
+	bool usb_idle() const { return m_usb.rx.empty() && m_usb.cmd.empty() && !m_usb.have; }
 	// firmware が USB へ出したバイト。口は 0 始まり（-1 は口の指定より前）
 	bool usb_out_take(u8 &v, int &port);
 
@@ -320,7 +320,10 @@ private:
 	// 命令の途中で止まれず走りすぎた分。次の呼び出しから引く
 	u64 m_overrun = 0;
 	// SWP30 のレジスタに書いたので、このサンプルの残りは CPU を止める（run_cycles の説明）
-	bool m_swp_hold = false;
+	// マスタの SWP30 へ 1 本書くと CPU が待たされるサイクル数（build_bus の説明）。
+	// 実機で測った 61.4 サンプルに合う値（doc/upstream.md の 36）
+	static constexpr u64 SWP_WRITE_CYCLES = 440;
+	u64 m_swp_wait = 0;      // まだ消化していない待ち
 	bool m_profile = false;
 
 	// スレーブ用のスレッド。合図は atomic の回し合いで、錠は使わない。
@@ -370,6 +373,8 @@ private:
 		u64  next     = 0;      // 次のバイトを渡してよい時刻
 		bool have     = false;  // 渡したバイトをまだ読まれていない
 		u8   cur      = 0;
+		std::deque<u8> cmd;     // M37640 からのコマンド。状態の bit6 を立てて渡す
+		bool cur_cmd  = false;  // 渡しているバイトがコマンドか
 		u64  tx_next  = 0;
 		std::deque<u8> tx;      // firmware が出した MIDI バイト（F5 込み）
 		int  out_port = -1;     // 取り出し側が見ている口

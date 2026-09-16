@@ -31,6 +31,7 @@
 #include "pluginterfaces/vst/ivstevents.h"
 #include "pluginterfaces/vst/ivstmidicontrollers.h"
 #include "pluginterfaces/vst/ivstparameterchanges.h"
+#include "pluginterfaces/vst/ivstunits.h"
 
 #include <algorithm>
 #include <chrono>
@@ -124,6 +125,23 @@ ParamID param_of(int32 port, int32 ch, int32 ctrl)
 	return ParamID(kPortBase[port & 3] + ch * kCtrlCount + ctrl);
 }
 
+// ---- ユニットとプログラム一覧（IUnitInfo）
+//
+// Cubase は MIDI のプログラムチェンジを IMidiMapping では流さない。
+// 「MIDI チャンネル → ユニット」を getUnitByBus で引き、そのユニットに属していて
+// kIsProgramChange の印が付いたパラメータへ、プログラム一覧の番号として渡してくる。
+// 印もユニットも無いと黙って捨てる。REAPER などは IMidiMapping の 130 番で流すので、
+// そちらはそのまま残す。
+//
+// ユニットは根（0）の下に、口 × チャンネルの 64 個（1-64）。一覧は 128 音の 1 つを共有する
+constexpr ProgramListID kProgramList = 1;
+constexpr int32 kPrograms = 128;
+
+UnitID unit_of(int32 port, int32 ch)
+{
+	return UnitID(1 + (port & 3) * kChannels + ch);
+}
+
 // パラメータ番号を、口・チャンネル・番号と m_value の位置に戻す。
 // MIDI のパラメータでなければ false
 bool midi_param(ParamID id, int32 &port, int32 &ch, int32 &ctrl, int32 &slot)
@@ -176,7 +194,7 @@ void set_str(String128 dst, const char *ascii)
 // ---- 本体
 
 class mu_plugin : public IComponent, public IAudioProcessor,
-                  public IEditController, public IMidiMapping
+                  public IEditController, public IMidiMapping, public IUnitInfo
 {
 public:
 	mu_plugin()
@@ -214,6 +232,9 @@ public:
 		}
 		if (FUnknownPrivate::iidEqual(_iid, IMidiMapping::iid)) {
 			addRef(); *obj = static_cast<IMidiMapping *>(this); return kResultOk;
+		}
+		if (FUnknownPrivate::iidEqual(_iid, IUnitInfo::iid)) {
+			addRef(); *obj = static_cast<IUnitInfo *>(this); return kResultOk;
 		}
 		*obj = nullptr;
 		return kNoInterface;
@@ -304,7 +325,11 @@ public:
 	tresult PLUGIN_API setActive(TBool state) override
 	{
 		if (state) {
-			m_engine.start();
+			// **ここで起動を待ちきる。**setActive は本スレッドで呼ばれ、時間がかかって
+			// よいところなので、ここで待たないとホストは起動中の機械へ MIDI を流し始める。
+			// 流された分は溜めてあとでまとめて出すので、曲の頭が崩れる（issue #19）
+			if (!m_engine.wait_ready(30000))
+				m_engine.log_line("起動が終わらないまま演奏に入る");
 		} else {
 			m_hush.store(true);
 			m_engine.set_processing(false);
@@ -360,8 +385,7 @@ public:
 			return kResultOk;
 
 		// 起動が終わっていないと戻せない。終わるまで待つ
-		for (int i = 0; i < 300 && m_engine.state() == smu2000::vst3::status::loading; i++)
-			std::this_thread::sleep_for(std::chrono::milliseconds(10));
+		m_engine.wait_ready(3000);
 		m_engine.load_state(blob.data(), blob.size());
 
 		// 版 3 から: 差していた SmartMedia のファイル（UTF-8）。無くなっていたら差さない
@@ -510,6 +534,11 @@ public:
 		info.unitId = 0;   // kRootUnitId
 		// 4192 本もあるので、一覧に並べさせない
 		info.flags = ParameterInfo::kCanAutomate | ParameterInfo::kIsHidden;
+		// プログラムチェンジはそのチャンネルのユニットに属させ、印を付ける（Cubase 向け。上の unit_of）
+		if (ctrl == 130) {
+			info.unitId = unit_of(port, ch);
+			info.flags |= ParameterInfo::kIsProgramChange | ParameterInfo::kIsList;
+		}
 		return kResultOk;
 	}
 
@@ -626,6 +655,80 @@ public:
 		id = param_of(busIndex, channel, ctrl);
 		return kResultTrue;
 	}
+
+	// ---- IUnitInfo（Cubase のプログラムチェンジ。上の unit_of）
+
+	int32 PLUGIN_API getUnitCount() override { return 1 + kPorts * kChannels; }
+
+	tresult PLUGIN_API getUnitInfo(int32 unitIndex, UnitInfo &info) override
+	{
+		if (unitIndex < 0 || unitIndex >= getUnitCount())
+			return kInvalidArgument;
+		std::memset(&info, 0, sizeof(info));
+		if (unitIndex == 0) {
+			info.id = kRootUnitId;
+			info.parentUnitId = kNoParentUnitId;
+			set_str(info.name, "Root");
+			info.programListId = kNoProgramListId;
+			return kResultOk;
+		}
+		const int32 port = (unitIndex - 1) / kChannels, ch = (unitIndex - 1) % kChannels;
+		char name[32];
+		std::snprintf(name, sizeof(name), "%c Ch%d", char('A' + port), ch + 1);
+		info.id = unit_of(port, ch);
+		info.parentUnitId = kRootUnitId;
+		set_str(info.name, name);
+		info.programListId = kProgramList;
+		return kResultOk;
+	}
+
+	int32 PLUGIN_API getProgramListCount() override { return 1; }
+
+	tresult PLUGIN_API getProgramListInfo(int32 listIndex, ProgramListInfo &info) override
+	{
+		if (listIndex != 0)
+			return kInvalidArgument;
+		std::memset(&info, 0, sizeof(info));
+		info.id = kProgramList;
+		set_str(info.name, "Program");
+		info.programCount = kPrograms;
+		return kResultOk;
+	}
+
+	tresult PLUGIN_API getProgramName(ProgramListID listId, int32 programIndex, String128 name) override
+	{
+		if (listId != kProgramList || programIndex < 0 || programIndex >= kPrograms)
+			return kInvalidArgument;
+		char buf[16];
+		std::snprintf(buf, sizeof(buf), "%03d", programIndex + 1);
+		set_str(name, buf);
+		return kResultOk;
+	}
+
+	tresult PLUGIN_API getProgramInfo(ProgramListID, int32, Steinberg::Vst::CString, String128) override
+	{ return kNotImplemented; }
+
+	tresult PLUGIN_API hasProgramPitchNames(ProgramListID, int32) override { return kResultFalse; }
+
+	tresult PLUGIN_API getProgramPitchName(ProgramListID, int32, int16, String128) override
+	{ return kNotImplemented; }
+
+	UnitID PLUGIN_API getSelectedUnit() override { return kRootUnitId; }
+
+	tresult PLUGIN_API selectUnit(UnitID) override { return kResultOk; }
+
+	tresult PLUGIN_API getUnitByBus(MediaType type, BusDirection dir, int32 busIndex,
+	                                int32 channel, UnitID &unitId) override
+	{
+		if (type != kEvent || dir != kInput || busIndex < 0 || busIndex >= kPorts ||
+		    channel < 0 || channel >= kChannels)
+			return kResultFalse;
+		unitId = unit_of(busIndex, channel);
+		return kResultTrue;
+	}
+
+	tresult PLUGIN_API setUnitProgramData(int32, int32, IBStream *) override
+	{ return kNotImplemented; }
 
 private:
 	// process の中で時刻順に並べ直すための入れ物。

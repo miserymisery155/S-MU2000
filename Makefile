@@ -116,7 +116,7 @@ ifeq ($(PLATFORM),windows)
 all: $(BUILD)/verify$(EXE) $(BUILD)/boot$(EXE) $(BUILD)/render$(EXE) \
      $(BUILD)/live$(EXE) $(BUILD)/midisend$(EXE) $(BUILD)/panel$(EXE) $(BUILD)/gui$(EXE) \
      $(BUILD)/statetest$(EXE) $(BUILD)/rec$(EXE) $(BUILD)/blocktime$(EXE) \
-     vst3 $(BUILD)/vst3probe$(EXE) clap
+     vst3 $(BUILD)/vst3probe$(EXE) clap $(BUILD)/clapprobe$(EXE)
 else
 # macOS. vst3 and vst3probe are defined below
 all: $(BUILD)/verify$(EXE) $(BUILD)/boot$(EXE) $(BUILD)/render$(EXE) \
@@ -298,6 +298,11 @@ $(BUILD)/clapobj/%.o: %.cpp
 	$(CXX) $(CXXFLAGS) $(CLAP_INC) $(IMGUI_FLAGS) -c -o $@ $<
 
 clap: $(CLAP_BIN)
+
+# CLAP を DAW 無しで鳴らす小さなホスト。vst3probe と同じ MIDI を流して出音を比べる
+$(BUILD)/clapprobe$(EXE): $(BUILD)/clapobj/src/clap/probe.o $(BUILD)/src/smf.o $(BUILD)/src/compat/compat.o
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
 
 # VST3 と同じく、PC で触る窓（一覧・エディタ）も入れる
 $(CLAP_BIN): $(OBJS) $(BUILD)/src/mu2000.o $(CLAP_OBJS) $(PC_OBJS)

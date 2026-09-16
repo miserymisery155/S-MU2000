@@ -122,6 +122,12 @@ void send_midi(int port, int port_b, const std::string &path, double delay)
 		for (HMIDIOUT h : outs) if (h) midiOutClose(h);
 		return;
 	}
+	// Windows の眠りの刻みは既定で 15.6ms ある。この中で Sleep(2) と書いても
+	// 15ms 寝過ごすことがあり、そのぶん MIDI が遅れて届く。firmware は 1ms・2.5ms の
+	// 刻みで音を組み立てるので、十数 ms もずれると層の遅れが毎回変わってしまう
+	// （2026-09-17 に、同じ MIDI で 24 音のうち 1 音が 88ms ずれているのを見つけた）。
+	// 刻みを 1ms に詰めてから送る
+	timeBeginPeriod(1);
 	LARGE_INTEGER freq, t0;
 	QueryPerformanceFrequency(&freq);
 	QueryPerformanceCounter(&t0);
@@ -163,6 +169,7 @@ void send_midi(int port, int port_b, const std::string &path, double delay)
 	Sleep(100);
 	for (HMIDIOUT h : outs)
 		if (h) { midiOutReset(h); midiOutClose(h); }
+	timeEndPeriod(1);
 }
 
 // 相手が生きているかを確かめる。MIDI の機器照会（Device Inquiry）を送って

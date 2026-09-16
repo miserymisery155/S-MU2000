@@ -22,6 +22,7 @@
 #include "pluginterfaces/vst/ivsteditcontroller.h"
 #include "pluginterfaces/vst/ivstevents.h"
 #include "pluginterfaces/vst/ivstparameterchanges.h"
+#include "pluginterfaces/vst/ivstunits.h"
 
 #include "probe_host.h"
 #include "smf.h"
@@ -387,6 +388,72 @@ int run_torture(IPluginFactory *fac, const TUID cid)
 		c->release();
 	}
 
+	// 3.4 setActive(true) を抜けた直後の音。**新しい個体**でやる。
+	// ホストは setActive を抜けたら演奏を始めてよいことになっているので、
+	// 起動が終わっていなければ最初の音が溜められて曲の頭が崩れる（issue #19）
+	{
+		IComponent *c = nullptr;
+		fac->createInstance(reinterpret_cast<FIDString>(cid),
+		                    reinterpret_cast<FIDString>(IComponent::iid.toTUID()), (void **)&c);
+		IAudioProcessor *p = nullptr;
+		if (c) c->queryInterface(IAudioProcessor::iid.toTUID(), (void **)&p);
+		if (c && p) {
+			c->initialize(nullptr);
+			c->activateBus(kAudio, kOutput, 0, true);
+			for (int32 b = 0; b < c->getBusCount(kEvent, kInput); b++)
+				c->activateBus(kEvent, kInput, b, true);
+			ProcessSetup su{};
+			su.processMode = kRealtime;
+			su.symbolicSampleSize = kSample32;
+			su.maxSamplesPerBlock = 512;
+			su.sampleRate = 44100.0;
+			p->setupProcessing(su);
+			c->setActive(true);
+			p->setProcessing(true);
+
+			std::vector<float> l(512), rr(512);
+			float *ch[2] = { l.data(), rr.data() };
+			AudioBusBuffers ab{};
+			ab.numChannels = 2; ab.channelBuffers32 = ch;
+			event_list elist;
+			Event ev{};
+			ev.busIndex = 0; ev.sampleOffset = 0; ev.flags = Event::kIsLive;
+			ev.type = Event::kNoteOnEvent;
+			ev.noteOn.channel = 0; ev.noteOn.pitch = 60;
+			ev.noteOn.velocity = 100.0f / 127.0f; ev.noteOn.noteId = -1;
+			elist.addEvent(ev);
+
+			ProcessData pd{};
+			pd.symbolicSampleSize = kSample32;
+			pd.numOutputs = 1; pd.outputs = &ab;
+			pd.numSamples = 512;
+			pd.inputEvents = &elist;
+
+			// 100ms ぶん回して、音が出ているか見る
+			double peak = 0;
+			for (int i = 0; i < 9; i++) {
+				std::fill(l.begin(), l.end(), 0.0f);
+				std::fill(rr.begin(), rr.end(), 0.0f);
+				p->process(pd);
+				pd.inputEvents = nullptr;     // ノートオンは 1 回だけ
+				for (int k = 0; k < 512; k++)
+					peak = std::max(peak, double(std::fabs(l[k])));
+			}
+			if (peak < 0.001) {
+				std::printf("NG: setActive(true) の直後のノートオンで音が出ない"
+				            "（起動を待っていない。issue #19）\n");
+				bad++;
+			} else {
+				std::printf("OK: setActive(true) の直後のノートオンで音が出る（頂 %.3f）\n", peak);
+			}
+			p->setProcessing(false);
+			c->setActive(false);
+			c->terminate();
+		}
+		if (p) p->release();
+		if (c) c->release();
+	}
+
 	// 3.5 状態の保存と復元。**新しい個体**でやる。使い回すと起動の途中で
 	// 止められていたりして、機械の中身が入らない
 	{
@@ -568,6 +635,61 @@ int run_torture(IPluginFactory *fac, const TUID cid)
 			std::printf("NG: 違う口・チャンネルが同じパラメータに割り当たっている\n"); bad++;
 		}
 		std::printf("OK: MIDI の割り当ては %d 通り（2 口 × 16ch × 131）\n", mapped);
+
+		// Cubase がプログラムチェンジを渡す道。MIDI チャンネル → ユニット（getUnitByBus）→
+		// そのユニットのプログラム一覧 → 同じユニットに属し kIsProgramChange の付いたパラメータ
+		IUnitInfo *u = nullptr;
+		c->queryInterface(IUnitInfo::iid, (void **)&u);
+		if (!u) {
+			std::printf("NG: IUnitInfo が無い（Cubase で MIDI のプログラムチェンジが捨てられる）\n"); bad++;
+		} else {
+			std::map<UnitID, ProgramListID> lists;
+			for (int32 i = 0; i < u->getUnitCount(); i++) {
+				UnitInfo ui{};
+				if (u->getUnitInfo(i, ui) == kResultOk)
+					lists[ui.id] = ui.programListId;
+			}
+			int32 programs = 0;
+			for (int32 i = 0; i < u->getProgramListCount(); i++) {
+				ProgramListInfo li{};
+				if (u->getProgramListInfo(i, li) == kResultOk && li.id == 1)
+					programs = li.programCount;
+			}
+			std::map<UnitID, int> pc_params;
+			for (int32 i = 0; i < e->getParameterCount(); i++) {
+				ParameterInfo pi2{};
+				if (e->getParameterInfo(i, pi2) == kResultOk && (pi2.flags & ParameterInfo::kIsProgramChange))
+					pc_params[pi2.unitId]++;
+			}
+			int good = 0, bus_count = c->getBusCount(kEvent, kInput);
+			for (int32 bus = 0; bus < bus_count; bus++)
+				for (int32 ch = 0; ch < 16; ch++) {
+					UnitID unit = -1;
+					if (u->getUnitByBus(kEvent, kInput, bus, ch, unit) != kResultTrue)
+						continue;
+					auto l = lists.find(unit);
+					if (l == lists.end() || l->second == kNoProgramListId)
+						continue;
+					if (pc_params[unit] != 1)
+						continue;
+					// そのパラメータと IMidiMapping の 130 番が同じものか
+					ParamID via_map = 0;
+					m->getMidiControllerAssignment(bus, int16(ch), CtrlNumber(130), via_map);   // kCtrlProgramChange
+					ParameterInfo pi3{};
+					bool same = false;
+					for (int32 i = 0; i < e->getParameterCount() && !same; i++)
+						if (e->getParameterInfo(i, pi3) == kResultOk && pi3.id == via_map)
+							same = (pi3.flags & ParameterInfo::kIsProgramChange) && pi3.unitId == unit;
+					good += same;
+				}
+			if (good != bus_count * 16 || programs != 128) {
+				std::printf("NG: プログラムチェンジのユニット %d / %d、一覧 %d 音\n", good, bus_count * 16, programs);
+				bad++;
+			} else {
+				std::printf("OK: プログラムチェンジは %d 口 × 16ch ともユニットと 128 音の一覧に繋がる\n", bus_count);
+			}
+			u->release();
+		}
 
 		c->terminate();
 		e->release();

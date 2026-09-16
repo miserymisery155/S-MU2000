@@ -65,6 +65,9 @@ public:
 
 	// ROM を探して読み、起動するまでを別スレッドで進める。すぐ返る
 	void start();
+	// 起動が終わるまで待つ。**DAW の本スレッドからだけ**呼ぶこと。
+	// 待ちきれずに時間切れなら false。始まっていなければ始めてから待つ
+	bool wait_ready(int ms);
 
 	status state() const { return m_state.load(std::memory_order_acquire); }
 	// state() が failed のときの理由。ready でも「代用品を使った」等が入る

@@ -11,7 +11,7 @@
 //   ・ノートは CLAP 流（CLAP_EVENT_NOTE_ON 等）で来ることもあるので、MIDI に直す
 //   ・パラメータは出力レベル 1 本だけ
 //
-// ノートの入力は 2 本。実機の MIDI IN A（パート 1-16）と B（パート 17-32）。
+// ノートの入力は 4 本。実機の MIDI IN A-D（パート 1-16 / 17-32 / 33-48 / 49-64）。VST3 版と同じ。
 // 状態の保存の形は VST3 版の getState と同じにしてある。
 
 #include "vst3/engine.h"
@@ -61,7 +61,13 @@ const clap_plugin_descriptor_t kDescriptor = {
 	kFeatures,
 };
 
-constexpr int kPorts = 2;
+// MIDI IN A-D。VST3 と同じ 4 口（C・D は実機では USB だけの口で、パート 33-64 に届く）
+constexpr int kPorts = mu2000::MIDI_PORTS;
+
+int port_of(uint16_t index)
+{
+	return index < kPorts ? int(index) : 0;
+}
 constexpr clap_id kGainId = 0;
 
 #if defined(_WIN32)
@@ -150,7 +156,11 @@ private:
 	{
 		m_rate = rate;
 		m_engine.set_output_rate(rate);
-		m_engine.start();
+		// **ここで起動を待ちきる。**activate は本スレッドで呼ばれ、時間がかかってよい
+		// ところなので、ここで待たないとホストは起動中の機械へ MIDI を流し始める。
+		// 流された分は溜めてあとでまとめて出すので、曲の頭が崩れる（issue #19）
+		if (!m_engine.wait_ready(30000))
+			m_engine.log_line("起動が終わらないまま演奏に入る");
 		return true;
 	}
 
@@ -202,7 +212,7 @@ private:
 		return true;
 	}
 
-	// ---- ノートの口。MIDI IN A / B
+	// ---- ノートの口。MIDI IN A-D
 
 	static const clap_plugin_note_ports_t s_note_ports;
 
@@ -214,8 +224,9 @@ private:
 		info->id = index;
 		info->supported_dialects = CLAP_NOTE_DIALECT_MIDI | CLAP_NOTE_DIALECT_CLAP;
 		info->preferred_dialect  = CLAP_NOTE_DIALECT_MIDI;
-		std::snprintf(info->name, sizeof(info->name), "%s",
-		              index == 0 ? "MIDI In A (Part 1-16)" : "MIDI In B (Part 17-32)");
+		static const char *NAMES[4] = { "MIDI In A (Part 1-16)", "MIDI In B (Part 17-32)",
+		                                "MIDI In C (Part 33-48)", "MIDI In D (Part 49-64)" };
+		std::snprintf(info->name, sizeof(info->name), "%s", NAMES[index & 3]);
 		return true;
 	}
 
@@ -293,8 +304,7 @@ private:
 			return true;
 
 		// 起動が終わっていないと戻せない。終わるまで待つ
-		for (int i = 0; i < 300 && m_engine.state() == smu2000::vst3::status::loading; i++)
-			std::this_thread::sleep_for(std::chrono::milliseconds(10));
+		m_engine.wait_ready(3000);
 		m_engine.load_state(blob.data(), blob.size());
 
 		// 版 3 から: 差していた SmartMedia のファイル（UTF-8）。無くなっていたら差さない
@@ -581,7 +591,7 @@ void mu_plugin::event(const clap_event_header_t *h)
 	switch (h->type) {
 	case CLAP_EVENT_MIDI: {
 		const auto *e = reinterpret_cast<const clap_event_midi_t *>(h);
-		const int port = e->port_index == 1 ? 1 : 0;
+		const int port = port_of(e->port_index);
 		if ((e->data[0] & 0xf0) == 0x90 && e->data[2])
 			m_sounded[port] |= uint16_t(1u << (e->data[0] & 15));
 		m_engine.midi(e->data, size_t(midi_length(e->data[0])), port);
@@ -590,7 +600,7 @@ void mu_plugin::event(const clap_event_header_t *h)
 	case CLAP_EVENT_MIDI_SYSEX: {
 		const auto *e = reinterpret_cast<const clap_event_midi_sysex_t *>(h);
 		if (e->buffer && e->size)
-			m_engine.midi(e->buffer, e->size, e->port_index == 1 ? 1 : 0);
+			m_engine.midi(e->buffer, e->size, port_of(e->port_index));
 		break;
 	}
 	// CLAP 流のノート。チャンネルやキーが「どれでも」（-1）なら MIDI にできないので捨てる
@@ -604,7 +614,7 @@ void mu_plugin::event(const clap_event_header_t *h)
 		int v = int(std::lround(e->velocity * 127.0));
 		v = on ? std::clamp(v, 1, 127) : std::clamp(v, 0, 127);
 		const uint8_t msg[3] = { uint8_t((on ? 0x90 : 0x80) | e->channel), uint8_t(e->key), uint8_t(v) };
-		const int port = e->port_index == 1 ? 1 : 0;
+		const int port = port_of(e->port_index);
 		if (on && v)
 			m_sounded[port] |= uint16_t(1u << (e->channel & 15));
 		m_engine.midi(msg, 3, port);

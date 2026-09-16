@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <thread>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
@@ -221,6 +222,18 @@ void engine::start()
 {
 	if (!m_thread.joinable())
 		m_thread = std::thread([this] { boot(); });
+}
+
+bool engine::wait_ready(int ms)
+{
+	start();
+	const auto limit = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
+	while (state() == status::loading) {
+		if (std::chrono::steady_clock::now() >= limit)
+			return false;
+		std::this_thread::sleep_for(std::chrono::milliseconds(2));
+	}
+	return true;
 }
 
 void engine::boot()
