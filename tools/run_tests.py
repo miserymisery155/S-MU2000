@@ -134,13 +134,20 @@ def step_statetest(rep, roms, midi):
     if not exe.exists():
         rep.add("statetest", False, "build/statetest%s が無い" % EXE)
         return
-    log = WORK / "statetest.log"
-    rc = run([exe, roms, midi, "--warm", "2.0", "--steps", "50"], out=log, err=log)
+    # DIN の口と USB の口の両方で確かめる。USB のときしか動かない所（HOST SELECT を
+    # 読む 2 つ目の A/D 変換器）の写し忘れは、DIN だけでは見つからない（issue #18）
+    ok = True
     note = ""
-    for line in log.read_text(encoding="utf-8", errors="replace").splitlines():
-        if line.startswith("詰めると"):
-            note = line
-    rep.add("statetest", rc == 0, note)
+    for tag, extra in (("statetest", []), ("statetest USB", ["--usb"])):
+        log = WORK / ("statetest%s.log" % ("_usb" if extra else ""))
+        rc = run([exe, roms, midi, "--warm", "2.0", "--steps", "50"] + extra, out=log, err=log)
+        this = ""
+        for line in log.read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.startswith("詰めると"):
+                this = line
+        rep.add(tag, rc == 0, this)
+        ok = ok and rc == 0
+        note = note or this
 
 
 # MIDI を流し始める時刻を **固定する**。

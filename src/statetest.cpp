@@ -36,6 +36,11 @@ namespace {
 
 constexpr u32 RATE = 44100;
 
+// USB の口で起こすか（--usb）。HOST SELECT が USB のときしか動かない所を
+// 突き合わせるため。これを入れるまで、2 つ目の A/D 変換器（AN4 = HOST SELECT）の
+// 写し忘れに気付けなかった（issue #18）
+bool g_usb_host = false;
+
 bool boot(mu2000 &mu, const std::string &dir)
 {
 	if (!mu.load_program(dir + "/mu2000_flash.bin")) {
@@ -50,6 +55,7 @@ bool boot(mu2000 &mu, const std::string &dir)
 	if (!mu.load_lcd_font(dir + "/hd44780u_b04.bin"))
 		mu.load_lcd_font(dir + "/standin/hd44780u_b04.bin");
 	mu.set_threaded(false);          // 突き合わせなので 1 本で回す
+	mu.set_usb_host(g_usb_host);     // **reset() の前に**
 	mu.reset();
 
 	const size_t limit = size_t(30.0 * RATE);
@@ -113,13 +119,14 @@ int main(int argc, char **argv)
 	for (int i = 1; i < argc; i++) {
 		if (!std::strcmp(argv[i], "--warm") && i + 1 < argc) warm = std::atof(argv[++i]);
 		else if (!std::strcmp(argv[i], "--steps") && i + 1 < argc) steps = std::atoi(argv[++i]);
+		else if (!std::strcmp(argv[i], "--usb")) g_usb_host = true;
 		else if (dir.empty()) dir = argv[i];
 		else if (mid.empty()) mid = argv[i];
 	}
 	if (dir.empty()) {
 		std::fprintf(stderr,
 			"使い方: statetest <rom ディレクトリ> [<MIDI ファイル>]"
-			" [--warm 秒] [--steps 数]\n");
+			" [--warm 秒] [--steps 数] [--usb]\n");
 		return 1;
 	}
 
