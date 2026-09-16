@@ -263,6 +263,58 @@ Checked with the switches on both architectures (`build/` and `build-x86_64/`,
 | `make test` | verify 0 mismatches, `JIT 入切` 8 of 8 |
 | arm64 vs x86-64 | the same WAV |
 
+## arm64 JIT: closing the gap to x86-64 (`opt/arm64-jit`)
+
+The SH2 backend was already at opcode-for-opcode parity with x86-64 (same
+`native()` coverage, lazy `pc`, slot-native, block chaining), so the work was
+all on the MEG side: four x86-64-only optimizations ported, plus two small
+arm64-specific ones. Each item was measured alone and kept only on a win.
+Numbers are `build/blocktime roms build/tests/dense.mid 256 5 3` (median of
+runs, MEG ns per sample) on this machine; every step stayed bit-exact
+(`verify`, the full suite, JIT-vs-interpreter WAVs on dense/piano/effects/
+lofi/chord, `SMU2000_MEG_JIT_CHECK` clean).
+
+| Step | MEG master / slave | Kept |
+|---|---|---|
+| branch start | 828 / 737 | — |
+| minimal `mov_imm64` (was always 4 insns) + rand seed in `x24` | 725 / 656 | yes |
+| const region off `x25` (`m_const`/`t`/`offset` sit past the halfword imm12 reach) | 686 / 639 | yes |
+| saturation limits in `x26–x28` (only 3 regs free: `-0x800001`/`-0x800000`/`0x3fffffffff`) | 646 / 605 | yes |
+| early delay-ring commit (`SMU2000_MEG_EARLY`, same analysis as x86-64) | 641 / 601 | yes |
+| inline `get_lfo` (same tables and rule as x86-64) | **634 / 599** | yes |
+
+Block average 0.833 → 0.78 ms (14.3% → 13.4% of real time) over the branch.
+
+Two x86-64 wins did **not** transfer and were reverted, recorded so nobody
+re-tries them:
+
+* **Baked constants (`SMU2000_MEG_BAKE`) lose ~3–4% on arm64** (dense and
+  effects alike). The baked multiply needs the 32-bit coefficient widened to
+  64 bits (`sxtw64`), which x86-64 gets for free inside `imul64i`, and dense
+  has almost no skippable zero-coefficient ops. The `if (bake) return false`
+  refusal is back in place.
+* **Hoisting the SH2 address bounds into `x23–x28` measured flat.**
+  Four instructions saved per memory op against a six-`mov` prologue on every
+  block — the prologue eats the saving on blocks with few memory ops.
+
+One thing the porting turned up was fixed right after the merge:
+`swp30_jit.cpp`'s x86-64 LFO helper call hardcoded the Windows convention
+(`RCX`/`RDX`), and `SEED`/`K_MAX` sit in SysV-volatile `RSI`/`RDI` — without
+`sin-table.bin` the helper path ran and the binary segfaulted (exit 139 under
+Rosetta; arm64 is unaffected). The call now puts its arguments in
+`ARG0`/`ARG1`, and under SysV pushes `SEED` and `K_MAX` around the call
+(two pushes, so the 16-byte alignment holds; Windows x64 doesn't push, since
+there the callee preserves them and owns the 32-byte shadow space above the
+return address). The Windows code bytes are unchanged.
+
+It was checked on Windows by building the MEG JIT with the SysV argument
+registers and calling both the generated block and `call_lfo` through
+`__attribute__((sysv_abi))`, rendering without `sin-table.bin` so every LFO op
+goes through the helper: the code before the fix dies with an access violation
+(0xC0000005), the fix matches the interpreter byte for byte on effects, dense,
+chord and lofi, and the same build with the two pushes removed does not — so
+the test does see a clobbered `SEED`/`K_MAX`.
+
 ## The core needed one change
 
 `timer_alloc` in `src/compat/mamecompat.h` called `machine().make_timer(...)`
