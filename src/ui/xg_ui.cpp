@@ -368,6 +368,100 @@ void program_menu(int part, xg::model &m, const xg_snapshot *ram, bridge &br)
 }
 
 
+// 出しっぱなしの音色選び。品書きと違って、押しても閉じないので続けて選べる。
+//   分類（16 の組 + ドラム + 効果音）→ 音色 → バンク違い
+// 分類は自分で選べるが、外から音色が変わったときは今の音色の分類へ移す
+void program_pane(int part, xg::model &m, const xg_snapshot *ram, bridge &br)
+{
+	constexpr int GROUP_DRUM = 16, GROUP_SFX = 17;
+
+	int msb = 0, lsb = 0, prog = 0;
+	const bool known = m.get(P("part.bank_msb"), part, msb) && m.get(P("part.bank_lsb"), part, lsb) &&
+	                   m.get(P("part.program"), part, prog);
+	const int mode = ram ? ram->voice_mode : 1;
+	const int set  = ram ? ram->voice_set : 1;
+	const xg::voice_rom *vr = voices();
+	const int now_group = !known ? 0 : msb == 127 ? GROUP_DRUM : msb == 126 ? GROUP_SFX : prog / 8;
+
+	// 今見ている分類。音色が外から変わったら追いかける
+	static int group = -1;
+	static int last_part = -1, last_seen = -1;
+	const int seen = known ? (msb << 8) | prog : -1;
+	if (group < 0 || part != last_part || seen != last_seen)
+		group = now_group;
+	last_part = part;
+	last_seen = seen;
+
+	const float fs = ImGui::GetFontSize();
+	ImGui::SetNextItemWidth(-FLT_MIN);
+	const char *group_name = group == GROUP_DRUM ? "ドラムキット" : group == GROUP_SFX ? "効果音キット" : GM_GROUPS[group];
+	if (ImGui::BeginCombo("##group", group_name)) {
+		for (int g = 0; g < 16; g++)
+			if (ImGui::Selectable(GM_GROUPS[g], g == group))
+				group = g;
+		if (ImGui::Selectable("ドラムキット", group == GROUP_DRUM))
+			group = GROUP_DRUM;
+		if (ImGui::Selectable("効果音キット", group == GROUP_SFX))
+			group = GROUP_SFX;
+		ImGui::EndCombo();
+	}
+
+	// ---- 音色（分類の中の 8 つ、キットなら並んでいるだけ全部）
+	const bool kits = group >= GROUP_DRUM;
+	const int kit_msb = group == GROUP_DRUM ? 127 : 126;
+	const std::vector<bank_choice> *banks =
+	    (!kits && vr) ? &bank_choices(*vr, mode, set, prog) : nullptr;
+	const bool has_banks = banks && banks->size() > 1;
+	// バンクの並びを出す分だけ、音色の並びを短くする
+	const float bank_h = has_banks ? std::min(fs * 6.5f, ImGui::GetContentRegionAvail().y * 0.45f) : 0.0f;
+	const float list_h = ImGui::GetContentRegionAvail().y - bank_h - (has_banks ? ImGui::GetStyle().ItemSpacing.y : 0.0f);
+
+	if (ImGui::BeginChild("voices", ImVec2(0, list_h), ImGuiChildFlags_Borders)) {
+		if (kits) {
+			for (int i = 0; i < 128; i++) {
+				std::string kit = vr ? vr->kit_name(kit_msb, i) : std::string();
+				if (vr && kit.empty())
+					continue;
+				if (!vr && i)
+					break;
+				char label[48];
+				std::snprintf(label, sizeof(label), "%3d %s", i + 1, vr ? kit.c_str() : "Kit");
+				if (ImGui::Selectable(label, known && msb == kit_msb && i == prog))
+					select_voice(part, kit_msb, 0, i, m, br);
+			}
+		} else {
+			for (int i = group * 8; i < group * 8 + 8; i++) {
+				std::string base = GM_NAMES[i];
+				if (vr) {
+					const std::string real = vr->record_name(vr->lookup(mode, set, 0, 0, i));
+					if (!real.empty())
+						base = real;
+				}
+				char label[64];
+				std::snprintf(label, sizeof(label), "%3d %s", i + 1, base.c_str());
+				const bool current = known && msb < 126 && i == prog;
+				if (ImGui::Selectable(label, current))
+					select_voice(part, 0, 0, i, m, br);
+			}
+		}
+	}
+	ImGui::EndChild();
+
+	// ---- 同じ番号のバンク違い
+	if (has_banks) {
+		if (ImGui::BeginChild("banks", ImVec2(0, 0), ImGuiChildFlags_Borders)) {
+			for (const bank_choice &c : *banks) {
+				char item[72];
+				std::snprintf(item, sizeof(item), "%s  %d/%d", c.name.c_str(), c.msb, c.lsb);
+				if (ImGui::Selectable(item, known && c.msb == msb && c.lsb == lsb))
+					select_voice(part, c.msb, c.lsb, prog, m, br);
+			}
+		}
+		ImGui::EndChild();
+	}
+}
+
+
 
 // ---- 説明（ヘルプ）と言語
 //
@@ -577,6 +671,7 @@ const help_text HELP[] = {
 bool  g_help = true;
 int   g_lang = 0;
 float g_zoom = 0.625f;                 // 一覧の表示の大きさ
+float g_shapes_zoom = 0.6f;            // パートの音色の窓の表示の大きさ
 bool  g_loaded = false;
 
 // Windows: %LOCALAPPDATA%\S-MU2000\editor.ini -- the same place gui.ini lives
@@ -601,6 +696,8 @@ void load_settings()
 			g_help = line[5] != '0';
 		else if (!std::strncmp(line, "overview_zoom=", 14))
 			g_zoom = std::clamp(float(std::atof(line + 14)), 0.5f, 1.5f);
+		else if (!std::strncmp(line, "shapes_zoom=", 12))
+			g_shapes_zoom = std::clamp(float(std::atof(line + 12)), 0.4f, 1.5f);
 		else if (!std::strncmp(line, "lang=", 5))
 			for (int i = 0; i < NLANG; i++)
 				if (!std::strcmp(line + 5, LANGS[i].code))
@@ -616,7 +713,8 @@ void save_settings()
 		return;
 	smu2000::ensure_dir(path.substr(0, path.find_last_of("\\/")));
 	if (FILE *f = std::fopen(path.c_str(), "wb")) {
-		std::fprintf(f, "help=%d\nlang=%s\noverview_zoom=%.3f\n", g_help ? 1 : 0, LANGS[g_lang].code, g_zoom);
+		std::fprintf(f, "help=%d\nlang=%s\noverview_zoom=%.3f\nshapes_zoom=%.3f\n",
+		             g_help ? 1 : 0, LANGS[g_lang].code, g_zoom, g_shapes_zoom);
 		std::fclose(f);
 	}
 }
@@ -655,6 +753,22 @@ void set_overview_zoom(float zoom)
 	const float z = std::clamp(zoom, 0.5f, 1.5f);
 	if (z != g_zoom) {
 		g_zoom = z;
+		save_settings();
+	}
+}
+
+float &shapes_zoom()
+{
+	ensure_loaded();
+	return g_shapes_zoom;
+}
+
+void set_shapes_zoom(float zoom)
+{
+	ensure_loaded();
+	const float z = std::clamp(zoom, 0.4f, 1.5f);
+	if (z != g_shapes_zoom) {
+		g_shapes_zoom = z;
 		save_settings();
 	}
 }

@@ -8,6 +8,7 @@
 #include "imgui.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -83,6 +84,10 @@ void part_shapes::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 	ImGui::Begin("part_shapes", nullptr, wf);
 	ImGui::PopStyleVar();
 
+	// 表示の大きさ。文字も絵も同じ倍率で縮む（editor.ini に覚える）
+	float &zoom = shapes_zoom();
+	ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * zoom);
+
 	const float fs = ImGui::GetFontSize();
 	int part = shape_window_part();
 
@@ -115,15 +120,28 @@ void part_shapes::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 		}
 	}
 	ImGui::TextUnformatted(voice.c_str());
-	ImGui::SameLine(ImGui::GetContentRegionAvail().x + ImGui::GetCursorPosX() - fs * 14);
+
+	// 表示の大きさと、説明のチェックボックスは右端へ
+	ImGui::SameLine(ImGui::GetContentRegionAvail().x + ImGui::GetCursorPosX() - fs * 18);
+	if (ImGui::SmallButton("-"))
+		set_shapes_zoom(zoom - 0.1f);
+	ImGui::SameLine();
+	ImGui::Text("%d%%", int(std::lround(zoom * 100)));
+	ImGui::SameLine();
+	if (ImGui::SmallButton("+"))
+		set_shapes_zoom(zoom + 0.1f);
+	ImGui::SameLine();
 	help_checkbox();
 
-	// ---- 4 つの区画を 2 × 2 に
+	// ---- 左に 4 つの区画（2 × 2）、右に音色を選ぶ面
 	const ImGuiStyle &st = ImGui::GetStyle();
 	const ImVec2 avail = ImGui::GetContentRegionAvail();
-	const float w = (avail.x - st.ItemSpacing.x) * 0.5f;
+	const float pane_w = std::min(fs * 15.0f, avail.x * 0.4f);
+	const float shapes_w = avail.x - pane_w - st.ItemSpacing.x;
+	const float w = (shapes_w - st.ItemSpacing.x) * 0.5f;
 	const float h = (avail.y - st.ItemSpacing.y) * 0.5f;
 
+	ImGui::BeginGroup();
 	panel("vib", "ビブラート（VIB）", w, h, part, m, br, { "part.vib_rate", "part.vib_depth", "part.vib_delay" },
 	      [](int p, xg::model &mm, bridge &b, float pw, float ph) { overview::vib_cell(p, mm, b, pw, ph, false); });
 	ImGui::SameLine();
@@ -135,7 +153,14 @@ void part_shapes::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 	panel("eq", "パートの EQ", w, h, part, m, br,
 	      { "part.eq_bass_gain", "part.eq_bass_freq", "part.eq_treble_gain", "part.eq_treble_freq" },
 	      [](int p, xg::model &mm, bridge &b, float pw, float ph) { overview::eq_cell(p, mm, b, pw, ph, false); });
+	ImGui::EndGroup();
 
+	ImGui::SameLine();
+	if (ImGui::BeginChild("voicepane", ImVec2(pane_w, 0)))
+		program_pane(part, m, &ram, br);
+	ImGui::EndChild();
+
+	ImGui::PopFont();
 	ImGui::End();
 }
 

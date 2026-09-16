@@ -2039,6 +2039,12 @@ void swp30_device::write16(offs_t addr, u16 data)
 	const u32 slot = addr & 0x3f;
 	const u32 chan = (addr >> 6) & 0x3f;
 
+	if(const char *e = getenv("WTRACE")) {
+		const u32 from = u32(atoi(e));
+		if(m_meg->m_sample_counter >= from && m_meg->m_sample_counter < from + 30000)
+			fprintf(stderr, "W %u ch%02x sl%02x = %04x\n", m_meg->m_sample_counter, chan, slot, data);
+	}
+
 	// --- チャンネルごとのレジスタ（全 64ch 共通、offset にチャンネル<<6 を渡す）
 	switch(slot) {
 	case 0x00: filter_1_a_w(chan << 6, data); return;
@@ -3316,6 +3322,15 @@ void swp30_device::meg_state::lfo_step()
 		m_lfo_counter[i] = (m_lfo_counter[i] + m_lfo_increment[i]) & 0x3fffff;
 }
 
+int swp30_device::meg_state::region_of(u16 pc) const
+{
+	const u16 key = (pc / 12) << 11;
+	for(int i=0; i != 8; i++)
+		if(i == 7 || m_map[i+1] <= m_map[i] || ((m_map[i+1] & 0xf800) > key))
+			return i;
+	return 7;
+}
+
 u32 swp30_device::meg_state::resolve_address(u16 pc, s32 offset)
 {
 	u16 key = (pc / 12) << 11;
@@ -3708,6 +3723,10 @@ void swp30_device::meg_state::step()
 	// Memory access
 	switch(d.memop) {
 	case 1: {
+		// S-MU2000: 区画が無効の間（エフェクトの種類を替えている最中など）は、
+		// 遅延メモリへの書き込みを落とす（doc/upstream.md の 33）
+		if(BIT(m_swp->m_revram_enable, region_of(m_pc)))
+			break;
 		u32 address = resolve_address(m_pc, m_offset[m_pc/3] + (d.mem_use_index ? m_ram_index : 0) + (d.mem_use_index2 ? m_swp->m_meg_ram_index2 : 0) - m_sample_counter);
 		if(address != 0xffffffff)
 			// S-MU2000: リバーブ RAM も実体は素の配列。18bit ぶんで折り返す
@@ -3720,6 +3739,12 @@ void swp30_device::meg_state::step()
 		if(d.mem_table) {
 			const u32 address = (u32(m_offset[m_pc/3]) + (d.mem_use_index ? m_ram_index : 0) + (d.mem_use_index2 ? m_swp->m_meg_ram_index2 : 0) + (d.memop == 3 ? 1 : 0)) & 0x3ffff;
 			m_memr_value[m_delay_2] = revram_decode(m_swp->m_reverb_ram[address]);
+			m_memr_active[m_delay_2] = true;
+			break;
+		}
+		// 区画が無効の間は 0 が返る（書き込みと同じく doc/upstream.md の 33）
+		if(BIT(m_swp->m_revram_enable, region_of(m_pc))) {
+			m_memr_value[m_delay_2] = 0;
 			m_memr_active[m_delay_2] = true;
 			break;
 		}
@@ -3834,6 +3859,7 @@ void swp30_device::meg_state::build_ops(op *ops) const
 			if(i == 7 || m_map[i+1] <= m_map[i] || ((m_map[i+1] & 0xf800) > key)) {
 				o.addr_mask = (1 << (10+BIT(m_map[i], 8, 3))) - 1;
 				o.addr_base = BIT(m_map[i], 0, 8) << 10;
+				o.region    = u8(i);
 				break;
 			}
 	}
@@ -3999,6 +4025,14 @@ void swp30_device::meg_state::run_program(const op *ops)
 			goto mem_done;
 		}
 		if(o.memop) {
+			// S-MU2000: 区画が無効の間は、書き込みは落ち、読み出しは 0 になる（step() と同じ）
+			if(BIT(m_swp->m_revram_enable, o.region)) {
+				if(o.memop != 1) {
+					m_memr_value[d2] = 0;
+					m_memr_active[d2] = true;
+				}
+				goto mem_done;
+			}
 			u32 off = u32(m_offset[o.offset_index]) + u32(o.mem_use_index ? m_ram_index : 0) + u32(o.mem_use_index2 ? ram_index2 : 0) - sample_counter;
 			if(o.memop == 3)
 				off += 1;

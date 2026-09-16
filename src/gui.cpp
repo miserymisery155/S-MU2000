@@ -1033,6 +1033,7 @@ int main(int argc, char **argv)
 	bool open_editor = false;          // 起動したら PC エディタも出す
 	bool open_list = false;            // 起動したら一覧も出す
 	bool open_fx = false;              // 起動したらインサーションの設定の窓も出す
+	bool open_shapes = false;          // 起動したらパートの音色の窓も出す
 	int win_w = 1000, win_h = 400;   // パネルの論理寸法（1000 × 400）と同じ比
 	bool size_given = false;
 	bool lcd_only = false;
@@ -1081,6 +1082,7 @@ int main(int argc, char **argv)
 		else if (!std::strcmp(argv[i], "--editor")) open_editor = true;
 		else if (!std::strcmp(argv[i], "--list-window")) open_list = true;
 		else if (!std::strcmp(argv[i], "--fx-window")) open_fx = true;
+		else if (!std::strcmp(argv[i], "--shapes-window")) open_shapes = true;
 		else if (!std::strcmp(argv[i], "--lcd")) lcd_only = true;
 		else if (!std::strcmp(argv[i], "--fast-midi")) fast_midi = true;
 		else if (!std::strcmp(argv[i], "--shot") && i + 1 < argc) shot_path = argv[++i];
@@ -1144,6 +1146,7 @@ int main(int argc, char **argv)
 			"        [--editor]    PC エディタも開く（窓では F2 か右クリック）\n"
 			"        [--list-window] 一覧の窓も開く（窓では F3 か右クリック）\n"
 			"        [--fx-window] インサーションの設定の窓も開く（一覧でインサーションの欄をダブルクリック）\n"
+			"        [--shapes-window] パートの音色の窓も開く（一覧で VIB などの絵をダブルクリック）\n"
 			"        gui --dump-layout panel.txt   いまの配置を書き出す\n"
 			"        gui --list\n"
 			"        gui [<rom ディレクトリ> --boot] --shot 絵.png [--size 1000x400]\n");
@@ -1262,6 +1265,8 @@ int main(int argc, char **argv)
 		open_window(hwnd, g_win.fx);
 	if (open_list && !lcd_only)
 		open_window(hwnd, g_win.list);
+	if (open_shapes && !lcd_only)
+		open_window(hwnd, g_win.shapes);
 	UpdateWindow(hwnd);
 
 	// 起動は別スレッド。終わったら音を出し始める
