@@ -1700,6 +1700,17 @@ void swp30_device::lfo_block::step(swp30_device &swp)
 
 u16 swp30_device::lfo_block::get_amplitude() const
 {
+	// S-MU2000: 三角波の音量側は、音程側（tri_state、中央から上がる）と違い、一番下（効きなし）から
+	// 上がり始める。中央から始めていたころは、要素自身が音量の LFO を持つ XG の変化音色
+	// （0/21/38・0/64/44・0/69/90・0/70/7 など）の頭が実機より最大 6dB 小さかったり大きかったりした。
+	// 1/4 周期ずつ 4 通り試して、実機で 2 回ずつ録った 116 音色との差が一番小さいのがこの形
+	// （合計 325 → 273。上の 6 つは 1.6〜6.0dB → 0.0〜0.1dB。doc/todo.md）。
+	// モジュレーションホイールで掛けるトレモロは firmware が音量を書き換えるので、ここを通らない
+	if(m_type == 1) {
+		const u32 c = m_counter;
+		const u32 st = c & 0x20000 ? (~c >> 5) & 0xffe : (c >> 5) & 0xffe;
+		return (st * m_amplitude) >> 5;
+	}
 	return (m_state * m_amplitude) >> 5;
 }
 
