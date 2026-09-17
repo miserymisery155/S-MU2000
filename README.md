@@ -96,6 +96,8 @@ MIDI 経由の予備の経路もあり、両方で吸ったものが 1 バイト
 
 ## 使い方
 
+**はじめて使うなら [doc/manual.md](doc/manual.md)**（用意するもの → 作る → 鳴らす → 画面 → DAW の通しの手引き。English: [doc/manual.en.md](doc/manual.en.md)）。
+
 ```
 make
 
@@ -176,6 +178,10 @@ MIDI ファイルは窓に落とすか `--play` で流せる。
 バンドルの `Contents/Resources/roms.txt` に置き場所を 1 行書く。
 入力は実機の MIDI IN A〜D と同じ 4 本（64 パート）。Cubase のように MIDI の
 プログラムチェンジを `IUnitInfo` の音色の一覧で扱うホストでも、パートごとに音色が替わる。
+
+**音色やエフェクトの設定はプロジェクトに残り、パートの音量・フィルタ・EG・EQ やマスター EQ などは
+名前付きのパラメータとしてオートメーションで動かせる**（VST3・CLAP。画面で触った値もホストへ伝わる）。
+[doc/automation.md](doc/automation.md)。
 
 ```
 make vst3             build/S-MU2000.vst3/ にバンドルができる

@@ -1466,6 +1466,14 @@ bool swp30_device::envelope_block::active() const
 	return m_envelope_level != 0x3fff || m_envelope_mode != RELEASE;
 }
 
+int swp30_device::sounding_voices() const
+{
+	int n = 0;
+	for (const envelope_block &e : m_envelope)
+		n += e.active();
+	return n;
+}
+
 u16 swp30_device::envelope_block::level_step(s32 level, u32 sample_counter)
 {
 	// Phase is incorrect, and very weird

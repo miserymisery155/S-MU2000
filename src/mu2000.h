@@ -148,6 +148,13 @@ public:
 	}
 	// 溢れて捨てたバイト数（どの糸から読んでもよい）
 	u64 midi_dropped() const { return m_midi_dropped.load(std::memory_order_relaxed); }
+	// Bytes sitting on the wire, including the one in flight.
+	// The 31250bps throttle asks this to decide whether the line is free
+	size_t midi_queued(int port) const
+	{
+		const midi_line &m = m_midi[port == 1 ? 1 : 0];
+		return m.queue.size() + (m.bit >= 0 ? 1 : 0);
+	}
 	size_t midi_pending() const
 	{
 		size_t pending = m_usb.rx.size() + (m_usb.have ? 1 : 0);

@@ -142,8 +142,8 @@ Cubase そのものではまだ試していない。
 
 ## 目に見えるつまみ
 
-画面が無いので、ホストの汎用パネルに出るのはこの 2 本だけ。
-MIDI 用の 2096 本は隠してある。
+ホストの汎用パネルに出るのは、この 2 本と XG の値のパラメータ（下）。
+MIDI 用の 4 口 × 2096 本は隠してある。
 
 | 名前 | 中身 |
 |---|---|
@@ -152,6 +152,10 @@ MIDI 用の 2096 本は隠してある。
 
 `Status` があるのは、起動待ちの数秒と ROM が無いときの無音を
 見分ける手段が他に無いから。
+
+**XG の値のパラメータ**（パートの音量・フィルタ・EG・EQ など 64 × 19 本、マスター 27 本、インサーション 1-4 のパラメータ 4 × 16 本）もある。
+オートメーションで動かせ、プラグインの画面で触った値はホストへ伝わる。
+状態の保存（版 4 で足した XG の値の控え）と合わせて [doc/automation.md](automation.md) に書いた。
 
 ## 標本化周波数
 
@@ -221,7 +225,10 @@ MIDI ファイルを渡すと、VST3 の経路を通して WAV に書き出す�
 build/vst3probe.exe build/S-MU2000.vst3/Contents/x86_64-win/S-MU2000.vst3
 build/vst3probe.exe <上の DLL> song.mid out.wav --rate 48000 --block 128
 build/vst3probe.exe <上の DLL> --torture
+build/vst3probe.exe <上の DLL> --automation
 ```
+
+`--automation` は XG の値のパラメータと状態の保存を試す（[doc/automation.md](automation.md)）。
 
 MIDI ファイルの口（`FF 21`）はそのままバスの番号として渡す。`--one-bus` を
 付けると全部 A のバスに流す（B が効いているかを比べる用）。`port_b` の曲で

@@ -6,6 +6,7 @@
 #include "bootcache.h"
 #include "nvram.h"
 #include "smartmedia.h"
+#include "ui/xg_state.h"
 #include "ui/xg_ui.h"
 
 #include "compat/paths.h"
@@ -17,8 +18,11 @@
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <mutex>
+#include <thread>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -374,6 +378,19 @@ void engine::boot()
 		return;
 	}
 
+	// Run past midi_ready until the firmware settles: at midi_ready the LCD
+	// still shows the mid-boot transient, and that frame is what the snapshot
+	// keeps. A host that never renders would show the restored transient
+	// forever, so only save once the steady screen is up
+	for (int64_t j = 0; j < int64_t(2.0 * NATIVE_RATE); j++) {
+		if (!(j & 4095) && m_abort.load(std::memory_order_relaxed)) {
+			delete mu;
+			return;
+		}
+		s32 l = 0, r = 0;
+		mu->run_sample(l, r);
+	}
+
 	const double wall = std::chrono::duration<double>(
 	    std::chrono::steady_clock::now() - t0).count();
 	logf("起動: 音 %.2f 秒ぶん / 実時間 %.2f 秒", double(i) / NATIVE_RATE, wall);
@@ -523,6 +540,28 @@ void engine::push_input(const float *in_l, const float *in_r, int n)
 	}
 }
 
+// Holds what pump_out() hands over. On overflow the oldest byte goes
+void engine::tx_push(uint8_t v)
+{
+	const int next = (m_tx_w + 1) & TX_MASK;
+	if (next == m_tx_r)
+		m_tx_r = (m_tx_r + 1) & TX_MASK;
+	m_tx[m_tx_w] = v;
+	m_tx_w = next;
+}
+
+size_t engine::midi_out(uint8_t *dst, size_t max)
+{
+	if (!dst || !max)
+		return 0;
+	size_t n = 0;
+	while (n < max && m_tx_r != m_tx_w) {
+		dst[n++] = m_tx[m_tx_r];
+		m_tx_r = (m_tx_r + 1) & TX_MASK;
+	}
+	return n;
+}
+
 void engine::fill(float *left, float *right, int n, const float *in_l, const float *in_r)
 {
 	if (n <= 0)
@@ -553,7 +592,7 @@ void engine::fill(float *left, float *right, int n, const float *in_l, const flo
 	if (m_direct) {
 		for (int i = 0; i < n; i++)
 			one_sample(left[i], right[i]);
-		m_drv.pump_out(*m_mu, m_bridge);
+		m_drv.pump_out(*m_mu, m_bridge, [this](u8 v) { tx_push(v); });
 		m_drv.publish(*m_mu, m_bridge, u32(n), u32(NATIVE_RATE), true, nullptr);
 		return;
 	}
@@ -590,7 +629,7 @@ void engine::fill(float *left, float *right, int n, const float *in_l, const flo
 	}
 
 	// firmware が MIDI OUT から送り出したもの（画面の問い合わせの返事）
-	m_drv.pump_out(*m_mu, m_bridge);
+	m_drv.pump_out(*m_mu, m_bridge, [this](u8 v) { tx_push(v); });
 	m_drv.publish(*m_mu, m_bridge, u32(n), u32(NATIVE_RATE), true, nullptr);
 
 	// 桁が落ちる前に原点を戻す。RING の倍数だけずらせば環の並びは変わらない
@@ -609,13 +648,32 @@ void engine::fill(float *left, float *right, int n, const float *in_l, const flo
 
 void engine::apply_deferred_state()
 {
-	if (m_deferred_state.empty() || state() != status::ready || !m_mu)
+	if (!m_deferred || state() != status::ready || !m_mu)
 		return;
-	std::string err;
-	if (!m_mu->load_state(m_deferred_state.data(), m_deferred_state.size(), err))
-		log_line(("状態を読み戻せない: " + err).c_str());
+	restore(m_deferred_state.data(), m_deferred_state.size(), m_deferred_setup);
+	m_deferred = false;
 	m_deferred_state.clear();
 	m_deferred_state.shrink_to_fit();
+	m_deferred_setup.clear();
+	m_deferred_setup.shrink_to_fit();
+}
+
+bool engine::restore(const uint8_t *p, size_t n, const std::vector<uint8_t> &setup)
+{
+	std::string err = "機械まるごとの状態が入っていない";
+	if (p && n && m_mu->load_state(p, n, err))
+		return true;
+	if (p && n)
+		log_line(("状態を読み戻せない: " + err).c_str());
+	if (setup.empty())
+		return false;
+	// XG の値の控えを MIDI IN A に流す。音色とエフェクトの設定はこれで戻る
+	char line[160];
+	std::snprintf(line, sizeof(line), "代わりに XG の値の控え（%zu バイト）を流して戻す", setup.size());
+	log_line(line);
+	for (uint8_t b : setup)
+		m_drv.watch(b, m_mu->midi_in(b, 0));
+	return true;
 }
 
 std::vector<uint8_t> engine::save_state()
@@ -629,23 +687,69 @@ std::vector<uint8_t> engine::save_state()
 	return m_mu->save_state();
 }
 
-bool engine::load_state(const uint8_t *p, size_t n)
+std::vector<uint8_t> engine::save_xg_setup()
 {
-	if (!p || !n)
+	std::lock_guard<std::mutex> lock(m_machine);
+	if (state() != status::ready || !m_mu)
+		return m_deferred_setup;
+	apply_deferred_state();
+	// 写しは大きい（パート 64 × 256 バイト）ので、この糸の積みには置かない
+	std::unique_ptr<ui::xg_snapshot> ram(new ui::xg_snapshot);
+	ui::driver::copy_xg(*m_mu, *ram);
+	return ui::setup_messages(*ram);
+}
+
+bool engine::load_state(const uint8_t *p, size_t n, const uint8_t *setup, size_t setup_n)
+{
+	if ((!p || !n) && (!setup || !setup_n))
 		return false;
 	std::lock_guard<std::mutex> lock(m_machine);
 	if (state() == status::failed)
 		return false;
+	const std::vector<uint8_t> fallback = setup && setup_n ? std::vector<uint8_t>(setup, setup + setup_n)
+	                                                       : std::vector<uint8_t>();
 	if (state() != status::ready || !m_mu) {
-		m_deferred_state.assign(p, p + n);
+		m_deferred_state.assign(p, p + (p ? n : 0));
+		m_deferred_setup = fallback;
+		m_deferred = true;
 		return true;
 	}
+	m_deferred = false;
 	m_deferred_state.clear();
-	std::string err;
-	const bool ok = m_mu->load_state(p, n, err);
-	if (!ok)
-		log_line(("状態を読み戻せない: " + err).c_str());
-	return ok;
+	m_deferred_setup.clear();
+	return restore(p, n, fallback);
+}
+
+
+// ---- 画面で値を触ったことを、プラグインの口へ知らせる
+
+void engine::set_edit_handlers(edit_fn edit, idle_fn idle, raw_fn raw)
+{
+	std::lock_guard<std::mutex> lock(m_hook_mutex);
+	m_on_edit = std::move(edit);
+	m_on_idle = std::move(idle);
+	m_on_raw = std::move(raw);
+}
+
+void engine::notify_edit_raw(u32 addr, int size, int value)
+{
+	std::lock_guard<std::mutex> lock(m_hook_mutex);
+	if (m_on_raw)
+		m_on_raw(addr, size, value);
+}
+
+void engine::notify_edit(const xg::param &p, int part, int value)
+{
+	std::lock_guard<std::mutex> lock(m_hook_mutex);
+	if (m_on_edit)
+		m_on_edit(p, part, value);
+}
+
+void engine::notify_idle(bool closing)
+{
+	std::lock_guard<std::mutex> lock(m_hook_mutex);
+	if (m_on_idle)
+		m_on_idle(closing);
 }
 
 

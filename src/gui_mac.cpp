@@ -4,7 +4,7 @@
 //
 //   gui <rom directory> [--midi n] [--midi-b n] [--midi-c n] [--midi-d n]
 //       [--midiout n] [--midiout-b n] [--midiout-mu n]
-//       [--latency ms] [--exclusive] [--audio <name>] [--factory] [--host-midi]
+//       [--latency ms] [--exclusive] [--audio <name>] [--factory] [--host-midi] [--fast-midi]
 //   gui --list                             list the MIDI ports and audio devices
 //   gui <rom directory> --shot image.png   write the picture without a window
 //
@@ -43,8 +43,10 @@
 #include "ui/midi_out.h"
 #include "ui/overview.h"
 #include "ui/panel.h"
+#include "ui/master_editor.h"
 #include "ui/part_shapes.h"
 #include "ui/pc_editor.h"
+#include "ui/pc_host.h"
 #include "ui/pc_window_mac.h"
 #include "ui/player.h"
 #include "ui/png.h"
@@ -309,6 +311,7 @@ public:
 	ui::pc_window list{ std::make_unique<ui::overview>() };   // overview (F3 or right-click)
 	ui::pc_window fx{ std::make_unique<ui::fx_editor>() };    // insertion settings (double-click in the overview)
 	ui::pc_window shapes{ std::make_unique<ui::part_shapes>() };  // part voice (double-click a VIB/FILTER/EG/EQ cell in the overview)
+	ui::pc_window master{ std::make_unique<ui::master_editor>() }; // master (double-click the MASTER row in the overview)
 
 	std::string layout_path;
 
@@ -319,17 +322,12 @@ public:
 		// The window's timer is where this has to happen: it touches the bridge,
 		// so it must not run on the audio thread (same as gui.cpp's WM_TIMER)
 		panel.tick(br);
+		// the CPU load for the PC windows (the overview's top strip)
+		if (out && out->produced())
+			br.set_cpu(float(out->cpu_percent()));
 		// the PC editor windows, where the Windows side has its WM_TIMER
-		pc.frame(panel.xg(), panel.ram(), br);
-		list.frame(panel.xg(), panel.ram(), br);
-		fx.frame(panel.xg(), panel.ram(), br);
-		shapes.frame(panel.xg(), panel.ram(), br);
-		// a double-click on an insertion row in the overview asks for this window
-		if (ui::xgui::take_fx_request())
-			open_editor_window(fx);
-		// a double-click on a VIB/FILTER/EG/EQ cell in the overview asks for the part voice
-		if (ui::xgui::take_part_request())
-			open_editor_window(shapes);
+		ui::pc_frame_all(list, pc, fx, shapes, master, panel.xg(), panel.ram(), br,
+		                 [&](ui::pc_window &w) { open_editor_window(w); });
 		card_tick();
 		report_drops();
 
@@ -337,11 +335,12 @@ public:
 		br.read(s);
 		const u64 pressed = br.buttons();
 
-		char status[256] = {};
+		char status[320] = {};
 		if (out && out->produced())
 			std::snprintf(status, sizeof(status),
-			              "CPU %.0f%%  最悪 %.1f ms  枯渇 %llu   IN: %s   OUT: %s"
+			              "発音 %d/128  CPU %.0f%%  最悪 %.1f ms  枯渇 %llu   IN: %s   OUT: %s"
 			              "   （MIDI IN A のジャックか右クリックで口を選ぶ）",
+			              s.voices_master + s.voices_slave,
 			              out->cpu_percent(), out->worst_ms(),
 			              (unsigned long long)out->starved(),
 			              in_name[0].empty() ? "なし" : in_name[0].c_str(),
@@ -1036,6 +1035,7 @@ int main(int argc, char **argv)
 	// Start as the machine does with HOST SELECT = USB, which is what makes ports
 	// C and D usable. --host-midi turns it off (the DIN ports A and B only)
 	bool usb_host = true;
+	bool fast_midi = false;            // skip the 31250bps serial pacing
 	int mout_dev = -2;
 	int moutb_dev = -2;
 	int moutmu_dev = -2;               // the machine's own MIDI OUT
@@ -1086,6 +1086,7 @@ int main(int argc, char **argv)
 		else if (!std::strcmp(argv[i], "--midiout") && i + 1 < argc) mout_dev = std::atoi(argv[++i]);
 		else if (!std::strcmp(argv[i], "--midiout-b") && i + 1 < argc) moutb_dev = std::atoi(argv[++i]);
 		else if (!std::strcmp(argv[i], "--midiout-mu") && i + 1 < argc) moutmu_dev = std::atoi(argv[++i]);
+		else if (!std::strcmp(argv[i], "--fast-midi")) fast_midi = true;
 		else if (!std::strcmp(argv[i], "--nomidi")) {
 			// Nothing is opened and nothing is remembered: this is for tests,
 			// which must leave the real settings file the way they found it.
@@ -1152,7 +1153,7 @@ int main(int argc, char **argv)
 		std::fprintf(stderr,
 			"使い方: gui <rom ディレクトリ> [--midi 番号] [--midi-b 番号] [--midi-c 番号] [--midi-d 番号]"
 			" [--midiout 番号] [--midiout-b 番号] [--midiout-mu 番号]"
-			" [--latency ミリ秒] [--exclusive] [--layout panel.txt] [--play 曲.mid] [--host-midi]\n"
+			" [--latency ミリ秒] [--exclusive] [--layout panel.txt] [--play 曲.mid] [--host-midi] [--fast-midi]\n"
 			"        [--factory]   覚えている設定を捨てて工場出荷状態で起動する\n"
 			"        [--editor]    PC エディタも開く（窓では F2 か右クリック）\n"
 			"        [--list-window] 一覧の窓も開く（窓では F3 か右クリック）\n"
@@ -1164,6 +1165,7 @@ int main(int argc, char **argv)
 	}
 
 	static ui::engine eng(br, midi_ports[0]);
+	eng.mu.set_fast_midi(fast_midi);
 	for (int p = 1; p < mu2000::MIDI_PORTS; p++)
 		eng.midi_p[p] = &midi_ports[p];
 	eng.mout_b = &mout_b;
@@ -1375,10 +1377,7 @@ int main(int argc, char **argv)
 	// tell the editor windows we are closing (unmute the overview, restore its
 	// receive channels, ...). The audio thread drains what we sent, so pause
 	// a moment before stopping it
-	gui.list.shutdown(br);
-	gui.pc.shutdown(br);
-	gui.fx.shutdown(br);
-	gui.shapes.shutdown(br);
+	ui::pc_shutdown_all(gui.list, gui.pc, gui.fx, gui.shapes, gui.master, br);
 	std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
 	out.stop();
