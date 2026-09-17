@@ -30,6 +30,7 @@ jobs:
             mingw-w64-ucrt-x86_64-gcc
             make
             python
+            zip
 
       - name: Build all targets (including VST3 and CLAP)
         run: make -j$(nproc) all
@@ -38,7 +39,7 @@ jobs:
         run: |
           mkdir -p dist
           cd build
-          7z a -tzip ../dist/S-MU2000-windows.zip \
+          zip -r ../dist/S-MU2000-windows.zip \
             *.exe \
             S-MU2000.vst3 \
             S-MU2000.clap
@@ -65,8 +66,8 @@ jobs:
       - name: Build CLAP
         run: make -j$(sysctl -n hw.ncpu) clap
 
-      - name: Build AUv3 (ad-hoc signed)
-        run: make -j$(sysctl -n hw.ncpu) auv3 CODESIGN_ID=-
+      - name: Build AUv3 (ad-hoc signed, no ROMs baked in)
+        run: make -j$(sysctl -n hw.ncpu) auv3 CODESIGN_ID=- AUV3_ROMS=none
 
       - name: Zip macOS build
         run: |
