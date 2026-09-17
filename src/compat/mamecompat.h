@@ -336,7 +336,10 @@ public:
 	// サブデバイスの生成。こちらは実体を直に作るので中身は使わない
 	virtual void device_add_mconfig(machine_config &) {}
 
-	// MAME の timer_alloc(FUNC(cb), this)。呼び出し側の running_machine に預ける
+	// MAME の timer_alloc(FUNC(cb), this)。呼び出し側の running_machine に預ける。
+	// 定義は running_machine の完成後（このファイル下部）：machine().make_timer は
+	// 非依存式なので Clang はクラス定義時点で running_machine の完成を要求する
+	// （GCC は遅延検査）。MSVC/GCC 動作は不変。
 	//
 	// The body is written below, once running_machine is a complete type. Putting
 	// it here makes **Clang reject it as member access into an incomplete type**:
@@ -715,8 +718,8 @@ private:
 	std::vector<std::unique_ptr<emu_timer>> m_timers;
 };
 
-// device_t::timer_alloc body, now that running_machine is a complete type.
-// MSYS2's GCC accepts this inside the class definition; Clang does not (see above).
+// device_t::timer_alloc の定義（宣言は device_t 内、上のコメント参照）。
+// running_machine が完成したここで初めて machine().make_timer が正当になる。
 template <typename T, typename U>
 inline emu_timer *device_t::timer_alloc(void (T::*cb)(s32), const char *, U *obj)
 {

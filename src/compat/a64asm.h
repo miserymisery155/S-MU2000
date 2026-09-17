@@ -22,6 +22,13 @@
 #include <cstddef>
 #include <vector>
 
+#ifdef _MSC_VER
+// MSVC で x86 ビルドするとこのヘッダも通る（verify.cpp が自テスト用に常時 include する）。
+// __builtin_popcount は GCC/Clang 専用なので __popcnt で受ける
+#include <intrin.h>
+#define __builtin_popcount(x) __popcnt(x)
+#endif
+
 namespace a64 {
 
 // Architectural register numbers. The JIT pins block state to x19-x22, which

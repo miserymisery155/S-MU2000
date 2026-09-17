@@ -88,6 +88,8 @@ enum : int {
 	// The PC editor windows
 	ID_PC_EDITOR = 5201,
 	ID_OVERVIEW = 5202,
+	// The output, picked on the PHONES jack: digital (as S/PDIF) or analogue (DC removed)
+	ID_OUTPUT_DIGITAL = 5300, ID_OUTPUT_ANALOG = 5301,
 };
 
 // Checked at compile time, because the failure is silent: a menu id that lands
@@ -103,7 +105,8 @@ static_assert([] {
 	                        ID_AIN_NONE, ID_CARD_NEW16, ID_CARD_NEW32, ID_CARD_NEW64,
 	                        ID_CARD_NEW128, ID_CARD_OPEN, ID_CARD_EJECT,
 	                        ID_PLAY_FILE, ID_STOP_FILE, ID_FACTORY,
-	                        ID_PORTS34_FOLD, ID_PORTS34_DROP, ID_PC_EDITOR, ID_OVERVIEW };
+	                        ID_PORTS34_FOLD, ID_PORTS34_DROP, ID_PC_EDITOR, ID_OVERVIEW,
+	                        ID_OUTPUT_DIGITAL, ID_OUTPUT_ANALOG };
 	for (int base : bases) {
 		for (int id : singles)
 			if (id >= base && id < base + 256)
@@ -147,6 +150,9 @@ struct port_names {
 	// Ports 3 and 4 of a MIDI file: true folds them onto A and B, false drops
 	// them. Same key as gui.cpp's ("ports34=fold" / "ports34=drop")
 	bool        fold34 = true;
+	// The output: false = digital (as S/PDIF), true = analogue (DC removed, src/analog_out.h).
+	// Same key as gui.cpp's ("output=digital" / "output=analog")
+	bool        analog = false;
 };
 
 port_names load_settings()
@@ -177,6 +183,7 @@ port_names load_settings()
 		if (key == "audio_in")    n.audio_in = val;
 		if (key == "smartmedia")  n.card  = val;
 		if (key == "ports34")     n.fold34 = val != "drop";
+		if (key == "output")      n.analog = val == "analog";
 		if (key == "volume" && !val.empty())
 			n.volume = std::clamp(float(std::atof(val.c_str())), 0.0f, 1.0f);
 	}
@@ -201,6 +208,7 @@ void save_settings(const port_names &n)
 	std::fprintf(f, "audio_in=%s\n",    n.audio_in.c_str());
 	std::fprintf(f, "smartmedia=%s\n",  n.card.c_str());
 	std::fprintf(f, "ports34=%s\n",     n.fold34 ? "fold" : "drop");
+	std::fprintf(f, "output=%s\n",      n.analog ? "analog" : "digital");
 	// The panel's VOLUME knob. On the real machine it is the analogue one behind
 	// the DAC, so the firmware's RAM does not hold it and it is kept here
 	std::fprintf(f, "volume=%.3f\n", n.volume);
@@ -365,7 +373,7 @@ public:
 
 		// The jack and the card slot are pressed rather than clicked: they
 		// open a menu instead of moving a panel control
-		if (panel.on_midi_jack(x, y) || panel.on_card_slot(x, y))
+		if (panel.on_midi_jack(x, y) || panel.on_card_slot(x, y) || panel.on_phones(x, y))
 			return true;
 
 		m_pressed = true;
@@ -421,7 +429,7 @@ public:
 
 	bool hand_cursor(int x, int y) override
 	{
-		return panel.on_midi_jack(x, y) || panel.on_card_slot(x, y);
+		return panel.on_midi_jack(x, y) || panel.on_card_slot(x, y) || panel.on_phones(x, y);
 	}
 
 	std::vector<ui::menu_group> context_menu(int x, int y) override
@@ -463,6 +471,21 @@ public:
 			const bool fold = play.fold_extra_ports();
 			g.items.push_back(item("口 3・4 を A・B に重ねて鳴らす", ID_PORTS34_FOLD, fold, true));
 			g.items.push_back(item("口 3・4 は鳴らさない", ID_PORTS34_DROP, !fold, true));
+			groups.push_back(g);
+			return groups;
+		}
+
+		// The PHONES jack is about the output, as in gui.cpp. Digital is what S/PDIF
+		// carries, DPCM DC included; analogue removes the DC (src/analog_out.h)
+		if (panel.on_phones(x, y)) {
+			const bool analog = eng && eng->analog.load();
+			ui::menu_group g;
+			g.items.push_back(item("音の出口", 0, false, false));
+			ui::menu_item sep;
+			sep.separator = true;
+			g.items.push_back(sep);
+			g.items.push_back(item("デジタル（S/PDIF。DPCM の直流も残る）", ID_OUTPUT_DIGITAL, !analog, true));
+			g.items.push_back(item("アナログ（LINE OUT・PHONES。直流を切る）", ID_OUTPUT_ANALOG, analog, true));
 			groups.push_back(g);
 			return groups;
 		}
@@ -529,6 +552,12 @@ public:
 		else if (id == ID_PC_EDITOR)                                  open_editor_window(pc);
 		else if (id == ID_OVERVIEW)                                   open_editor_window(list);
 		else if (id == ID_FACTORY)                                    factory_reset();
+		else if ((id == ID_OUTPUT_DIGITAL || id == ID_OUTPUT_ANALOG) && eng) {
+			eng->analog.store(id == ID_OUTPUT_ANALOG);
+			std::printf("音の出口: %s\n", id == ID_OUTPUT_ANALOG ? "アナログ（直流を切る）" : "デジタル");
+			std::fflush(stdout);
+			remember();
+		}
 		else if (id == ID_PLAY_FILE) {
 			const std::string path = ui::open_midi_file_panel();
 			if (!path.empty())
@@ -898,6 +927,7 @@ public:
 		n.card     = card_path;
 		n.volume   = br.gain();
 		n.fold34   = play.fold_extra_ports();
+		n.analog   = eng && eng->analog.load();
 		save_settings(n);
 	}
 
@@ -1224,6 +1254,10 @@ int main(int argc, char **argv)
 	{
 		const port_names want = load_settings();
 		br.set_gain(want.volume);
+		// set before set_fold34, which writes the settings back through remember()
+		eng.analog.store(want.analog);
+		if (want.analog)
+			std::printf("音の出口: アナログ（直流を切る）\n");
 		gui.set_fold34(want.fold34);
 		// --audio wins; otherwise the port that was opened last time
 		gui.audio_name = audio_dev ? std::string(audio_dev) : want.audio;

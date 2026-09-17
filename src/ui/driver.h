@@ -39,8 +39,7 @@ public:
 	{
 		u8 b;
 		while (br.take_midi(b)) {
-			mu.midi_in(b);
-			watch(b, 0);
+			watch(b, mu.midi_in(b));
 			echo(b);
 		}
 		// パラメータの層の問い合わせ。外へは流さない
@@ -48,10 +47,8 @@ public:
 			mu.midi_in(b);
 		// 画面から口 B・C・D へ（一覧の鍵盤）。外へは流さない
 		for (int port = 1; port < mu2000::MIDI_PORTS; port++)
-			while (br.take_midi_port(port, b)) {
-				mu.midi_in(b, port);
-				watch(b, port);
-			}
+			while (br.take_midi_port(port, b))
+				watch(b, mu.midi_in(b, port));
 	}
 
 	void pump_midi(mu2000 &mu, bridge &br)

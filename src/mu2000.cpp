@@ -610,6 +610,11 @@ void mu2000::reset()
 	// 液晶に「HOST Is Offline!」を出す。エミュでは PC が常に繋がっているので、起動時に 1 回送る
 	m_usb.cmd.clear();
 	m_usb.cur_cmd = false;
+	// ケーブルメッセージで回した口は、電源を入れ直せば元に戻る
+	for (int p = 0; p < MIDI_PORTS; p++) {
+		m_cable[p] = p;
+		m_cable_wait[p] = false;
+	}
 	if (m_usb_host)
 		for (u8 b : { 0xf4, 0x03, 0x01, 0x01, 0x01 })
 			m_usb.cmd.push_back(b);

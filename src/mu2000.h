@@ -104,17 +104,47 @@ public:
 	// 1 バイト送る。既定では実機と同じ 31250bps の直列で流れる。
 	// fast MIDI では firmware が前のバイトを読むと、待たずに次を渡す。
 	// 仮想の口で MIDI の輪ができると際限なく積まれるので、上限を超えたら捨てる。
-	static constexpr size_t MIDI_QUEUE_LIMIT = 65536;
-	void midi_in(u8 byte, int port = 0)
+	//
+	// 上限は**実際の演奏では届かない大きさ**にしておく。firmware がさばけるのは 1 秒に 3kB ほど
+	// （ピッチベンドなら 1,040 個）で、DAW でホイールを回すとそれを超えて溜まる。前は 65,536 バイトで
+	// 捨てていて、16 チャンネルにブロックごとのベンドを 15 秒流す（124kB）と 10,634 バイト捨て、
+	// その中のノートオフが消えて音が鳴りっぱなしになった（issue #18）。同じ MIDI を実機に USB で
+	// 送ると、何も失わずに約 40 秒遅れて全部さばき、後の音も普通に鳴って止まる（2026-09-17）。
+	// 4MB はさばく速さで 20 分以上ぶん。輪ができても gui の THRU は流量を絞っている（midi_guard.h）
+	static constexpr size_t MIDI_QUEUE_LIMIT = size_t(1) << 22;
+	//
+	// ケーブルメッセージ `F5 nn`（nn = 1-4）を受けると、その入口から後に来るバイトを口 nn へ回す。
+	// MU80/MU100/MU128 の TO HOST と S-YXG50 の流儀で、1 本の入口から 64 パート全部に届く（issue #24）。
+	// `F5 nn` 自体は firmware に渡さない。実機の MU2000 は USB で PC から送った F5 を無視する
+	// （2026-09-17 に実機で確かめた）が、そのまま渡すと firmware の USB の受け口（0x042932）が
+	// 口の切り替えと読み、こちらが挟む `F5 <口>` と食い違う。範囲外の nn は読み捨てて口を変えない。
+	// 戻り値はバイトを回した口。`F5 nn` を読んだときは -1
+	int midi_in(u8 byte, int port = 0)
 	{
-		if (port >= MIDI_DIN_PORTS || m_usb_host) {
-			usb_midi_in(byte, port);
-			return;
+		if (port < 0 || port >= MIDI_PORTS)
+			port = 0;
+		if (byte < 0xf8) {                     // リアルタイムは F5 と nn の間に挟まってもよい
+			if (m_cable_wait[port]) {
+				m_cable_wait[port] = false;
+				if (!(byte & 0x80)) {
+					if (byte >= 1 && byte <= MIDI_PORTS)
+						m_cable[port] = byte - 1;
+					return -1;
+				}
+			}
+			if (byte == 0xf5) {
+				m_cable_wait[port] = true;
+				return -1;
+			}
 		}
-		if (m_midi[port].queue.size() < MIDI_QUEUE_LIMIT)
-			m_midi[port].queue.push_back(byte);
+		const int to = m_cable[port];
+		if (to >= MIDI_DIN_PORTS || m_usb_host)
+			usb_midi_in(byte, to);
+		else if (m_midi[to].queue.size() < MIDI_QUEUE_LIMIT)
+			m_midi[to].queue.push_back(byte);
 		else
 			m_midi_dropped.fetch_add(1, std::memory_order_relaxed);
+		return to;
 	}
 	// 溢れて捨てたバイト数（どの糸から読んでもよい）
 	u64 midi_dropped() const { return m_midi_dropped.load(std::memory_order_relaxed); }
@@ -380,6 +410,9 @@ private:
 		int  out_port = -1;     // 取り出し側が見ている口
 	};
 	void usb_midi_in(u8 byte, int port);
+	// ケーブルメッセージ（midi_in の説明）。入口ごとに、いま回している口と、F5 の後の番号待ち
+	std::array<int, MIDI_PORTS>  m_cable = { 0, 1, 2, 3 };
+	std::array<bool, MIDI_PORTS> m_cable_wait = {};
 	void usb_step(u64 now);
 	u8   usb_r(offs_t a);
 	void usb_w(offs_t a, u8 v);

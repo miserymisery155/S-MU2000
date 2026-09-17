@@ -44,6 +44,7 @@ inline int midi_length(uint8_t status)
 	case 0xf0:
 		switch (status) {
 		case 0xf1: case 0xf3: return 2;
+		case 0xf5:            return 2;   // ケーブルメッセージ（口の切り替え、mu2000::midi_in）
 		case 0xf2:            return 3;
 		default:              return 1;
 		}

@@ -164,7 +164,8 @@ void load_settings(std::string *in_name,
                    std::string &out_name, std::string &out_name_b,
                    std::string &audio_name, float *volume = nullptr,
                    std::string *out_name_mu = nullptr, bool *fold_ports34 = nullptr,
-                   std::string *ain_name = nullptr, std::string *card_path = nullptr)
+                   std::string *ain_name = nullptr, std::string *card_path = nullptr,
+                   bool *analog = nullptr)
 {
 	const std::string path = settings_path();
 	if (path.empty())
@@ -191,6 +192,7 @@ void load_settings(std::string *in_name,
 		if (key == "audio_in" && ain_name) *ain_name = val;
 		if (key == "smartmedia" && card_path) *card_path = val;
 		if (key == "ports34" && fold_ports34) *fold_ports34 = val != "drop";
+		if (key == "output" && analog) *analog = val == "analog";
 		if (key == "volume" && volume && !val.empty())
 			*volume = std::clamp(float(std::atof(val.c_str())), 0.0f, 1.0f);
 	}
@@ -223,6 +225,9 @@ void save_settings()
 	if (g_win.br)
 		std::fprintf(f, "volume=%.3f\n", g_win.br->gain());
 	std::fprintf(f, "ports34=%s\n", g_win.play_file.fold_extra_ports() ? "fold" : "drop");
+	// 音の出口。digital（S/PDIF と同じ）か analog（直流を切る。src/analog_out.h）
+	if (g_win.eng)
+		std::fprintf(f, "output=%s\n", g_win.eng->analog.load() ? "analog" : "digital");
 	std::fclose(f);
 }
 
@@ -256,6 +261,7 @@ enum : UINT {
 	ID_FACTORY = 5200,
 	ID_PC_EDITOR = 5201,
 	ID_OVERVIEW = 5202,
+	ID_OUTPUT_DIGITAL = 5300, ID_OUTPUT_ANALOG = 5301,
 };
 
 // 品書きは **W 版**で作る。ソースは UTF-8 なので、A 版に渡すと
@@ -364,6 +370,22 @@ void show_port_menu(HWND hwnd, POINT screen)
 	TrackPopupMenu(top, TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON,
 	               screen.x, screen.y, 0, hwnd, nullptr);
 	DestroyMenu(top);
+}
+
+// ---- PHONES のジャック。音の出口を選ぶ
+//
+// デジタルは S/PDIF の出口と同じで、一部の DPCM のサンプルが持つ直流もそのまま出る（実機で確かめた）。
+// アナログは LINE OUT・PHONES のつもりで直流を切る（src/analog_out.h。切れる周波数は仮）
+void show_output_menu(HWND hwnd, POINT screen)
+{
+	HMENU m = CreatePopupMenu();
+	const bool analog = g_win.eng && g_win.eng->analog.load();
+	add_item(m, MF_STRING | MF_GRAYED, 0, "音の出口");
+	AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+	add_item(m, MF_STRING | (analog ? 0 : MF_CHECKED), ID_OUTPUT_DIGITAL, "デジタル（S/PDIF。DPCM の直流も残る）");
+	add_item(m, MF_STRING | (analog ? MF_CHECKED : 0), ID_OUTPUT_ANALOG, "アナログ（LINE OUT・PHONES。直流を切る）");
+	TrackPopupMenu(m, TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON, screen.x, screen.y, 0, hwnd, nullptr);
+	DestroyMenu(m);
 }
 
 // ---- カードの差し込み口。SmartMedia を差す・MIDI ファイルを流す
@@ -809,6 +831,13 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 			show_ain_menu(hwnd, pt);
 			return 0;
 		}
+		// PHONES のジャックは音の出口
+		if (g_win.panel.on_phones(mx, my)) {
+			POINT pt{ mx, my };
+			ClientToScreen(hwnd, &pt);
+			show_output_menu(hwnd, pt);
+			return 0;
+		}
 		// カードの差し込み口は MIDI ファイル
 		if (g_win.panel.on_card_slot(mx, my)) {
 			POINT pt{ mx, my };
@@ -830,6 +859,8 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 		ClientToScreen(hwnd, &pt);
 		if (g_win.panel.on_card_slot(mx, my))
 			show_card_menu(hwnd, pt);
+		else if (g_win.panel.on_phones(mx, my))
+			show_output_menu(hwnd, pt);
 		else
 			show_port_menu(hwnd, pt);
 		return 0;
@@ -869,6 +900,12 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 		else if (id == ID_FACTORY) choose_factory_reset(hwnd);
 		else if (id == ID_PC_EDITOR) open_window(hwnd, g_win.pc);
 		else if (id == ID_OVERVIEW) open_window(hwnd, g_win.list);
+		else if ((id == ID_OUTPUT_DIGITAL || id == ID_OUTPUT_ANALOG) && g_win.eng) {
+			g_win.eng->analog.store(id == ID_OUTPUT_ANALOG);
+			std::printf("音の出口: %s\n", id == ID_OUTPUT_ANALOG ? "アナログ（直流を切る）" : "デジタル");
+			std::fflush(stdout);
+			save_settings();
+		}
 		if (!g_win.last_error.empty()) {
 			const std::wstring w = ui::to_wide(g_win.last_error);
 			MessageBoxW(hwnd, w.c_str(), L"S-MU2000", MB_OK | MB_ICONWARNING);
@@ -886,6 +923,7 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 		if (LOWORD(lp) == HTCLIENT &&
 		    (g_win.panel.on_midi_jack(pt.x, pt.y) ||
 		     g_win.panel.on_ad_input(pt.x, pt.y) ||
+		     g_win.panel.on_phones(pt.x, pt.y) ||
 		     g_win.panel.on_card_slot(pt.x, pt.y))) {
 			SetCursor(LoadCursor(nullptr, IDC_HAND));
 			return TRUE;
@@ -1253,8 +1291,12 @@ int main(int argc, char **argv)
 		std::string ins[mu2000::MIDI_PORTS], b, c, d;
 		float volume = 1.0f;
 		bool fold34 = true;
-		load_settings(ins, b, c, d, &volume, nullptr, &fold34);
+		bool analog = false;
+		load_settings(ins, b, c, d, &volume, nullptr, &fold34, nullptr, nullptr, &analog);
 		br.set_gain(volume);
+		eng.analog.store(analog);
+		if (analog)
+			std::printf("音の出口: アナログ（直流を切る）\n");
 		g_win.play_file.set_fold_extra_ports(fold34);
 
 		// **既定は USB の口**（実機を PC に繋ぐときと同じ姿）。口 C・D は実機では
@@ -1440,10 +1482,12 @@ int main(int argc, char **argv)
 	mout_b.close();
 	ain.stop();
 
-	if (out.produced())
+	// 音を出さずに終わったとき（起動に失敗した、音声デバイスを開けなかった）は、どちらも出さない
+	if (out.produced()) {
 		std::printf("CPU %.1f%%、1 回の最悪 %.2f ms、間に合わなかった %llu 回\n",
 		            out.cpu_percent(), out.worst_ms(),
 		            (unsigned long long)out.late());
 		std::printf("%s\n%s\n", out.format_line().c_str(), out.latency_line().c_str());
+	}
 	return 0;
 }

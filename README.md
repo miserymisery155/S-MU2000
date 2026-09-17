@@ -131,6 +131,8 @@ build/rec.exe    <番号> <wav> <秒> [--send <番号> <MIDI>]  実機の音を�
 入口は **A〜D の 4 口**（パート 1-16・17-32・33-48・49-64）。実機の HOST SELECT を
 USB にしたときと同じ形で起動するので、実機では USB でしか使えない C・D も使える。
 `--host-midi` を付けると DIN の口（A・B の 32 パート）で起動する。THRU の出口も口ごとに選べる。
+1 本の入口からでも、ケーブルメッセージ `F5 nn`（nn = 1〜4）を送れば以後のメッセージが口 A〜D へ行く
+（MU128 などの TO HOST と同じ流儀。実機の MU2000 は USB で送った `F5` を無視する。[doc/dump/usb.md](doc/dump/usb.md)）。
 選んだものは `%LOCALAPPDATA%\S-MU2000\gui.ini` に覚えておく。パネルの VOLUME の
 つまみの位置もここ（実機でもアナログのつまみで、firmware の RAM には入らない）。
 

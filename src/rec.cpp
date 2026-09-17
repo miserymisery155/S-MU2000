@@ -160,6 +160,9 @@ void send_midi(const int want[4], const std::string &path, double delay)
 				while (!(h.dwFlags & MHDR_DONE)) Sleep(1);
 				midiOutUnprepareHeader(out, &h, sizeof(h));
 			}
+		} else if (e.bytes[0] == 0xf5 && e.bytes.size() == 2) {
+			// 口の切り替え（ケーブルメッセージ）。ファイルでは F7 02 F5 nn で入っている
+			midiOutShortMsg(out, DWORD(0xf5) | (DWORD(e.bytes[1]) << 8));
 		} else if (e.bytes[0] < 0xf0) {
 			DWORD msg = e.bytes[0];
 			if (e.bytes.size() > 1) msg |= DWORD(e.bytes[1]) << 8;
@@ -176,6 +179,21 @@ void send_midi(const int want[4], const std::string &path, double delay)
 // 相手が生きているかを確かめる。MIDI の機器照会（Device Inquiry）を送って
 // 返事が来るかを見る。音が録れないとき、機械が黙っているのか、
 // 音の線（S/PDIF）が切れているのかを分けるため
+// 32 ビットでは lambda を __stdcall の関数ポインタに cast できない（x64 は
+// 呼び出し規約が 1 種類なので通っていた）。CALLBACK 付きの普通の関数にする
+static void CALLBACK inquiry_cb(HMIDIIN, UINT msg, DWORD_PTR inst, DWORD_PTR p1, DWORD_PTR)
+{
+	std::vector<unsigned char> *got = (std::vector<unsigned char> *)inst;
+	if (msg == MIM_DATA) {
+		for (int i = 0; i < 3; i++)
+			got->push_back((unsigned char)((p1 >> (8 * i)) & 0xff));
+	} else if (msg == MIM_LONGDATA) {
+		MIDIHDR *h = (MIDIHDR *)p1;
+		for (DWORD i = 0; i < h->dwBytesRecorded; i++)
+			got->push_back((unsigned char)h->lpData[i]);
+	}
+}
+
 int inquiry(int out_port, int in_port)
 {
 	static std::vector<unsigned char> got;
@@ -186,18 +204,8 @@ int inquiry(int out_port, int in_port)
 		std::fprintf(stderr, "MIDI 出力 %d を開けない\n", out_port);
 		return 1;
 	}
-	auto cb = [](HMIDIIN, UINT msg, DWORD_PTR, DWORD_PTR p1, DWORD_PTR) {
-		if (msg == MIM_DATA) {
-			for (int i = 0; i < 3; i++)
-				got.push_back((unsigned char)((p1 >> (8 * i)) & 0xff));
-		} else if (msg == MIM_LONGDATA) {
-			MIDIHDR *h = (MIDIHDR *)p1;
-			for (DWORD i = 0; i < h->dwBytesRecorded; i++)
-				got.push_back((unsigned char)h->lpData[i]);
-		}
-	};
 	HMIDIIN in = nullptr;
-	if (midiInOpen(&in, UINT(in_port), (DWORD_PTR)(void (CALLBACK *)(HMIDIIN, UINT, DWORD_PTR, DWORD_PTR, DWORD_PTR))cb, 0,
+	if (midiInOpen(&in, UINT(in_port), (DWORD_PTR)inquiry_cb, (DWORD_PTR)&got,
 	               CALLBACK_FUNCTION) != MMSYSERR_NOERROR) {
 		std::fprintf(stderr, "MIDI 入力 %d を開けない\n", in_port);
 		midiOutClose(out);

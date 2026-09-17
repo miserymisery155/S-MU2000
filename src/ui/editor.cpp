@@ -257,6 +257,13 @@ bool panel::press(int x, int y, bridge &br)
 			m_wheel_angle = (m_wheel_angle + 345) % 360;
 		return true;
 
+	case spot_kind::wheel:
+		// 掴んで上下に動かす（drag）。掴んだだけでは回さない
+		m_held = sp;
+		m_drag_y = y;
+		m_dial_rest = 0.0;
+		return true;
+
 	case spot_kind::volume:
 		m_held = sp;
 		m_drag_x = x;
@@ -311,6 +318,9 @@ bool panel::drag(int x, int y, bridge &br)
 	if (!m_held)
 		return false;
 
+	if (m_held->kind == spot_kind::wheel)
+		return dial_follow(y, br);
+
 	if (m_held->kind == spot_kind::volume) {
 		// 横でも縦でも動かせるように、動いた量の大きいほうを取る。
 		// 丸いつまみは縦で動かしたくなるので
@@ -343,6 +353,24 @@ bool panel::release(bridge &br)
 	if (m_held->kind == spot_kind::button)
 		br.press(m_held->button, false);
 	m_held = nullptr;
+	return true;
+}
+
+// ダイヤルを掴んで上下に動かす。上へ動かすと +、下へ動かすと −（ホイールと同じ向き）。
+// 動かした距離に比例して目盛りを送り（1 目盛りは VALUE −/+ を 1 回押したのと同じ）、
+// 絵のダイヤルもホイールと同じく 1 目盛りで 15° 回す。1 目盛りは DIAL_PIXELS 画素（窓の大きさに合わせて伸び縮みする）
+bool panel::dial_follow(int y, bridge &br)
+{
+	static constexpr double DIAL_PIXELS = 4.0;
+	m_dial_rest += double(m_drag_y - y);
+	m_drag_y = y;
+	const double per = DIAL_PIXELS * m_scale;
+	const int steps = int(m_dial_rest / per);      // 0 の側へ切り捨て。余りは次へ持ち越す
+	if (!steps)
+		return false;
+	m_dial_rest -= steps * per;
+	br.turn(steps);
+	m_wheel_angle = ((m_wheel_angle + steps * 15) % 360 + 360) % 360;
 	return true;
 }
 
