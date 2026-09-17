@@ -490,12 +490,9 @@ VST3_SDK_SRCS := \
 # this Makefile names the same drawing layer in its own VST3_SRCS, with
 # view_win.cpp in place of view_mac.mm)
 PANEL_VIEW_SRCS := src/vst3/view.cpp src/vst3/view_mac.mm
-# engine::boot() reads voice names and pictures from the ROM (ui::xgui);
-# the core travels with it (it only needs its own headers)
 PANEL_SRCS := src/compat/gdi_mac.cpp \
               src/ui/panel.cpp src/ui/layout.cpp src/ui/svg.cpp src/ui/editor.cpp \
-              src/ui/effects.cpp src/xg/model.cpp \
-              src/ui/xg_ui.cpp src/ui/fx_help.cpp $(IMGUI_CORE)
+              src/ui/effects.cpp src/xg/model.cpp
 
 VST3_SRCS := src/vst3/plugin.cpp src/vst3/engine.cpp src/vst3/iids.cpp src/vst3/automation.cpp \
              $(PANEL_VIEW_SRCS) $(PANEL_SRCS) $(VST3_SDK_SRCS)
