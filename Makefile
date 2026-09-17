@@ -36,6 +36,11 @@ else ifeq ($(OS),Windows_NT)
 PLATFORM := windows
 else ifeq ($(shell uname -s),Darwin)
 PLATFORM := macos
+else ifeq ($(shell uname -s),Linux)
+# Native Linux (issue #25). Cross-building the Windows binaries from Linux is
+# still `make CROSS=windows`; it used to be picked automatically when mingw-w64
+# was installed, which would now hide the native build
+PLATFORM := linux
 else ifneq ($(shell command -v x86_64-w64-mingw32-g++ 2>/dev/null),)
 PLATFORM := windows
 ifeq ($(origin CXX),default)
@@ -92,6 +97,14 @@ CXXFLAGS += -mfpmath=sse -msse2
 # GetPluginFactory@0 になって host が見つけられない。--kill-at で @0 を落とす
 LDFLAGS  += -Wl,--undefined=___mingw_SEH_error_handler -Wl,--kill-at
 endif
+else ifeq ($(PLATFORM),linux)
+CXX      ?= g++
+PYTHON   ?= python3
+LDFLAGS  ?=
+EXE      :=
+# std::thread and the ALSA backend want it on both sides of the link
+CXXFLAGS += -pthread
+LDFLAGS  += -pthread
 else
 # `CXX ?= clang++` would not work: make already has CXX set (to c++), and `?=`
 # leaves a defined variable alone. So swap it only while it is still the default
@@ -135,6 +148,11 @@ CXXFLAGS += -MMD -MP
 # message about which architecture the .o files were. Passing BUILD=... still
 # overrides, and a plain `make` still uses build/
 ifeq ($(origin BUILD),undefined)
+ifeq ($(PLATFORM),linux)
+# The working tree is often shared with a Windows build (WSL, a network share),
+# and the two sets of objects must not mix
+BUILD := build-linux
+endif
 ifdef CROSS_WINDOWS
 BUILD := build-windows
 else ifdef UNIVERSAL
@@ -173,6 +191,12 @@ all: $(BUILD)/verify$(EXE) $(BUILD)/boot$(EXE) $(BUILD)/render$(EXE) \
      $(BUILD)/live$(EXE) $(BUILD)/midisend$(EXE) $(BUILD)/panel$(EXE) $(BUILD)/gui$(EXE) \
      $(BUILD)/statetest$(EXE) $(BUILD)/rec$(EXE) $(BUILD)/blocktime$(EXE) \
      vst3 $(BUILD)/vst3probe$(EXE) clap $(BUILD)/clapprobe$(EXE)
+else ifeq ($(PLATFORM),linux)
+# Linux (issue #25). The windowed program and the plug-ins are not ported yet;
+# these need no window
+all: $(BUILD)/verify$(EXE) $(BUILD)/boot$(EXE) $(BUILD)/render$(EXE) \
+     $(BUILD)/panel$(EXE) $(BUILD)/statetest$(EXE) $(BUILD)/blocktime$(EXE) \
+     $(BUILD)/live$(EXE)
 else
 # macOS. vst3 and vst3probe are defined below
 all: $(BUILD)/verify$(EXE) $(BUILD)/boot$(EXE) $(BUILD)/render$(EXE) \
@@ -389,6 +413,22 @@ install-clap: $(CLAP_BIN)
 # The Audio Unit is a macOS port; nothing to build here
 au install-au au-probe check-au:
 	@echo "Audio Unit は macOS の口です。doc/porting-macos.md を見よ"
+
+else ifeq ($(PLATFORM),linux)
+
+# ---- Linux-side ports (ALSA: PCM out, sequencer in). issue #25
+#
+# The same ui:: interfaces as on the other two platforms; the shape follows the
+# macOS files, with the device handle and the worker thread inside the impl
+LINUX_IO_OBJS := $(BUILD)/src/ui/audio_out_linux.o $(BUILD)/src/ui/midi_in_linux.o
+
+$(BUILD)/live$(EXE): $(OBJS) $(BUILD)/src/mu2000.o $(LINUX_IO_OBJS) $(BUILD)/src/live.o
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS) -lasound
+
+# The windowed program and the plug-ins are not ported to Linux yet
+gui vst3 install-vst3 probe clap install-clap au install-au au-probe check-au:
+	@echo "$@ は Linux ではまだ作れません。doc/linux.md を見よ"
 
 else # macOS
 
@@ -819,10 +859,10 @@ TEST_EXES := $(BUILD)/verify$(EXE) $(BUILD)/statetest$(EXE) $(BUILD)/render$(EXE
              $(BUILD)/samptest$(EXE)
 
 test: $(TEST_EXES)
-	$(PYTHON) tools/run_tests.py $(if $(T),--only $(T),)
+	SMU_BUILD=$(BUILD) $(PYTHON) tools/run_tests.py $(if $(T),--only $(T),)
 
 test-update: $(TEST_EXES)
-	$(PYTHON) tools/run_tests.py --update $(if $(T),--only $(T),)
+	SMU_BUILD=$(BUILD) $(PYTHON) tools/run_tests.py --update $(if $(T),--only $(T),)
 
 clean:
 	rm -rf $(BUILD)

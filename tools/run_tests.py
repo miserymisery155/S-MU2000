@@ -34,7 +34,11 @@ import fingerprint as fpmod
 import make_test_midi
 
 ROOT = Path(__file__).resolve().parent.parent
-BUILD = ROOT / "build"
+# 道具の置き場。Makefile の BUILD と同じもの（Linux は build-linux、
+# CROSS=windows は build-windows など）。環境変数 SMU_BUILD で渡す
+BUILD = Path(os.environ.get("SMU_BUILD") or (ROOT / "build"))
+if not BUILD.is_absolute():
+    BUILD = ROOT / BUILD
 WORK = BUILD / "tests"
 BASE = ROOT / "tests"
 RATE = 44100

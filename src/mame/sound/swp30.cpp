@@ -2406,7 +2406,13 @@ u32 swp30_device::meg_state::revram_decode(u16 v)
 void swp30_device::revram_enable_w(u16 data)
 {
 	logerror("revram enable = %04x\n", data);
+	if(data == m_revram_enable)
+		return;
 	m_revram_enable = data;
+	// S-MU2000: 無効な区画への出し入れは訳すときに省いてあるので、変わったら訳し直す。
+	// プログラムが変わったときと同じで、書き込みが落ち着くまでは解釈実行で回す
+	meg_jit_invalidate();
+	m_meg_jit_wait = 1;
 }
 
 void swp30_device::revram_clear_w(u16 data)

@@ -271,6 +271,9 @@ struct swp30_device::meg_jit {
 		void *buf = nullptr;
 		size_t buf_size = 0;
 		u32 d3 = 0, d2 = 0;
+		// S-MU2000: 訳したときのリバーブ RAM の区画の有効・無効（0x80e）。
+		// 無効な区画への出し入れは訳すときに省くので、変わったら訳し直す
+		u16 revram_enable = 0;
 		~code()
 		{
 #if SMU2000_MEG_JIT
@@ -365,6 +368,7 @@ void swp30_device::meg_jit_rebuild()
 	j.ops = m_meg_ops.data();
 	if (!j.build(j.gen, *m_meg, j.ops, *this, false))
 		j.gen.fn = nullptr;
+	j.gen.revram_enable = m_revram_enable;
 	// プログラムか番地が変わったので、焼き込んだ版は作り直す
 	j.spec.fn = nullptr;
 	j.spec_tried = false;
@@ -386,6 +390,14 @@ bool swp30_device::meg_jit_run()
 	meg_jit *j = m_jit.get();
 	if (!j || !j->gen.fn)
 		return false;
+
+	// S-MU2000: 区画の有効・無効が訳したときと変わっていたら、訳し直すまで解釈実行で回す。
+	// revram_enable_w からも作り直しを頼んでいるが、取りこぼしても正しく鳴るように二重にしておく
+	if (j->gen.revram_enable != m_revram_enable) {
+		meg_jit_invalidate();
+		m_meg_jit_wait = 1;
+		return false;
+	}
 
 	meg_jit::code *c = &j->gen;
 	if (g_meg_bake) {
@@ -1430,7 +1442,12 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 			a.store32(M(o_memr_val + 4 * slot2(k)), RAX);
 			table_done = a.jmp_fwd();
 		}
-		if (o.memop) {
+		// S-MU2000: 無効な区画（0x80e）への出し入れは、訳すときに省く。
+		// 書き込みは落ち、読み出しは 0 になる。有効・無効が変われば訳し直す（meg_jit_run）
+		if (o.memop && BIT(swp.m_revram_enable, o.region)) {
+			if (o.memop != 1)
+				a.store32i(M(o_memr_val + 4 * slot2(k)), 0);
+		} else if (o.memop) {
 			a.loadu16(RAX, M(o_offset + 2 * s32(o.offset_index)));
 			if (o.mem_use_index) {
 				a.load32(RCX, M(o_ram_index));
@@ -2268,7 +2285,13 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 			stw(A, MS, o_memr_val + 4 * slot2(k));
 			table_done = a.b();
 		}
-		if (o.memop) {
+		// S-MU2000: 無効な区画（0x80e）への出し入れは、訳すときに省く（x86 側と同じ）
+		if (o.memop && BIT(swp.m_revram_enable, o.region)) {
+			if (o.memop != 1) {
+				a.mov_imm32(A, 0);
+				stw(A, MS, o_memr_val + 4 * slot2(k));
+			}
+		} else if (o.memop) {
 			cdh(A, o_offset + 2 * s32(o.offset_index));
 			if (o.mem_use_index) {
 				ldw(C, MS, o_ram_index);

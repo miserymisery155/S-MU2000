@@ -25,7 +25,7 @@ Contents
 | Item | Notes |
 |---|---|
 | An MU2000 | Needed to extract the ROMs. **ROMs are not distributed**; you take them from your own unit |
-| A PC | Windows (x86-64) or macOS (Apple silicon). The whole MU2000 is emulated, so it uses real CPU (about 22% of real time on a 16-part song, Ryzen 7 9700X) |
+| A PC | Windows (x86-64) or macOS (Apple silicon). The whole MU2000 is emulated, so it uses real CPU (about 21% of real time on a 16-part song, Ryzen 7 9700X). **That share is machine-dependent** — it scales with single-core speed, so an older machine can be 2-3× that |
 | A USB cable | For extracting the wave ROM (no MIDI interface needed) |
 | A virtual MIDI cable | To drive the standalone app from a sequencer. On Windows, loopMIDI ([domino.md](domino.md)) |
 
@@ -54,6 +54,7 @@ roms/
 ## 3. Building
 
 Windows uses g++ and make from the MSYS2 MINGW64 environment; macOS uses Apple clang++ and make (C++20).
+Linux builds too, but for now only the tools that need no window ([linux.md](linux.md)).
 
 ```bash
 make
@@ -148,6 +149,7 @@ It works like the real front panel; the LCD shows exactly what the firmware writ
 | `F2` `F3` | Editor window, list window |
 
 SmartMedia cards are PC files (`.img`); `tools/smcard.py` copies WAV files in and out.
+**Sampling — recording through A/D INPUT and playing it back over MIDI — is walked through in [sampling.md](sampling.md)** (Japanese).
 The panel artwork (positions, colours, SVG art) can be changed without rebuilding ([panel-editing.md](panel-editing.md)).
 More about the screens: [gui.md](gui.md).
 

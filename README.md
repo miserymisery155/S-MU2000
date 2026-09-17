@@ -285,7 +285,8 @@ Windows の「既定の再生デバイス」は勝手に変わる（実際、設
 
 ## ビルドについて
 
-Windows は MSYS2 / MinGW-w64 の g++、macOS は Apple の clang++ を想定している。C++20 が要る。
+Windows は MSYS2 / MinGW-w64 の g++、macOS は Apple の clang++、Linux は g++ を想定している。C++20 が要る。
+Linux は画面の要らない道具（render・panel・各種試験）だけが動く（[doc/linux.md](doc/linux.md)）。
 `make test` で回帰試験が回る（[doc/testing.md](doc/testing.md)）。ROM が無い
 機械でも、ROM の要らない分だけは走る。
 Windows の exe は **MSYS2 の DLL に依存しない**ように静的リンクしてある

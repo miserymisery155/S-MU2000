@@ -25,7 +25,7 @@ DAW に挿す、の順に並べた。中の作りや調べた経過は書かず�
 | もの | 中身 |
 |---|---|
 | MU2000（実機） | ROM を取り出すのに要る。**ROM は配っていない**ので、自分の実機から取り出す |
-| PC | Windows（x86-64）か macOS（Apple silicon）。MU2000 のまるごとを動かすので CPU を使う（16 パートが鳴りっぱなしの曲で実時間の 22% ほど。Ryzen 7 9700X） |
+| PC | Windows（x86-64）か macOS（Apple silicon）。MU2000 のまるごとを動かすので CPU を使う（16 パートが鳴りっぱなしの曲で実時間の 21% ほど。Ryzen 7 9700X）。**この割合は機械しだい**で、1 コアの速さに反比例して増える。古い機械では 2〜3 倍になる |
 | USB ケーブル | 波形 ROM を取り出すときに使う（MIDI インターフェースは要らない） |
 | 仮想 MIDI ケーブル | 単体版を外のシーケンサから鳴らすとき。Windows なら loopMIDI（[domino.md](domino.md)） |
 
@@ -54,6 +54,7 @@ roms/
 ## 3. 作る
 
 Windows は MSYS2 の MINGW64 環境の g++ と make、macOS は Apple の clang++ と make を使う（C++20）。
+Linux でも `make` が通るが、いまは画面の要らない道具だけ（[linux.md](linux.md)）。
 
 ```bash
 make
@@ -150,6 +151,7 @@ MU2000 の設定（ユーティリティ、マスターボリュームなど）�
 | `F2` `F3` | エディタの窓・一覧の窓 |
 
 SmartMedia のカードは PC のファイル（`.img`）で、`tools/smcard.py` で WAV などを出し入れできる。
+**録った音を MIDI の音色として鳴らすまでの手順は [sampling.md](sampling.md)**。
 パネルの絵そのもの（位置・色・SVG の絵）は作り直さずに直せる（[panel-editing.md](panel-editing.md)）。
 画面のくわしい話は [gui.md](gui.md)。
 

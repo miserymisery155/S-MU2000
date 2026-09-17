@@ -5,6 +5,8 @@
 //   panel <rom ディレクトリ>                起動して LCD を出す
 //   panel <rom ディレクトリ> --keys "..."   ボタンを順に押す
 //   panel <rom ディレクトリ> --list         ボタンの名前を並べる
+//   panel <rom ディレクトリ> --keys "..." --trace   押すたびに LCD を 1 行で出す
+//                                           （品書きをたどるとき用）
 //
 // --keys には短い名前をカンマで並べる。例:
 //   panel roms --keys "play,part+,part+,edit"
@@ -82,6 +84,22 @@ void show_ctl(mu2000 &mu, const char *tag)
 		std::putchar(' ');
 	}
 	std::printf("\n");
+}
+
+// LCD の 2 行を 1 行にして返す（窓に出ている 24 桁ぶん）。--trace 用
+std::string lcd_line(mu2000 &mu)
+{
+	const u8 *dd = mu.lcd().ddram();
+	std::string out;
+	for (int line = 0; line < 2; line++) {
+		for (int pos = 0; pos < 24; pos++) {
+			const u8 c = dd[line * 0x40 + pos];
+			out += (c >= 0x20 && c < 0x7f) ? char(c) : ' ';
+		}
+		if (!line)
+			out += " | ";
+	}
+	return out;
 }
 
 void show_lcd(mu2000 &mu)
@@ -170,6 +188,7 @@ int main(int argc, char **argv)
 	std::string midfile;
 	double play = 0.0;
 	bool watch = false;
+	bool trace = false;
 	double settle = 1.0;
 	bool usb = false;
 
@@ -181,6 +200,7 @@ int main(int argc, char **argv)
 		else if (!std::strcmp(argv[i], "--settle") && i + 1 < argc) settle = std::atof(argv[++i]);
 		else if (!std::strcmp(argv[i], "--mid") && i + 2 < argc) { midfile = argv[++i]; play = std::atof(argv[++i]); }
 		else if (!std::strcmp(argv[i], "--watch")) watch = true;
+		else if (!std::strcmp(argv[i], "--trace")) trace = true;
 		else if (!std::strcmp(argv[i], "--usb")) usb = true;
 		else if (dir.empty()) dir = argv[i];
 	}
@@ -198,7 +218,7 @@ int main(int argc, char **argv)
 	}
 
 	if (dir.empty()) {
-		std::fprintf(stderr, "使い方: panel <rom ディレクトリ> [--keys \"play,edit\"]\n");
+		std::fprintf(stderr, "使い方: panel <rom ディレクトリ> [--keys \"play,edit\"] [--trace]\n");
 		return 1;
 	}
 
@@ -234,6 +254,9 @@ int main(int argc, char **argv)
 	// 起動直後は表示が動いている途中なので、少し落ち着かせる
 	idle(mu, settle);
 
+	if (trace)
+		std::printf("  %-10s %s\n", "(起動)", lcd_line(mu).c_str());
+
 	if (!keys.empty()) {
 		size_t at = 0;
 		while (at <= keys.size()) {
@@ -251,7 +274,10 @@ int main(int argc, char **argv)
 				if (k == a.key) {
 					tap(mu, a.b);
 					idle(mu, 0.3);
-					show_ctl(mu, mu2000::button_name(a.b));
+					if (trace)
+						std::printf("  %-10s %s\n", a.key, lcd_line(mu).c_str());
+					else
+						show_ctl(mu, mu2000::button_name(a.b));
 					found = true;
 					break;
 				}

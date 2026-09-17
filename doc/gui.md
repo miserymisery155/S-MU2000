@@ -57,6 +57,8 @@ python tools/smcard.py get smartmedia.img TAKE001.WAV
 
 `render` にも `--card カード.img` がある（終わりに書き戻す）。
 
+サンプリングして、録った音を MIDI の音色として鳴らすまでの手順は [sampling.md](sampling.md)。
+
 ## MIDI ファイルを流す
 
 同じ品書きの下半分。
