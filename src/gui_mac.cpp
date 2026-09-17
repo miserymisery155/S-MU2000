@@ -2,9 +2,9 @@
 //
 // Run the MU2000 behind a front panel that looks like the real machine (macOS).
 //
-//   gui <rom directory> [--midi n] [--midi-b n]
+//   gui <rom directory> [--midi n] [--midi-b n] [--midi-c n] [--midi-d n]
 //       [--midiout n] [--midiout-b n] [--midiout-mu n]
-//       [--latency ms] [--exclusive] [--audio <name>] [--factory]
+//       [--latency ms] [--exclusive] [--audio <name>] [--factory] [--host-midi]
 //   gui --list                             list the MIDI ports and audio devices
 //   gui <rom directory> --shot image.png   write the picture without a window
 //
@@ -64,50 +64,64 @@ namespace {
 
 constexpr u32 RATE = ui::AUDIO_RATE;
 
-// Menu command numbers for picking a port. Kept the same as in gui.cpp
+// Menu command numbers for picking a port. The same numbers gui.cpp uses, so
+// the two front ends stay describable by one another.
+//
+// MIDI IN has four ports, laid out 500 apart (A 900, B 1400, C 1900, D 2400).
+// No range may land inside another menu's: a port menu occupies
+// ID_BASE .. ID_BASE+255, and menu_chosen() below takes anything in such a
+// range for that port. A/D INPUT and the card items used to sit inside
+// ID_OUTMU_BASE's 256, so picking an input device (or a card item) went to
+// MIDI OUT instead and the tick never moved to what was picked
 enum : int {
-	ID_IN_NONE = 900,   ID_IN_BASE = 901,
-	ID_INB_NONE = 1400, ID_INB_BASE = 1401,
-	ID_OUT_NONE = 1900, ID_OUT_BASE = 1901,
-	ID_OUTB_NONE = 2400, ID_OUTB_BASE = 2401,
-	ID_OUTMU_NONE = 3100, ID_OUTMU_BASE = 3101,
-	ID_PLAY_FILE = 2900, ID_STOP_FILE = 2901,
-	ID_FACTORY = 3000,
-	// The PC editor windows. The same numbers gui.cpp uses, so the two front
-	// ends stay describable by one another
-	ID_PC_EDITOR = 3001,
-	ID_OVERVIEW = 3002,
-	// A/D INPUT (the recording device) and SmartMedia. Same numbers as gui.cpp's.
-	//
-	// They must not land inside another menu's range: a port menu occupies
-	// ID_BASE .. ID_BASE+255, and menu_chosen() below takes anything in such a
-	// range for that port. These two used to sit inside ID_OUTMU_BASE's 256,
-	// so picking an input device (or a card item) went to MIDI OUT instead and
-	// the tick never moved to what was picked
-	ID_AIN_NONE = 3400,  ID_AIN_BASE = 3401,
-	ID_CARD_NEW16 = 3700, ID_CARD_NEW32, ID_CARD_NEW64, ID_CARD_NEW128,
-	ID_CARD_OPEN = 3710, ID_CARD_EJECT = 3711,
-	// What to do with a MIDI file that uses ports 3 and 4. The machine only has
-	// two ports, so the extra parts are either folded onto A and B or dropped
-	ID_PORTS34_FOLD = 2902, ID_PORTS34_DROP = 2903,
+	ID_IN_NONE = 900, ID_IN_BASE = 901, ID_IN_STRIDE = 500,
+	ID_OUT_NONE = 3000, ID_OUT_BASE = 3001,
+	ID_OUTB_NONE = 3500, ID_OUTB_BASE = 3501,
+	ID_OUTMU_NONE = 4000, ID_OUTMU_BASE = 4001,
+	ID_AIN_NONE = 4500, ID_AIN_BASE = 4501,
+	ID_CARD_NEW16 = 5000, ID_CARD_NEW32, ID_CARD_NEW64, ID_CARD_NEW128,
+	ID_CARD_OPEN = 5010, ID_CARD_EJECT = 5011,
+	// What to do with a MIDI file that uses ports 3 and 4: fold them onto A and
+	// B, or drop them
+	ID_PLAY_FILE = 5100, ID_STOP_FILE = 5101, ID_PORTS34_FOLD = 5102, ID_PORTS34_DROP = 5103,
+	ID_FACTORY = 5200,
+	// The PC editor windows
+	ID_PC_EDITOR = 5201,
+	ID_OVERVIEW = 5202,
 };
 
 // Checked at compile time, because the failure is silent: a menu id that lands
 // in a port menu's range (ID_BASE .. ID_BASE+255) is taken for that port by
 // menu_chosen(), so the chosen item never arrives and the tick never moves
 static_assert([] {
-	const int bases[] = { ID_IN_BASE, ID_INB_BASE, ID_OUT_BASE, ID_OUTB_BASE, ID_OUTMU_BASE, ID_AIN_BASE };
-	const int singles[] = { ID_IN_NONE, ID_INB_NONE, ID_OUT_NONE, ID_OUTB_NONE, ID_OUTMU_NONE,
+	const int bases[] = { ID_IN_BASE, ID_IN_BASE + ID_IN_STRIDE, ID_IN_BASE + 2 * ID_IN_STRIDE,
+	                      ID_IN_BASE + 3 * ID_IN_STRIDE,
+	                      ID_OUT_BASE, ID_OUTB_BASE, ID_OUTMU_BASE, ID_AIN_BASE };
+	const int singles[] = { ID_IN_NONE, ID_IN_NONE + ID_IN_STRIDE, ID_IN_NONE + 2 * ID_IN_STRIDE,
+	                        ID_IN_NONE + 3 * ID_IN_STRIDE,
+	                        ID_OUT_NONE, ID_OUTB_NONE, ID_OUTMU_NONE,
 	                        ID_AIN_NONE, ID_CARD_NEW16, ID_CARD_NEW32, ID_CARD_NEW64,
 	                        ID_CARD_NEW128, ID_CARD_OPEN, ID_CARD_EJECT,
 	                        ID_PLAY_FILE, ID_STOP_FILE, ID_FACTORY,
-	                        ID_PORTS34_FOLD, ID_PORTS34_DROP };
-	for (int base : bases)
+	                        ID_PORTS34_FOLD, ID_PORTS34_DROP, ID_PC_EDITOR, ID_OVERVIEW };
+	for (int base : bases) {
 		for (int id : singles)
 			if (id >= base && id < base + 256)
 				return false;
+		for (int other : bases)
+			if (other != base && other >= base && other < base + 256)
+				return false;
+	}
 	return true;
 }(), "a menu id falls inside another menu's ID_BASE..ID_BASE+255 range");
+
+// The gui.ini key for each MIDI IN port, A B C D. Same keys as gui.cpp's
+const char *const IN_KEYS[mu2000::MIDI_PORTS] = { "midi_in", "midi_in_b", "midi_in_c", "midi_in_d" };
+// The names shown in the menu and in the startup report, word for word gui.cpp's
+const char *const IN_LABELS[mu2000::MIDI_PORTS] = {
+	"MIDI IN A（パート 1-16）", "MIDI IN B（パート 17-32）",
+	"MIDI IN C（パート 33-48）", "MIDI IN D（パート 49-64）"
+};
 
 // ---- Remember the chosen ports
 //
@@ -124,7 +138,8 @@ std::string settings_path()
 // The keys are the same as gui.cpp's, so the two platforms describe the same
 // choices even though the files sit in different places (compat/paths.h)
 struct port_names {
-	std::string in, in_b, out, out_b, out_mu;
+	std::string in[mu2000::MIDI_PORTS];     // MIDI IN A-D
+	std::string out, out_b, out_mu;
 	std::string audio;          // the audio device, by name
 	std::string audio_in;       // the recording device feeding A/D INPUT, by name
 	std::string card;           // the SmartMedia image in the slot, by path
@@ -152,8 +167,9 @@ port_names load_settings()
 		if (eq == std::string::npos)
 			continue;
 		const std::string key = t.substr(0, eq), val = t.substr(eq + 1);
-		if (key == "midi_in")     n.in    = val;
-		if (key == "midi_in_b")   n.in_b  = val;
+		for (int p = 0; p < mu2000::MIDI_PORTS; p++)
+			if (key == IN_KEYS[p])
+				n.in[p] = val;
 		if (key == "midi_out")    n.out   = val;
 		if (key == "midi_out_b")  n.out_b = val;
 		if (key == "midi_out_mu") n.out_mu = val;
@@ -176,8 +192,8 @@ void save_settings(const port_names &n)
 	FILE *f = std::fopen(path.c_str(), "wb");
 	if (!f)
 		return;
-	std::fprintf(f, "midi_in=%s\n",     n.in.c_str());
-	std::fprintf(f, "midi_in_b=%s\n",   n.in_b.c_str());
+	for (int p = 0; p < mu2000::MIDI_PORTS; p++)
+		std::fprintf(f, "%s=%s\n", IN_KEYS[p], n.in[p].c_str());
 	std::fprintf(f, "midi_out=%s\n",    n.out.c_str());
 	std::fprintf(f, "midi_out_b=%s\n",  n.out_b.c_str());
 	std::fprintf(f, "midi_out_mu=%s\n", n.out_mu.c_str());
@@ -271,9 +287,10 @@ ui::menu_group port_group(const char *title, const std::vector<std::string> &nam
 class app : public ui::mac_app
 {
 public:
-	app(ui::bridge &b, ui::midi_in &mi, ui::midi_in &mib,
+	// mi is MIDI IN A-D, mu2000::MIDI_PORTS of them
+	app(ui::bridge &b, ui::midi_in *mi,
 	    ui::midi_out &mo, ui::midi_out &mob, ui::midi_out &mmu)
-	    : br(b), midi(mi), midi_b(mib), mout(mo), mout_b(mob), mout_mu(mmu) {}
+	    : br(b), midi(mi), mout(mo), mout_b(mob), mout_mu(mmu) {}
 
 	ui::panel  panel;
 	ui::player play;
@@ -319,7 +336,7 @@ public:
 			              "   （MIDI IN A のジャックか右クリックで口を選ぶ）",
 			              out->cpu_percent(), out->worst_ms(),
 			              (unsigned long long)out->starved(),
-			              in_name.empty()  ? "なし" : in_name.c_str(),
+			              in_name[0].empty() ? "なし" : in_name[0].c_str(),
 			              out_name.empty() ? "なし" : out_name.c_str());
 		else
 			std::snprintf(status, sizeof(status), "起動中...");
@@ -452,15 +469,16 @@ public:
 
 		const auto ins  = ui::midi_in::list();
 		const auto outs = ui::midi_out::list();
-		groups.push_back(port_group("MIDI IN A（パート 1-16）", ins, in_dev,
-		                            ID_IN_NONE, ID_IN_BASE));
-		groups.push_back(port_group("MIDI IN B（パート 17-32）", ins, in_dev_b,
-		                            ID_INB_NONE, ID_INB_BASE));
+		// MIDI IN has four ports. C and D exist only over USB on the real machine
+		// and reach parts 33-64
+		for (int p = 0; p < mu2000::MIDI_PORTS; p++)
+			groups.push_back(port_group(IN_LABELS[p], ins, in_dev[p],
+			                            ID_IN_NONE + p * ID_IN_STRIDE, ID_IN_BASE + p * ID_IN_STRIDE));
 		groups.push_back(port_group("MIDI OUT（MU2000 が送り出すもの）", outs, out_dev_mu,
 		                            ID_OUTMU_NONE, ID_OUTMU_BASE));
-		groups.push_back(port_group("MIDI OUT A（A で受けたものを外へ）", outs, out_dev,
+		groups.push_back(port_group("MIDI THRU A（A で受けたものを外へ）", outs, out_dev,
 		                            ID_OUT_NONE, ID_OUT_BASE));
-		groups.push_back(port_group("MIDI OUT B（B で受けたものを外へ）", outs, out_dev_b,
+		groups.push_back(port_group("MIDI THRU B（B で受けたものを外へ）", outs, out_dev_b,
 		                            ID_OUTB_NONE, ID_OUTB_BASE));
 		// The recording device the machine samples as its A/D INPUT. It is not a
 		// MIDI port, but it belongs in the same picker, as it does in gui.cpp
@@ -490,11 +508,12 @@ public:
 
 	void menu_chosen(int id) override
 	{
-		if (id == ID_IN_NONE)                                        choose_in(-1);
-		else if (id >= ID_IN_BASE  && id < ID_IN_BASE  + 256)         choose_in(id - ID_IN_BASE);
-		else if (id == ID_INB_NONE)                                   choose_in_b(-1);
-		else if (id >= ID_INB_BASE && id < ID_INB_BASE + 256)         choose_in_b(id - ID_INB_BASE);
-		else if (id == ID_OUT_NONE)                                   choose_out(-1);
+		for (int p = 0; p < mu2000::MIDI_PORTS; p++) {
+			const int none = ID_IN_NONE + p * ID_IN_STRIDE, base = ID_IN_BASE + p * ID_IN_STRIDE;
+			if (id == none)                        { choose_in(p, -1); return; }
+			if (id >= base && id < base + 256)     { choose_in(p, id - base); return; }
+		}
+		if (id == ID_OUT_NONE)                                        choose_out(-1);
 		else if (id >= ID_OUT_BASE && id < ID_OUT_BASE + 256)         choose_out(id - ID_OUT_BASE);
 		else if (id == ID_OUTMU_NONE)                                 choose_out_mu(-1);
 		else if (id >= ID_OUTMU_BASE && id < ID_OUTMU_BASE + 256)     choose_out_mu(id - ID_OUTMU_BASE);
@@ -614,33 +633,21 @@ public:
 	// Open what the menu picked. On failure it falls back to "unused".
 	// keep is true only while starting up: the name that was asked for is then
 	// kept even if the port is not there yet (see remember())
-	void choose_in(int dev, bool keep = false)
+	// port is 0-3 for MIDI IN A-D
+	void choose_in(int port, int dev, bool keep = false)
 	{
+		if (port < 0 || port >= mu2000::MIDI_PORTS)
+			return;
 		if (!keep)
-			in_keep.clear();
+			in_keep[port].clear();
 		std::string err;
-		if (!midi.open(dev, err)) {
-			std::fprintf(stderr, "MIDI 入力: %s\n", err.c_str());
-			midi.open(-1, err);
+		if (!midi[port].open(dev, err)) {
+			std::fprintf(stderr, "%s: %s\n", IN_LABELS[port], err.c_str());
+			midi[port].open(-1, err);
 			dev = -1;
 		}
-		in_dev  = midi.is_open() ? dev : -1;
-		in_name = midi.device_name();
-		remember();
-	}
-
-	void choose_in_b(int dev, bool keep = false)
-	{
-		if (!keep)
-			in_keep_b.clear();
-		std::string err;
-		if (!midi_b.open(dev, err)) {
-			std::fprintf(stderr, "MIDI 入力 B: %s\n", err.c_str());
-			midi_b.open(-1, err);
-			dev = -1;
-		}
-		in_dev_b  = midi_b.is_open() ? dev : -1;
-		in_name_b = midi_b.device_name();
+		in_dev[port]  = midi[port].is_open() ? dev : -1;
+		in_name[port] = midi[port].device_name();
 		remember();
 	}
 
@@ -878,9 +885,9 @@ public:
 		if (keep_settings)
 			return;
 		port_names n;
-		n.in     = in_name.empty()     ? in_keep     : in_name;
-		n.in_b   = in_name_b.empty()   ? in_keep_b   : in_name_b;
-		n.out    = out_name.empty()    ? out_keep    : out_name;
+		for (int p = 0; p < mu2000::MIDI_PORTS; p++)
+			n.in[p] = in_name[p].empty() ? in_keep[p] : in_name[p];
+		n.out   = out_name.empty()    ? out_keep    : out_name;
 		n.out_b  = out_name_b.empty()  ? out_keep_b  : out_name_b;
 		n.out_mu = out_name_mu.empty() ? out_keep_mu : out_name_mu;
 		n.audio  = audio_name;
@@ -894,16 +901,19 @@ public:
 		save_settings(n);
 	}
 
-	int in_dev = -1, in_dev_b = -1, out_dev = -1, out_dev_b = -1, out_dev_mu = -1;
+	int in_dev[mu2000::MIDI_PORTS] = { -1, -1, -1, -1 };   // MIDI IN A-D; -1 is unused
+	int out_dev = -1, out_dev_b = -1, out_dev_mu = -1;
 	int ain_dev = -1;
 	// MIDI thrown away by the THRU guards, and when that was last said out loud
 	u64  reported_drops = 0;
 	u64  last_drop_report = 0;
 	bool keep_settings = false;        // --nomidi: leave the remembered ports alone
-	std::string in_name, in_name_b, out_name, out_name_b, out_name_mu;
+	std::string in_name[mu2000::MIDI_PORTS];
+	std::string out_name, out_name_b, out_name_mu;
 	// The name to fall back on when a port could not be opened. Cleared when the
 	// menu is used, so a deliberate "unused" is not undone on the next start
-	std::string in_keep, in_keep_b, out_keep, out_keep_b, out_keep_mu, ain_keep;
+	std::string in_keep[mu2000::MIDI_PORTS];
+	std::string out_keep, out_keep_b, out_keep_mu, ain_keep;
 	std::string audio_name;            // the audio device, by name (empty = default)
 	std::string ain_name;              // the recording device, by name (empty = unused)
 	std::string card_path;             // the SmartMedia in the slot, by path (empty = none)
@@ -915,7 +925,7 @@ public:
 
 private:
 	ui::bridge   &br;
-	ui::midi_in  &midi, &midi_b;
+	ui::midi_in  *midi;                // MIDI IN A-D (mu2000::MIDI_PORTS of them)
 	ui::midi_out &mout, &mout_b, &mout_mu;
 	bool m_pressed = false;
 	u64 last_flush = 0;                // when the card file was last written back
@@ -991,8 +1001,11 @@ int main(int argc, char **argv)
 	bool open_editor = false;          // open the PC editor with the panel
 	bool open_list = false;            // open the overview with the panel
 	bool open_fx = false;              // open the insertion settings with the panel
-	int midi_dev = -2;                 // -2 unset (use the remembered one) / -1 unused
-	int midib_dev = -2;
+	// MIDI IN A-D. -2 unset (use the remembered one) / -1 unused
+	int in_dev[mu2000::MIDI_PORTS] = { -2, -2, -2, -2 };
+	// Start as the machine does with HOST SELECT = USB, which is what makes ports
+	// C and D usable. --host-midi turns it off (the DIN ports A and B only)
+	bool usb_host = true;
 	int mout_dev = -2;
 	int moutb_dev = -2;
 	int moutmu_dev = -2;               // the machine's own MIDI OUT
@@ -1034,8 +1047,12 @@ int main(int argc, char **argv)
 				std::printf("  （なし）\n");
 			return 0;
 		}
-		else if (!std::strcmp(argv[i], "--midi") && i + 1 < argc) midi_dev = std::atoi(argv[++i]);
-		else if (!std::strcmp(argv[i], "--midi-b") && i + 1 < argc) midib_dev = std::atoi(argv[++i]);
+		else if (!std::strcmp(argv[i], "--midi") && i + 1 < argc) in_dev[0] = std::atoi(argv[++i]);
+		else if (!std::strcmp(argv[i], "--midi-b") && i + 1 < argc) in_dev[1] = std::atoi(argv[++i]);
+		else if (!std::strcmp(argv[i], "--midi-c") && i + 1 < argc) in_dev[2] = std::atoi(argv[++i]);
+		else if (!std::strcmp(argv[i], "--midi-d") && i + 1 < argc) in_dev[3] = std::atoi(argv[++i]);
+		else if (!std::strcmp(argv[i], "--usb")) usb_host = true;
+		else if (!std::strcmp(argv[i], "--host-midi")) usb_host = false;
 		else if (!std::strcmp(argv[i], "--midiout") && i + 1 < argc) mout_dev = std::atoi(argv[++i]);
 		else if (!std::strcmp(argv[i], "--midiout-b") && i + 1 < argc) moutb_dev = std::atoi(argv[++i]);
 		else if (!std::strcmp(argv[i], "--midiout-mu") && i + 1 < argc) moutmu_dev = std::atoi(argv[++i]);
@@ -1043,7 +1060,8 @@ int main(int argc, char **argv)
 			// Nothing is opened and nothing is remembered: this is for tests,
 			// which must leave the real settings file the way they found it.
 			// The app itself is made further down, so the flag is carried there
-			midi_dev = midib_dev = mout_dev = moutb_dev = moutmu_dev = -1;
+			for (int &d : in_dev) d = -1;
+			mout_dev = moutb_dev = moutmu_dev = -1;
 			nomidi = true;
 		}
 		else if (!std::strcmp(argv[i], "--latency") && i + 1 < argc) latency = std::atoi(argv[++i]);
@@ -1089,7 +1107,7 @@ int main(int argc, char **argv)
 	}
 
 	static ui::bridge br;
-	static ui::midi_in  midi, midi_b;
+	static ui::midi_in  midi_ports[mu2000::MIDI_PORTS];
 	static ui::midi_out mout, mout_b, mout_mu;
 
 	// Picture only. An empty screen can be drawn even without any ROMs.
@@ -1102,9 +1120,9 @@ int main(int argc, char **argv)
 
 	if (dir.empty()) {
 		std::fprintf(stderr,
-			"使い方: gui <rom ディレクトリ> [--midi 番号] [--midi-b 番号]"
+			"使い方: gui <rom ディレクトリ> [--midi 番号] [--midi-b 番号] [--midi-c 番号] [--midi-d 番号]"
 			" [--midiout 番号] [--midiout-b 番号] [--midiout-mu 番号]"
-			" [--latency ミリ秒] [--exclusive] [--layout panel.txt] [--play 曲.mid]\n"
+			" [--latency ミリ秒] [--exclusive] [--layout panel.txt] [--play 曲.mid] [--host-midi]\n"
 			"        [--factory]   覚えている設定を捨てて工場出荷状態で起動する\n"
 			"        [--editor]    PC エディタも開く（窓では F2 か右クリック）\n"
 			"        [--list-window] 一覧の窓も開く（窓では F3 か右クリック）\n"
@@ -1115,8 +1133,9 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	static ui::engine eng(br, midi);
-	eng.midi_b = &midi_b;
+	static ui::engine eng(br, midi_ports[0]);
+	for (int p = 1; p < mu2000::MIDI_PORTS; p++)
+		eng.midi_p[p] = &midi_ports[p];
 	eng.mout_b = &mout_b;
 	eng.mout_mu = &mout_mu;
 	eng.mout = &mout;
@@ -1167,7 +1186,7 @@ int main(int argc, char **argv)
 
 	// ---- Put the window up
 
-	static app gui(br, midi, midi_b, mout, mout_b, mout_mu);
+	static app gui(br, midi_ports, mout, mout_b, mout_mu);
 	g_gui = &gui;
 	// a MIDI file dropped on any window plays (the panel, the editor, the overview)
 	ui::pc_window::set_drop_handler(play_dropped_file);
@@ -1183,6 +1202,14 @@ int main(int argc, char **argv)
 	eng.use_nvram = !factory;
 	if (factory)
 		std::printf("工場出荷状態で起動する（覚えていた設定は終わるときに上書きされる）\n");
+
+	// **USB by default**, the way the machine is set up when it is connected to a
+	// computer. The firmware passes ports C and D only when HOST SELECT is USB,
+	// and then A and B arrive over USB as well. --host-midi gives the DIN ports A
+	// and B only. Before the boot, because the boot snapshot is keyed on it
+	eng.mu.set_usb_host(usb_host);
+	std::printf(usb_host ? "MIDI は USB の口（A-D の 64 パート）\n"
+	                     : "--host-midi: DIN の口 A・B だけ（パート 1-32）\n");
 
 	// Look up the previously chosen ports by name. --midi / --midiout win.
 	//
@@ -1206,20 +1233,21 @@ int main(int argc, char **argv)
 		gui.ain_keep = want.audio_in;
 		if (!want.card.empty())
 			gui.insert_card(want.card);
-		if (midi_dev == -2)   midi_dev   = find_device(ui::midi_in::list(), want.in);
-		if (midib_dev == -2)  midib_dev  = find_device(ui::midi_in::list(), want.in_b);
-		if (mout_dev == -2)   mout_dev   = find_device(ui::midi_out::list(), want.out);
+		for (int p = 0; p < mu2000::MIDI_PORTS; p++)
+			if (in_dev[p] == -2)
+				in_dev[p] = find_device(ui::midi_in::list(), want.in[p]);
+		if (mout_dev == -2)  mout_dev   = find_device(ui::midi_out::list(), want.out);
 		if (moutb_dev == -2)  moutb_dev  = find_device(ui::midi_out::list(), want.out_b);
 		if (moutmu_dev == -2) moutmu_dev = find_device(ui::midi_out::list(), want.out_mu);
 
 		// A port that is not there yet keeps its name in the settings
-		gui.in_keep     = want.in;
-		gui.in_keep_b   = want.in_b;
+		for (int p = 0; p < mu2000::MIDI_PORTS; p++)
+			gui.in_keep[p] = want.in[p];
 		gui.out_keep    = want.out;
 		gui.out_keep_b  = want.out_b;
 		gui.out_keep_mu = want.out_mu;
-		gui.choose_in(midi_dev, true);
-		gui.choose_in_b(midib_dev, true);
+		for (int p = 0; p < mu2000::MIDI_PORTS; p++)
+			gui.choose_in(p, in_dev[p], true);
 		gui.choose_out(mout_dev, true);
 		gui.choose_out_b(moutb_dev, true);
 		gui.choose_out_mu(moutmu_dev, true);
@@ -1234,9 +1262,9 @@ int main(int argc, char **argv)
 			else
 				std::printf("%s: なし\n", label);
 		};
-		show("MIDI IN A",   gui.in_name,     gui.in_keep);
-		show("MIDI IN B",   gui.in_name_b,   gui.in_keep_b);
-		show("MIDI OUT",    gui.out_name_mu, gui.out_keep_mu);
+		for (int p = 0; p < mu2000::MIDI_PORTS; p++)
+			show(IN_LABELS[p], gui.in_name[p], gui.in_keep[p]);
+		show("MIDI OUT",   gui.out_name_mu, gui.out_keep_mu);
 		show("MIDI THRU A", gui.out_name,    gui.out_keep);
 		show("MIDI THRU B", gui.out_name_b,  gui.out_keep_b);
 		std::fflush(stdout);
@@ -1340,8 +1368,8 @@ int main(int argc, char **argv)
 	if (eng.state.load() == 1 && !smu2000::nvram::save(eng.mu))
 		std::fprintf(stderr, "設定を残せなかった: %s\n", smu2000::nvram::path(eng.mu).c_str());
 	gui.play.stop();
-	midi.close();
-	midi_b.close();
+	for (ui::midi_in &m : midi_ports)
+		m.close();
 	mout.close();
 	mout_b.close();
 	mout_mu.close();

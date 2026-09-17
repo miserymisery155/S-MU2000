@@ -513,9 +513,12 @@ used before the machine's settings are thrown away.
 
 ### Ports, settings and factory reset
 
-The picker offers the same five choices as the Windows one: MIDI IN A and B, the
-machine's own **MIDI OUT**, and the two THRU ports. The first two and the THRU
-pairs were there from the start; the machine's MIDI OUT is what makes the
+The picker offers the same choices as the Windows one: MIDI IN A-D, the
+machine's own **MIDI OUT**, and the two THRU ports. C and D (parts 33-64) exist
+only over USB on the real machine, so the GUI starts with HOST SELECT = USB as
+`gui.cpp` does, and `--host-midi` gives the DIN ports A and B only. The menu ids
+and the `gui.ini` keys (`midi_in`, `midi_in_b`, `midi_in_c`, `midi_in_d`) are
+gui.cpp's. The machine's MIDI OUT is what makes the
 settings reachable from a librarian or editor over a virtual port. The titles
 are word for word what `gui.cpp` shows, so the two platforms cannot drift: `OUT`
 is what the firmware sends by itself, `THRU` what was received and echoed.
