@@ -69,6 +69,11 @@ struct engine {
 	// 画面からはここへ頼むだけで、切り替えは音声の糸が fill() の頭で行う
 	std::atomic<int>  want_native_fx{-1};
 	std::atomic<int>  native_fx{0};
+	// **firmware を走らせない口**（doc/native-engine.md の段 2）。0 切 / 1 入。
+	// まだ音が実機とはっきり違うので、聞き比べのために窓から入切できるようにしてある。
+	// 軽量モードと同じく、切り替えは音声の糸が fill() の頭で行う
+	std::atomic<int>  want_native_engine{-1};
+	std::atomic<int>  native_engine{0};
 	std::string      message = "起動中...";
 
 	driver drv;
@@ -175,6 +180,12 @@ struct engine {
 		if (const int want = want_native_fx.exchange(-1); want >= 0) {
 			mu.set_native_fx(want);
 			native_fx.store(want);
+		}
+		// native の口の入切も同じところで。入れ直すと写し取りは白紙に戻るので、
+		// その音色の 1 音目はまた firmware が鳴らす
+		if (const int want = want_native_engine.exchange(-1); want >= 0) {
+			mu.set_native_engine(want);
+			native_engine.store(want);
 		}
 
 		guard_a.refill(n, AUDIO_RATE);

@@ -326,7 +326,7 @@ public:
 	u8   m_fw_why = 0;                   // いまの hold の理由（1 SysEx / 2 そのほか）
 	// SysEx の頭を少し覚えて、長く回す必要があるかを見分ける
 	int  m_sx_pos = -1;
-	u8   m_sx[5] = {};
+	u8   m_sx[6] = {};
 
 	struct native_stats { u64 note_native = 0, note_fw = 0, learn = 0, other = 0; };
 	native_stats native_counts() const { return m_ne_stats; }
@@ -450,6 +450,17 @@ private:
 	static constexpr u64 FW_NOTE_RUN = 44100 * 5;   // 1.2 秒
 	u64  m_fw_note_until = 0;
 	u64  m_learn_drum = 0;         // ドラムのとき、覚える鍵
+	// 写し取りのとき、firmware がこちらの鳴っているスロットを取ってしまった回数
+	u32  m_ne_slot_clash = 0;
+	// 写し取りの窓の中で、別の音が同じスロットに鳴り始めた回数
+	u32  m_ne_learn_dirty = 0;
+	// 写し取りで、その音色のものでないスロットを掴んで捨てた回数
+	u32  m_ne_learn_wrong = 0;
+public:
+	u32  native_slot_clash() const { return m_ne_slot_clash; }
+	u32  native_learn_dirty() const { return m_ne_learn_dirty; }
+	u32  native_learn_wrong() const { return m_ne_learn_wrong; }
+private:
 	native_stats m_ne_stats;
 
 	bool native_midi(u8 byte, int port);

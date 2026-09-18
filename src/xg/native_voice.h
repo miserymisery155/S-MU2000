@@ -135,6 +135,22 @@ inline int elem_tune(const u8 *elem)
 	return (int(elem[17]) - 64) * 100 + (int(elem[18]) - 64);
 }
 
+// **ポルタメントの速さ**（doc/native-engine.md の 6.41）。
+// ROM の表 0x1E6698（16bit・128 語）を CC5 で直に引く。目盛りが 2 通りある:
+//   CC5 24-127 … 表 ÷ 128 = 10ms あたりのセント
+//   CC5  0-23  … 表 × 2   = 10ms あたりのセント（256 倍の目盛り）
+// 返すのは**セント × 256**（そのまま足し引きできる細かさ）
+constexpr u32 PORTA_TAB = 0x1E6698;
+constexpr u32 PORTA_TICK = 441;            // firmware は 10ms ごとに足す
+
+inline int porta_step(const u8 *rom, int cc5)
+{
+	if (!rom || cc5 < 0 || cc5 > 127)
+		return 0;
+	const int raw = int(rd16(rom, PORTA_TAB + u32(cc5) * 2));
+	return cc5 < 24 ? raw * 512 : raw * 2;
+}
+
 inline u16 pitch_reg(const wave_info &w, int note, int follow = 100, int cents_extra = 0)
 {
 	// 整数で計算する（firmware と同じ丸めになる。0 の側へ切り捨て）。

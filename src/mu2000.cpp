@@ -986,6 +986,10 @@ void mu2000::midi_step(u64 now)
 
 void mu2000::set_native_engine(int mode)
 {
+	// 切るときは、こちらで鳴らしている音を先に離す。切ったあとは firmware が
+	// そのスロットを知らないので、離さないと鳴りっぱなしになる
+	if (!mode && m_native_engine)
+		m_ndrv.silence();
 	m_native_engine = mode;
 	m_fw_hold = 0;
 	m_learning = false;
@@ -1072,8 +1076,31 @@ void mu2000::native_learn_start(u32 rec)
 		case 0x20e:
 			// **要素のぶんだけ**。速い曲では、写し取りの窓の中に次の音の
 			// 引き金が入ってしまい、余計なスロットまで拾っていた
-			if (__builtin_popcountll(m_learn_keyed) < m_learn_want)
+			// **写し取りの窓の中で、別の音が同じスロットに鳴り始めたか**。
+			// 写し取りは「窓の中で最後に見た値」を取るので、ここで重なると
+			// その音色の包絡線が別の音の値で焼き付いてしまう
+			if (m_learn_keyed && (m_learn_mask & m_learn_keyed)) {
+				m_ne_learn_dirty++;
+				if (std::getenv("SMU2000_NATIVE_DEBUG"))
+					std::fprintf(stderr, "写し取りが汚れた: すでに %d 個、新しい鍵 %016llx 重なり %016llx\n",
+					             __builtin_popcountll(m_learn_keyed),
+					             (unsigned long long)m_learn_mask,
+					             (unsigned long long)(m_learn_mask & m_learn_keyed));
+			}
+			if (__builtin_popcountll(m_learn_keyed) < m_learn_want) {
+				// **firmware がこちらの鳴っているスロットを取ったか**を見る。
+				// firmware は native の使用中を知らないので、声が増えると
+				// 奪い合いになり、写し取りに 2 つの音の値が混ざる
+				if (const u64 clash = m_learn_mask & m_ndrv.slot_mask()) {
+					m_ne_slot_clash++;
+					if (std::getenv("SMU2000_NATIVE_DEBUG"))
+						std::fprintf(stderr, "スロットの奪い合い: firmware=%016llx native=%016llx 重なり=%016llx\n",
+						             (unsigned long long)m_learn_mask,
+						             (unsigned long long)m_ndrv.slot_mask(),
+						             (unsigned long long)clash);
+				}
 				m_learn_keyed |= m_learn_mask;
+			}
 			if (m_learn_first.empty())
 				m_learn_first = m_learn_last;
 			if (!m_learn_key_clock)
@@ -1181,8 +1208,18 @@ void mu2000::native_learn_finish()
 				}
 			}
 		}
-		if (idx < 0)
+		if (idx < 0) {
+			// **波形の番地が取れているのに、どの要素とも合わない**＝この
+			// スロットはこの音色のものではない。同時に音が鳴ると firmware の
+			// 鳴らす順で関係ないスロットを掴むことがあり、そのまま覚えると
+			// **その音の包絡線がこの音色に焼き付く**（アタックが極端に遅い、
+			// リリースが無い、など）。捨てて次の音でやり直す
+			if (cal.has(0x16) && cal.has(0x17)) {
+				m_ne_learn_wrong++;
+				continue;
+			}
 			idx = int(cals.size()) < nel ? int(cals.size()) : 0;
+		}
 		cal.base_level = xg::nv::calibrate_level(rom, xg::nv::element(rom, m_learn_rec, idx),
 		                                         cal.has(9) ? (cal.reg[9] & 0xff) : 64,
 		                                         m_learn_note, m_learn_vel);
@@ -1236,7 +1273,7 @@ void mu2000::native_learn_finish()
 namespace {
 
 constexpr u32 CAL_MAGIC = 0x43563253u;   // "S2VC"
-constexpr u32 CAL_VERSION = 5;
+constexpr u32 CAL_VERSION = 6;
 
 void put8(std::vector<u8> &v, u8 x) { v.push_back(x); }
 void put16v(std::vector<u8> &v, u16 x) { v.push_back(u8(x)); v.push_back(u8(x >> 8)); }
@@ -1364,7 +1401,7 @@ void mu2000::traj_start(u32 rec, u64 drum_key, int ncal)
 {
 	if (!ncal)
 		return;
-	m_traj_cals = drum_key ? m_ndrv.drum_cals_of(drum_key) : m_ndrv.cals_of(rec);
+	m_traj_cals = drum_key ? m_ndrv.drum_cals_of(drum_key) : m_ndrv.cals_of(rec, m_learn_part);
 	if (!m_traj_cals)
 		return;
 	// 写し取ったチャンネルの順が、そのまま写し取りの並び
@@ -1494,9 +1531,10 @@ bool mu2000::native_midi(u8 byte, int port)
 		}
 		n.status = byte;
 		n.have = 0;
-		// アフタータッチは native では何も起きないので、そのパートは firmware に任せる
+		// アフタータッチ。**割り当て（CAT / PAT）が既定なら音に何も起きない**ので、
+		// そのときは firmware に任せなくてよい（doc/native-engine.md の 6.43）
 		if ((byte & 0xf0) == 0xd0 || (byte & 0xf0) == 0xa0)
-			m_ndrv.aftertouch((byte & 0x0f) + port * 16, 1);
+			m_ndrv.aftertouch((byte & 0x0f) + port * 16, (byte & 0xf0) == 0xa0);
 		// 鍵の上げ下げ・CC・ベンドはこちらで見る。残り（音色の指定など）は firmware へ
 		const u8 kind = byte & 0xf0;
 		if (kind == 0xc0)
@@ -1519,17 +1557,39 @@ bool mu2000::native_midi(u8 byte, int port)
 	if (m_sx_pos >= 0) {
 		// 長い SysEx（MEG のプログラムなど）の間は待ちを切らさない
 		m_fw_hold = std::max(m_fw_hold, u32(44100 / 200));
-		if (m_sx_pos < 5)
+		if (m_sx_pos < 6)
 			m_sx[m_sx_pos] = byte;
-		if (++m_sx_pos == 5) {
-			const bool yamaha_param = m_sx[0] == 0x43 && (m_sx[1] & 0xf0) == 0x10;
-			// 43 1n 4C hh … の hh。00 システム / 02 エフェクト / 03 インサーション
-			const u8 hh = m_sx[3];
-			const bool heavy = !yamaha_param || hh == 0x00 || hh == 0x02 || hh == 0x03;
+		m_sx_pos++;
+		// XG のパラメータチェンジ（43 1n 4C hh mm ll …）かどうかは 3 バイトで分かる。
+		// そうならもう 1 バイト（ll）まで待って細かく分ける。そうでないもの
+		// （GM システムオンなど）は 5 バイトで決める＝前と同じ
+		const bool xg_param = m_sx[0] == 0x43 && (m_sx[1] & 0xf0) == 0x10 && m_sx[2] == 0x4c;
+		if (m_sx_pos >= (xg_param ? 6 : 5)) {
+			// **重いのは「MEG のプログラムを書き直すもの」だけ**。
+			// `nativeplay --sxsettle` で SWP30 を触り終わるまでを測った:
+			//   00 00 7E XG システムオン       212ms
+			//   02 01 00 リバーブの種類        176ms
+			//   02 01 20 コーラスの種類        177ms
+			//   02 01 40 バリエーションの種類  182ms
+			//   03 0n 00 インサーションの種類  182ms
+			// 一方、**値を変えるだけ**のものは 0〜4ms で終わる:
+			//   00 00 04 マスターボリューム 0ms / 02 01 02 リバーブのパラメータ 3.9ms
+			//   03 0n 02 インサーションのパラメータ 3.1ms / 08 pp xx パートの設定 0ms
+			// 前はエフェクトとシステムなら何でも 300ms 待っていたので、
+			// エフェクトのパラメータを流す曲で SH-2 を無駄に回していた
+			const u8 hh = m_sx[3], mm = m_sx[4], ll = m_sx[5];
+			bool heavy = !xg_param;
+			if (xg_param) {
+				if (hh == 0x00 && mm == 0x00 && (ll == 0x7e || ll == 0x7f))
+					heavy = true;               // システムオン・全パラメータリセット
+				else if (hh == 0x02 && mm == 0x01 &&
+				         (ll <= 0x01 || ll == 0x20 || ll == 0x21 || ll == 0x40 || ll == 0x41))
+					heavy = true;               // リバーブ・コーラス・バリエーションの種類
+				else if (hh == 0x03 && ll <= 0x01)
+					heavy = true;               // インサーションの種類
+			}
 			if (heavy) {
-				// 実測（nativeplay --ccwatch）で SWP30 を触り終わるまで
-				// XG On が 224ms、リバーブの種類が 168ms、インサーションが 176ms。
-				// 余裕を見て 300ms（前は 500ms だった）
+				// 実測の 212ms に余裕を見て 300ms（前は 500ms だった）
 				m_fw_hold = std::max(m_fw_hold, u32(44100 * 3 / 10));
 				m_fw_why = 1;
 			}
@@ -1626,10 +1686,14 @@ bool mu2000::native_midi(u8 byte, int port)
 		return true;
 	}
 	m_ne_stats.note_fw++;
+	// firmware が鳴らす音でも、最後に押した鍵は覚えておく
+	// （つぎの音のポルタメントの出発点になる）
+	m_ndrv.note_fw(part, note);
 	// まだ写し取っていない音（ドラムは音ごと）。firmware に鳴らさせて覚える
 	const u32 rec = m_ndrv.record_of(part);
 	const bool drum = m_ndrv.is_drum(part);
-	if ((rec || drum) && !m_learning) {
+	// 知らない CC で firmware に任せているパートは、写し取っても使わない
+	if ((rec || drum) && !m_learning && !m_ndrv.delegated(part)) {
 		m_learn_note = note;
 		m_learn_vel = vel;
 		m_learn_drum = drum ? m_ndrv.drum_key(part, note) : 0;
