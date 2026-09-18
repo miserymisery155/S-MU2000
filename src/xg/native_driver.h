@@ -221,6 +221,10 @@ public:
 		int mod = -1;                          // CC1（モジュレーション）
 		int rev = -1, cho = -1;                // CC91 / CC93（送り）
 		int bri = -1, res = -1;                // CC74 / CC71（明るさ・共振）
+		// **こちらでさばけない CC が既定から外れている**印（ビットごとに 1 つ）。
+		// 立っている間、そのパートの音は firmware に鳴らしてもらう。
+		// 黙って無視すると、ポルタメントや EG の設定が効かない音になる
+		u32 unknown = 0;
 		int bend = 8192, range = 2;            // ピッチベンドと、その幅（半音）
 		bool damper = false;                   // CC64
 	};
@@ -267,6 +271,37 @@ public:
 	int part_bri(int part) const  { return m_ram ? int(m_ram[ram::part_base(part) + 0x18]) : 64; }
 	int part_res(int part) const  { return m_ram ? int(m_ram[ram::part_base(part) + 0x19]) : 64; }
 
+	// こちらでさばけない CC のうち、**音に効くもの**。既定から外れたら
+	// そのパートは firmware に任せる（native では何も起きないため）
+	static int unknown_bit(int cc, int value)
+	{
+		struct e { u8 cc, def; };
+		static const e LIST[] = {
+			{ 0x05, 0 },     // ポルタメントの速さ
+			{ 0x41, 0 },     // ポルタメント 入切（64 以上で入）
+			{ 0x48, 64 },    // EG リリース
+			{ 0x49, 64 },    // EG アタック
+			{ 0x4b, 64 },    // EG ディケイ
+			{ 0x54, 0 },     // ポルタメント コントロール
+			{ 0x5e, 0 },     // バリエーション送り
+		};
+		for (size_t i = 0; i < sizeof(LIST) / sizeof(LIST[0]); i++)
+			if (LIST[i].cc == cc)
+				return value == LIST[i].def ? -int(i) - 1 : int(i) + 1;
+		return 0;
+	}
+
+	// アフタータッチ（触れた強さ）も native では何も起きない
+	void aftertouch(int part, int value)
+	{
+		if (part < 0 || part >= PARTS)
+			return;
+		if (value)
+			m_cc[part].unknown |= 1u << 31;
+		else
+			m_cc[part].unknown &= ~(1u << 31);
+	}
+
 	// その CC を native でさばけるか（実際にさばく前に決める）
 	static bool handles_cc(int cc)
 	{
@@ -297,8 +332,15 @@ public:
 		case 0x78: case 0x7b:                  // 音を全部切る
 			all_off(part);
 			return false;
-		default:
+		default: {
+			// 音に効く「知らない CC」は、既定から外れている間だけ印を立てる
+			const int bit = unknown_bit(cc, value);
+			if (bit > 0)
+				p.unknown |= 1u << (bit - 1);
+			else if (bit < 0)
+				p.unknown &= ~(1u << (-bit - 1));
 			return false;                      // 知らない CC は firmware に任せる
+		}
 		}
 		apply_cc(part);
 		return true;
@@ -474,6 +516,8 @@ public:
 	{
 		if (!m_rom || part < 0 || part >= PARTS)
 			return false;
+		if (m_cc[part].unknown)              // 知らない CC が効いている間は firmware へ
+			return false;
 		if (is_drum(part))
 			return m_drum.find(drum_key(part, note)) != m_drum.end();
 		const u32 rec = record_of(part);
@@ -503,7 +547,7 @@ public:
 			if (!nv::element_active(el, note, vel))
 				continue;
 			// 波形の番地で、写し取ったスロットと結び付ける
-			const u8 *we = nv::wave_entry(m_rom, nv::wave_set(el), note);
+			const u8 *we = nv::wave_entry(m_rom, nv::wave_set(el), nv::wave_note(el, note));
 			const nv::voice_cal *c =
 			    we ? nv::match_cal(cals, nv::read_wave(we).format_addr, &taken) : nullptr;
 			if (!c && size_t(used) < cals.size()) {

@@ -120,6 +120,15 @@ inline u32 elem_delay(const u8 *elem)
 	return u32(441 * (1 << (n < 8 ? n - 1 : 7)) - 130);
 }
 
+// **波形を選ぶときの鍵**。要素の粗調（byte17）で移した鍵で選ぶ。
+// GtHarmonics（音色 31）は要素が 12 半音下げていて、鍵 84 のときに
+// 鍵 72 のぶんの波形を鳴らしていた（それで音程がぴったり合う）
+inline int wave_note(const u8 *elem, int note)
+{
+	const int n = note + int(elem[17]) - 64;
+	return n < 0 ? 0 : (n > 127 ? 127 : n);
+}
+
 // 要素ぶんの音程のずらし（セント）。byte17 が半音、byte18 がセント
 inline int elem_tune(const u8 *elem)
 {
@@ -291,7 +300,7 @@ inline int level_from_att(const u8 *rom, int att)
 // 「素の音量」を出す。これがあれば、ほかの鍵・強さの減衰は式で出せる
 inline int wave_level(const u8 *rom, const u8 *elem, int note)
 {
-	const u8 *we = wave_entry(rom, wave_set(elem), note);
+	const u8 *we = wave_entry(rom, wave_set(elem), wave_note(elem, note));
 	return we ? int(we[0]) : 0;
 }
 
@@ -404,7 +413,7 @@ inline slot_regs build_note(const u8 *rom, const u8 *elem, int note, int att,
                             const defaults &d = defaults(), int cents_extra = 0)
 {
 	slot_regs r;
-	const u8 *we = wave_entry(rom, wave_set(elem), note);
+	const u8 *we = wave_entry(rom, wave_set(elem), wave_note(elem, note));
 	if (!we)
 		return r;
 	const wave_info w = read_wave(we);

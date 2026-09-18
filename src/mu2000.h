@@ -380,6 +380,10 @@ private:
 	u32  m_learn_rec = 0;
 	std::map<u32, u16> m_learn_first, m_learn_last;
 	u64  m_learn_mask = 0, m_learn_keyed = 0;
+	// 写し取りの間の、フィルタ・LFO の動き（鍵を押した瞬間からの時刻つき）。
+	// 写し取りが終わってから録り始めると、**最初の数十 ms が抜ける**
+	u64  m_learn_key_clock = 0;
+	std::vector<std::pair<int, xg::nv::fstep>> m_learn_traj;
 	int  m_learn_left = 0;         // 残りサンプル数
 	int  m_learn_want = 1;         // 鳴るはずの要素の数（そろうまで待つ）
 	// **実機と同じだけ遅らせる**（doc/native-engine.md の 6.16）。

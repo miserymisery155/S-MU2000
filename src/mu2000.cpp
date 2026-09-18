@@ -1042,6 +1042,8 @@ void mu2000::native_learn_start(u32 rec)
 	}
 	m_learn_first.clear();
 	m_learn_last.clear();
+	m_learn_traj.clear();
+	m_learn_key_clock = 0;
 	m_learn_mask = m_learn_keyed = 0;
 	// レジスタは鍵を押した所でまとめて書かれるので、短くてよい。
 	// 長くすると、その間の音が全部 firmware に回ってしまう。
@@ -1051,6 +1053,14 @@ void mu2000::native_learn_start(u32 rec)
 		if (!master)
 			return;
 		m_learn_last[reg] = value;
+		// 鍵を押したあとのフィルタ・LFO の動きを、時刻つきで控えておく
+		if (m_learn_key_clock) {
+			const int r2 = int(reg % 64);
+			if ((r2 == 0x00 || r2 == 0x01 || r2 == 0x04 || r2 == 0x05 || r2 == 0x0a) &&
+			    reg < 0x1000 && m_learn_traj.size() < 512)
+				m_learn_traj.push_back({ int(reg / 64),
+				    xg::nv::fstep{ u32(m_ne_clock - m_learn_key_clock), u8(r2), value } });
+		}
 		switch (reg) {
 		case 0x18e: m_learn_mask = (m_learn_mask & ~(u64(0xffff) << 48)) | (u64(value) << 48); break;
 		case 0x18f: m_learn_mask = (m_learn_mask & ~(u64(0xffff) << 32)) | (u64(value) << 32); break;
@@ -1063,6 +1073,8 @@ void mu2000::native_learn_start(u32 rec)
 				m_learn_keyed |= m_learn_mask;
 			if (m_learn_first.empty())
 				m_learn_first = m_learn_last;
+			if (!m_learn_key_clock)
+				m_learn_key_clock = m_ne_clock;
 			// 鳴り始めたら、あと少しだけ見て終える（0x01 が落ち着くぶん）。
 			// ただし**要素がそろうまでは待つ**。MusicBox のように 2 つ目の要素を
 			// 37ms 遅れて鳴らす音色があり、打ち切ると片方しか写し取れない。
@@ -1157,7 +1169,7 @@ void mu2000::native_learn_finish()
 				if (used_elem & (1u << k))
 					continue;
 				const u8 *e2 = xg::nv::element(rom, m_learn_rec, k);
-				const u8 *w2 = xg::nv::wave_entry(rom, xg::nv::wave_set(e2), m_learn_note);
+				const u8 *w2 = xg::nv::wave_entry(rom, xg::nv::wave_set(e2), xg::nv::wave_note(e2, m_learn_note));
 				if (w2 && xg::nv::read_wave(w2).format_addr == want) {
 					idx = k;
 					used_elem |= 1u << k;
@@ -1189,7 +1201,7 @@ void mu2000::native_learn_finish()
 		for (int k = 0; k < ncal; k++) {
 			const xg::nv::voice_cal &c = cals[size_t(k)];
 			const u8 *e2 = xg::nv::element(rom, m_learn_rec, k);
-			const u8 *w2 = xg::nv::wave_entry(rom, xg::nv::wave_set(e2), m_learn_note);
+			const u8 *w2 = xg::nv::wave_entry(rom, xg::nv::wave_set(e2), xg::nv::wave_note(e2, m_learn_note));
 			std::fprintf(stderr, "  写し%d 0x11=%04x 0x32=%04x 0x09=%04x 波形=%08x"
 			                     " / 式 0x11=%04x 要素b18=%d b0=%d b1=%d\n",
 			             k, c.reg[0x11], c.reg[0x32], c.reg[0x09], c.wave_addr(),
@@ -1351,12 +1363,24 @@ void mu2000::traj_start(u32 rec, u64 drum_key, int ncal)
 	int n = 0;
 	for (int ch = 0; ch < 64; ch++)
 		m_traj_chan[ch] = (m_learn_keyed & (u64(1) << ch)) ? n++ : -1;
+	// 鍵を押した瞬間からの控えを、まず入れる
+	{
+		int n2 = 0;
+		int idx[64];
+		for (int ch = 0; ch < 64; ch++)
+			idx[ch] = (m_learn_keyed & (u64(1) << ch)) ? n2++ : -1;
+		for (const auto &e : m_learn_traj)
+			if (e.first < 64 && idx[e.first] >= 0 &&
+			    size_t(idx[e.first]) < m_traj_cals->size())
+				(*m_traj_cals)[idx[e.first]].filter_env.push_back(e.second);
+	}
+	m_learn_traj.clear();
 	m_traj_n = 0;
 	m_traj_rec = true;
 	m_ndrv.set_recording(true);
 	m_traj_rec_key = rec;
 	m_traj_drum_key = drum_key;
-	m_traj_start = m_ne_clock;
+	m_traj_start = m_learn_key_clock ? m_learn_key_clock : m_ne_clock;
 	m_traj_left = 44100;                 // 1 秒ぶん見る
 	set_swp_watch([this](bool master, u32 reg, u16 value) {
 		if (!master)
@@ -1442,6 +1466,9 @@ bool mu2000::native_midi(u8 byte, int port)
 		}
 		n.status = byte;
 		n.have = 0;
+		// アフタータッチは native では何も起きないので、そのパートは firmware に任せる
+		if ((byte & 0xf0) == 0xd0 || (byte & 0xf0) == 0xa0)
+			m_ndrv.aftertouch((byte & 0x0f) + port * 16, 1);
 		// 鍵の上げ下げ・CC・ベンドはこちらで見る。残り（音色の指定など）は firmware へ
 		const u8 kind = byte & 0xf0;
 		if (kind != 0x80 && kind != 0x90 && kind != 0xb0 && kind != 0xe0) {
