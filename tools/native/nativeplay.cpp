@@ -405,7 +405,14 @@ int main(int argc, char **argv)
 			if (!rec2)
 				continue;
 			const int n2 = xg::nv::element_count(rom, rec2);
-			std::printf("V %3d %06x %d", pg, rec2, n2);
+			// こちらで引いた記録と突き合わせる（firmware に頼らずに音色を決められるか）
+			const int mode = mu.nvram()[xg::ram::VOICE_MODE];
+			const int vset = mu.nvram()[xg::ram::VOICE_SET];
+			const u32 mine = vr.lookup(mode, vset, msb, lsb, pg);
+			std::printf("V %3d %06x %d%s", pg, rec2, n2,
+			            mine == rec2 ? "" : "  ★ちがう ");
+			if (mine != rec2)
+				std::printf("こちら %06x（mode=%d set=%d）", mine, mode, vset);
 			for (int k = 0; k < n2; k++)
 				std::printf(" %d", xg::nv::element(rom, rec2, k)[72]);
 			std::putchar(10);

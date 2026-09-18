@@ -76,6 +76,10 @@ public:
 			s = slot_use();
 		for (auto &c : m_cc)
 			c = part_cc();
+		for (auto &r : m_recsel)
+			r = 0;
+		for (auto &d : m_recsel_drum)
+			d = -1;
 		m_clock = 0;
 		m_traj = false;
 		m_rec = false;
@@ -106,6 +110,8 @@ public:
 	// 「記録が引けない＝ドラム」では、音色を選び終える前の旋律パートまで拾ってしまう
 	bool is_drum(int part) const
 	{
+		if (part >= 0 && part < PARTS && m_recsel_drum[part] >= 0)
+			return m_recsel_drum[part] != 0;
 		if (!m_ram || part < 0 || part >= PARTS)
 			return false;
 		return m_ram[ram::part_base(part) + 0x07] != 0;
@@ -115,6 +121,7 @@ public:
 	const std::unordered_map<u32, std::vector<nv::voice_cal>> &cal_map() const { return m_cal; }
 	const std::unordered_map<u64, std::vector<nv::voice_cal>> &drum_map() const { return m_drum; }
 	size_t cal_count() const { return m_cal.size() + m_drum.size(); }
+	int peak_slots() const { return m_peak; }
 
 	// 写し取りの最中は、段が後から増えるので毎サンプル見る
 	void set_recording(bool on) { m_rec = on; m_traj_next = 0; }
@@ -197,9 +204,21 @@ public:
 		return m_drum.find(drum_key(part, note)) != m_drum.end();
 	}
 
-	// パートの音色の記録を、ワーク RAM から読む（firmware が入れた値）
+	// **音色を自分で決める**（xg::voice_rom::lookup。旋律系のバンク 640 音色で
+	// firmware と食い違い 0 だった）。0 を渡すと、またワーク RAM を見る
+	void set_record(int part, u32 rec, int drum)
+	{
+		if (part < 0 || part >= PARTS)
+			return;
+		m_recsel[part] = rec;
+		m_recsel_drum[part] = s8(drum);
+	}
+
+	// パートの音色の記録。自分で引けていればそれを、そうでなければワーク RAM を読む
 	u32 record_of(int part) const
 	{
+		if (part >= 0 && part < PARTS && m_recsel[part])
+			return m_recsel[part];
 		if (!m_ram || part < 0 || part >= PARTS)
 			return 0;
 		const u8 *p = m_ram + ram::part_base(part);
@@ -259,6 +278,31 @@ public:
 			const int r2 = int(b[0x23]) - 64;
 			m_cc[p].range = r2 < 0 ? 0 : (r2 > 24 ? 24 : r2);
 		}
+	}
+
+	// **パートの「経路」の印**。素通しの量（08 pp 11）・バリエーション送り（14）・
+	// パートの EQ（+0x6A-0x6F）・インサーション 4 つの掛かり先を混ぜる。
+	// 写し取りはこの経路ごとの値なので、違う経路では使い回せない
+	u32 part_ctx(int part) const
+	{
+		if (!m_ram || part < 0 || part >= PARTS)
+			return 0;
+		u32 h = 2166136261u;
+		auto mix = [&h](u8 x) { h ^= x; h *= 16777619u; };
+		const u8 *b = m_ram + ram::part_base(part);
+		mix(b[0x11]);
+		mix(b[0x14]);
+		for (int i = 0; i < 6; i++)
+			mix(b[ram::PART_EQ_RAM + i]);
+		for (int n = 0; n < 4; n++)
+			mix(m_ram[ram::INS_BLOCK[n] + 0x0c]);
+		return h ? h : 1;
+	}
+
+	// その写し取りが、いまのパートの経路で使えるか
+	bool ctx_ok(const std::vector<nv::voice_cal> &cals, int part) const
+	{
+		return !cals.empty() && cals[0].cal_ctx == part_ctx(part);
 	}
 
 	// 写し取ったときのつまみの位置（ワーク RAM から）
@@ -507,7 +551,10 @@ public:
 		if (is_drum(part))
 			return !m_drum.empty();
 		const u32 rec = record_of(part);
-		return rec && m_cal.find(rec) != m_cal.end();
+		if (!rec)
+			return false;
+		const auto it = m_cal.find(rec);
+		return it != m_cal.end() && ctx_ok(it->second, part);
 	}
 
 	// その音を native で鳴らせるか（実際に鳴らす前に決める必要がある。
@@ -518,10 +565,15 @@ public:
 			return false;
 		if (m_cc[part].unknown)              // 知らない CC が効いている間は firmware へ
 			return false;
-		if (is_drum(part))
-			return m_drum.find(drum_key(part, note)) != m_drum.end();
+		if (is_drum(part)) {
+			const auto d = m_drum.find(drum_key(part, note));
+			return d != m_drum.end() && ctx_ok(d->second, part);
+		}
 		const u32 rec = record_of(part);
-		return rec && m_cal.find(rec) != m_cal.end();
+		if (!rec)
+			return false;
+		const auto it = m_cal.find(rec);
+		return it != m_cal.end() && ctx_ok(it->second, part);
 	}
 
 	// 鍵を押す。写し取りが無ければ false（呼んだ側が firmware に回す）
@@ -533,7 +585,7 @@ public:
 		if (!rec || !m_rom)
 			return false;
 		const auto it = m_cal.find(rec);
-		if (it == m_cal.end())
+		if (it == m_cal.end() || !ctx_ok(it->second, part))
 			return false;
 		const std::vector<nv::voice_cal> &cals = it->second;
 
@@ -558,6 +610,8 @@ public:
 			const int slot = take_slot(part, note);
 			if (slot < 0)
 				break;
+			if (busy() > m_peak)
+				m_peak = busy();
 			slot_use &su = m_slot[slot];
 			su.elem = el;
 			su.wave = we;
@@ -639,7 +693,7 @@ public:
 	bool drum_on(int part, int note, int vel)
 	{
 		const auto it = m_drum.find(drum_key(part, note));
-		if (it == m_drum.end() || !m_rom)
+		if (it == m_drum.end() || !m_rom || !ctx_ok(it->second, part))
 			return false;
 		u64 keymask = 0;
 		for (const nv::voice_cal &c : it->second) {
@@ -670,6 +724,8 @@ public:
 					                           : c.reg[i])))));
 
 			su.drum_rel = c.has(9) ? u16(c.reg[9]) : 0;
+			if (busy() > m_peak)
+				m_peak = busy();
 			if (debug_on())
 				std::fprintf(stderr, "drum part=%d note=%d vel=%d/%d att=%d->%d 段 %d 写し %016llx%s",
 				             part, note, vel, c.cal_vel, att0, att,
@@ -684,6 +740,16 @@ public:
 
 private:
 
+	// いちばん多いときに、いくつのスロットを使ったか（取り合いを見るため）
+	int busy() const
+	{
+		int n = 0;
+		for (const slot_use &s : m_slot)
+			if (s.on)
+				n++;
+		return n;
+	}
+
 	slot_use fresh(int part, int note)
 	{
 		slot_use s;
@@ -695,14 +761,18 @@ private:
 		return s;
 	}
 
+	// **下の 8 スロットは firmware のために空けておく。**
+	// firmware は下から使うので、写し取りの 1 音目とぶつからない。
+	// dense（16 パート・60 音）でもこちらが使うのは 36 までなので足りる
+	static constexpr int FW_SLOTS = 8;
+
 	// 空きスロットを取る。無ければ一番古い声を止めて使う。
-	// **上から**取る。firmware は下から使うので、写し取りのために firmware が
-	// 鳴らしている音とぶつかりにくい
+	// **上から**取る（firmware は下から使うため）
 	int take_slot(int part, int note)
 	{
 		int oldest = -1;
 		u64 oldest_age = ~u64(0);
-		for (int n2 = 0; n2 < SLOTS; n2++) {
+		for (int n2 = 0; n2 < SLOTS - FW_SLOTS; n2++) {
 			const int i = SLOTS - 1 - n2;
 			if (!m_slot[i].on) {
 				m_slot[i] = fresh(part, note);
@@ -741,7 +811,11 @@ private:
 	std::unordered_map<u64, std::vector<nv::voice_cal>> m_drum;
 	std::array<slot_use, SLOTS> m_slot;
 	std::array<part_cc, PARTS> m_cc;
+	// 自分で引いた音色（0 なら引けていない）と、ドラムかどうか（-1 なら分からない）
+	std::array<u32, PARTS> m_recsel{};
+	std::array<s8, PARTS> m_recsel_drum{};
 	u64 m_clock = 0;
+	int m_peak = 0;
 	bool m_traj = false;
 	bool m_rec = false;            // 写し取りの最中（段が後から増える）
 	u64 m_traj_next = 0;           // つぎに段を書く時刻

@@ -336,6 +336,7 @@ public:
 	std::vector<u8> native_cal_save() const;
 	bool native_cal_load(const u8 *data, size_t n);
 	size_t native_cal_count() const { return m_ndrv.cal_count(); }
+	int native_peak_slots() const { return m_ndrv.peak_slots(); }
 
 	struct native_why { u64 total, by_note, by_sysex, by_other, by_learn, by_midi; };
 	native_why native_why_counts() const
@@ -428,6 +429,12 @@ private:
 		if (on) m_nown[part][(note >> 5) & 3] |= u32(1) << (note & 31);
 		else    m_nown[part][(note >> 5) & 3] &= ~(u32(1) << (note & 31));
 	}
+
+	// **音色を自分で引く**（firmware の RAM を待たずに済む）。
+	// バンクとプログラムをパートごとに覚えて、xg::voice_rom::lookup に渡す
+	struct part_prog { u8 msb = 0, lsb = 0, prog = 0; };
+	part_prog m_prog_sel[64];
+	void native_select_voice(int part);
 
 	// 口ごとの MIDI の読み取り
 	struct nmidi { u8 status = 0; u8 d0 = 0; int have = 0; };
