@@ -456,6 +456,18 @@ private:
 	}
 
 public:
+	// そのパートの音色をもう写し取ってあるか（CC を firmware にどれだけ
+	// 見せるかの目安。まだなら 1 音目は firmware が鳴らすので、CC も効かせてもらう）
+	bool part_learned(int part) const
+	{
+		if (!m_rom || part < 0 || part >= PARTS)
+			return false;
+		if (is_drum(part))
+			return !m_drum.empty();
+		const u32 rec = record_of(part);
+		return rec && m_cal.find(rec) != m_cal.end();
+	}
+
 	// その音を native で鳴らせるか（実際に鳴らす前に決める必要がある。
 	// 鳴らせないなら firmware に回すので、遅らせてはいけない）
 	bool can_play(int part, int note) const

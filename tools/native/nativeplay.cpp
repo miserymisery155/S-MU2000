@@ -173,6 +173,7 @@ int main(int argc, char **argv)
 	bool firmware = false, compare = false, song = false, dump_voice = false, copyall = false;
 	int sweep = 0, volsweep = 0, levels = 0;
 	bool bench = false, ccwatch = false, ccsweep = false, ccram = false, attsweep = false, cutsweep = false, listvoices = false, ccfilter = false;
+	int ccreg = -1;
 	for (int i = 3; i < argc; i++) {
 		if (!std::strcmp(argv[i], "-b") && i + 1 < argc)
 			std::sscanf(argv[++i], "%d,%d,%d", &msb, &lsb, &prog);
@@ -193,6 +194,7 @@ int main(int argc, char **argv)
 		else if (!std::strcmp(argv[i], "--cutsweep")) cutsweep = true;
 		else if (!std::strcmp(argv[i], "--list")) listvoices = true;
 		else if (!std::strcmp(argv[i], "--ccfilter")) ccfilter = true;
+		else if (!std::strcmp(argv[i], "--ccreg") && i + 1 < argc) ccreg = std::atoi(argv[++i]);
 		else if (!std::strcmp(argv[i], "--sweep") && i + 1 < argc) sweep = std::atoi(argv[++i]);
 		else if (!std::strcmp(argv[i], "--volsweep") && i + 1 < argc) volsweep = std::atoi(argv[++i]);
 		else if (!std::strcmp(argv[i], "--levels") && i + 1 < argc) levels = std::atoi(argv[++i]);
@@ -255,6 +257,45 @@ int main(int argc, char **argv)
 				mu.midi_in(bb, 0);
 			for (u32 i = 0; i < RATE / 2; i++)
 				mu.run_sample(l, r);
+			mu.set_swp_watch(nullptr);
+		}
+		// SysEx（XG On・エフェクトの種類）のあと、firmware が落ち着くまで何サンプルか
+		{
+			u32 last = 0, n2 = 0;
+			mu.set_swp_watch([&](bool master, u32, u16) { if (master) last = n2; });
+			for (u8 bb : { u8(0xf0), u8(0x43), u8(0x10), u8(0x4c), u8(0x00), u8(0x00),
+			               u8(0x7e), u8(0x00), u8(0xf7) })
+				mu.midi_in(bb, 0);
+			for (; n2 < RATE * 2; n2++)
+				mu.run_sample(l, r);
+			std::printf("XG On のあと SWP30 を触り終わるまで %u サンプル（%.1f ms）%c",
+			            last, double(last) * 1000.0 / RATE, 10);
+			mu.set_swp_watch(nullptr);
+			for (u32 i = 0; i < RATE; i++)
+				mu.run_sample(l, r);
+			// エフェクトの種類を変える SysEx（リバーブを HALL1 に）
+			last = 0; n2 = 0;
+			mu.set_swp_watch([&](bool master, u32, u16) { if (master) last = n2; });
+			for (u8 bb : { u8(0xf0), u8(0x43), u8(0x10), u8(0x4c), u8(0x02), u8(0x01),
+			               u8(0x00), u8(0x10), u8(0x00), u8(0xf7) })
+				mu.midi_in(bb, 0);
+			for (; n2 < RATE * 2; n2++)
+				mu.run_sample(l, r);
+			std::printf("リバーブの種類を変えたあと %u サンプル（%.1f ms）%c",
+			            last, double(last) * 1000.0 / RATE, 10);
+			mu.set_swp_watch(nullptr);
+			for (u32 i = 0; i < RATE; i++)
+				mu.run_sample(l, r);
+			// インサーションの種類を変える（03 00 00 に 41 00 ＝ ディストーション）
+			last = 0; n2 = 0;
+			mu.set_swp_watch([&](bool master, u32, u16) { if (master) last = n2; });
+			for (u8 bb : { u8(0xf0), u8(0x43), u8(0x10), u8(0x4c), u8(0x03), u8(0x00),
+			               u8(0x00), u8(0x41), u8(0x00), u8(0xf7) })
+				mu.midi_in(bb, 0);
+			for (; n2 < RATE * 2; n2++)
+				mu.run_sample(l, r);
+			std::printf("インサーションを変えたあと %u サンプル（%.1f ms）%c",
+			            last, double(last) * 1000.0 / RATE, 10);
 			mu.set_swp_watch(nullptr);
 		}
 		// 音色を選び直すのに firmware が何サンプル要るか
@@ -369,6 +410,58 @@ int main(int argc, char **argv)
 				std::printf(" %d", xg::nv::element(rom, rec2, k)[72]);
 			std::putchar(10);
 		}
+		return 0;
+	}
+
+	// --ccreg N: その CC を 1..127 まで振って、**鳴らし始めの**スロットのレジスタを
+	// 並べる。値の変わったレジスタだけ出す（包絡線が動く前を見たいので毎回鳴らし直す）
+	if (ccreg >= 0) {
+		std::map<u32, u16> now, seen;
+		u64 mask = 0, keyed = 0;
+		mu.set_swp_watch([&](bool master, u32 r2, u16 v2) {
+			if (!master) return;
+			now[r2] = v2;
+			if (r2 == 0x20e && seen.empty()) seen = now;
+			switch (r2) {
+			case 0x18e: mask = (mask & ~(u64(0xffff) << 48)) | (u64(v2) << 48); break;
+			case 0x18f: mask = (mask & ~(u64(0xffff) << 32)) | (u64(v2) << 32); break;
+			case 0x1ce: mask = (mask & ~(u64(0xffff) << 16)) | (u64(v2) << 16); break;
+			case 0x1cf: mask = (mask & ~u64(0xffff)) | v2; break;
+			case 0x20e: keyed |= mask; break;
+			default: break;
+			}
+		});
+		std::printf("== CC%d（鍵 %d 強さ %d）%c", ccreg, note, vel, 10);
+		for (int v = 1; v <= 127; v += 2) {
+			if (ccreg >= 128)                       // 128 以上はチャンネルアフタータッチ
+				for (u8 bb : { u8(0xd0), u8(v) })
+					mu.midi_in(bb, 0);
+			else
+				for (u8 bb : { u8(0xb0), u8(ccreg), u8(v) })
+					mu.midi_in(bb, 0);
+			keyed = 0;
+			now.clear();
+			seen.clear();
+			for (u8 bb : { u8(0x90), u8(note & 0x7f), u8(vel & 0x7f) })
+				mu.midi_in(bb, 0);
+			for (u32 i = 0; i < RATE / 50; i++)
+				mu.run_sample(l, r);
+			for (int ch = 0; ch < 64; ch++)
+				if (keyed & (u64(1) << ch)) {
+					std::printf("%3d", v);
+					for (int rr = 0; rr < 0x20; rr++) {
+						const auto it = seen.find(u32(ch) * 64 + u32(rr));
+						std::printf(" %04x", it == seen.end() ? 0xffff : it->second);
+					}
+					std::putchar(10);
+					break;
+				}
+			for (u8 bb : { u8(0x80), u8(note & 0x7f), u8(64), u8(0xb0), u8(0x78), u8(0) })
+				mu.midi_in(bb, 0);
+			for (u32 i = 0; i < RATE / 8; i++)
+				mu.run_sample(l, r);
+		}
+		mu.set_swp_watch(nullptr);
 		return 0;
 	}
 

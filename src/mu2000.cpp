@@ -1057,7 +1057,10 @@ void mu2000::native_learn_start(u32 rec)
 		case 0x1ce: m_learn_mask = (m_learn_mask & ~(u64(0xffff) << 16)) | (u64(value) << 16); break;
 		case 0x1cf: m_learn_mask = (m_learn_mask & ~u64(0xffff)) | value; break;
 		case 0x20e:
-			m_learn_keyed |= m_learn_mask;
+			// **要素のぶんだけ**。速い曲では、写し取りの窓の中に次の音の
+			// 引き金が入ってしまい、余計なスロットまで拾っていた
+			if (__builtin_popcountll(m_learn_keyed) < m_learn_want)
+				m_learn_keyed |= m_learn_mask;
 			if (m_learn_first.empty())
 				m_learn_first = m_learn_last;
 			// 鳴り始めたら、あと少しだけ見て終える（0x01 が落ち着くぶん）。
@@ -1095,6 +1098,8 @@ void mu2000::native_learn_finish()
 			}
 			if (!cal.has(0x16) || !cal.has(0x17))
 				continue;
+			if (int(cals.size()) >= m_learn_want)
+				break;
 			cal.cal_vel  = m_learn_vel;
 			cal.cal_vol  = m_ndrv.part_vol(m_learn_part);
 			cal.cal_expr = m_ndrv.part_expr(m_learn_part);
@@ -1131,6 +1136,8 @@ void mu2000::native_learn_finish()
 	for (int ch = 0; ch < 64; ch++) {
 		if (!(m_learn_keyed & (u64(1) << ch)))
 			continue;
+		if (int(cals.size()) >= nel)     // 要素より多く拾わない
+			break;
 		xg::nv::voice_cal cal;
 		for (int i = 0; i < 0x40; i++) {
 			// 0x05・0x0a・0x11 は LFO が動かし続けるので引き金の瞬間、
@@ -1463,7 +1470,10 @@ bool mu2000::native_midi(u8 byte, int port)
 			const u8 hh = m_sx[3];
 			const bool heavy = !yamaha_param || hh == 0x00 || hh == 0x02 || hh == 0x03;
 			if (heavy) {
-				m_fw_hold = std::max(m_fw_hold, u32(44100 / 2));
+				// 実測（nativeplay --ccwatch）で SWP30 を触り終わるまで
+				// XG On が 224ms、リバーブの種類が 168ms、インサーションが 176ms。
+				// 余裕を見て 300ms（前は 500ms だった）
+				m_fw_hold = std::max(m_fw_hold, u32(44100 * 3 / 10));
 				m_fw_why = 1;
 			}
 			m_sx_pos = -1;
@@ -1505,11 +1515,12 @@ bool mu2000::native_midi(u8 byte, int port)
 		// こちらでさばける CC（音量・パン・ダンパー）は firmware に渡すだけなので短く。
 		// 知らない CC は firmware がすべてやるので、処理が終わるまで見る
 		// （5ms に詰めたら bend の残差が -35.8dB から -14dB に落ちた）
-		// こちらでさばける CC は渡すだけなので短く。ただし
-		//   * そのパートを firmware が鳴らしている間
-		//   * モジュレーション（firmware がソフトで揺れを増やしていく）
-		// は firmware に効かせてもらうので長く見る
-		const bool quick = mine && !m_fw_notes[part] && (n.d0 & 0x7f) != 0x01;
+		// こちらでさばける CC は渡すだけなので短く。ただし **そのパートを
+		// firmware が鳴らしている間**は、firmware に効かせてもらうので長く見る
+		// （渡したバイトは列に並ぶので、写し取りで回すときに順に処理される）
+		// まだ写し取っていないパートは、1 音目を firmware が鳴らすので、
+		// CC も firmware に効かせてもらう
+		const bool quick = mine && !m_fw_notes[part] && m_ndrv.part_learned(part);
 		m_fw_hold = std::max(m_fw_hold, u32(quick ? 44100 / 500 : 44100 / 50));
 		replay_note(n.status, n.d0, byte, port);
 		return true;

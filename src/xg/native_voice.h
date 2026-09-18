@@ -128,8 +128,13 @@ inline int elem_tune(const u8 *elem)
 
 inline u16 pitch_reg(const wave_info &w, int note, int follow = 100, int cents_extra = 0)
 {
-	// 整数で計算する（firmware と同じ丸めになる。0 の側へ切り捨て）
-	const int cents = (note - w.base_key) * follow + w.fine_cents + cents_extra;
+	// 整数で計算する（firmware と同じ丸めになる。0 の側へ切り捨て）。
+	// **鍵の追従は鍵 60 を支点にする**（波形の基準鍵ではない）。追従が 100 の
+	// ときは同じ式になるが、50 や 20 の音色では基準鍵とのずれぶん食い違う
+	// （Woodblock で 749 セント、TaikoDrum で 1700 セント。どちらも
+	//  50 * (60 - 基準鍵) でぴったり）
+	const int cents = (note - 60) * follow + (60 - w.base_key) * 100
+	                + w.fine_cents + cents_extra;
 	const int v = cents * 1024 / 1200;
 	// ビット 14 は波形の**形式**で決まる（形式 3 のときだけ立つ。402 組で確かめた）
 	const u16 flag = ((w.format_addr >> 30) & 3) == 3 ? 0x4000 : 0;

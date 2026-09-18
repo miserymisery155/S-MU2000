@@ -1356,7 +1356,8 @@ int main(int argc, char **argv)
 		// 起動が終わってから入れる（起動には firmware が要る）
 		if (native_engine) {
 			eng.mu.set_native_engine(native_engine);
-			smu2000::voicecache::load(eng.mu, smu2000::voicecache::key(eng.mu));
+			if (std::getenv("SMU2000_VOICECACHE"))
+				smu2000::voicecache::load(eng.mu, smu2000::voicecache::key(eng.mu));
 		}
 		eng.state.store(1);
 		eng.publish();
