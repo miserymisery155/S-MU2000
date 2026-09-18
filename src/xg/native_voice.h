@@ -429,9 +429,14 @@ inline u16 release_reg(const u8 *rom, const u8 *elem, int note, int att)
 // フィルタの包絡線の 1 段。firmware はこれをソフトで動かして、鳴っている間
 // 0x00・0x01・0x04 を 10ms ごとに書き直す（doc/native-engine.md の 6.17）
 struct fstep {
-	u32 at;            // 鳴らし始めてからのサンプル数
+	u32 at;            // 鳴らし始めてからのサンプル数（rel なら離してから）
 	u8  reg;
 	u16 v;
+	// **離したあとの段**。実機はフィルタを離しのあいだも動かし続ける。
+	// 写し取りの元にした音が短いと、録れる段のほとんどがこちら側になる。
+	// 押してからの並びと離してからの並びを分けて持ち、鳴らすときも
+	// それぞれの時刻から流す（doc/native-engine.md の 6.57）
+	u8  rel = 0;
 };
 
 struct voice_cal {

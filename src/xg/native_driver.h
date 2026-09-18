@@ -56,6 +56,7 @@ public:
 		// 長い音（ストリングスなど）だけが元の音量のまま鳴り続ける
 		bool rel = false;
 		u64  rel_at = 0;                // 離した時刻
+		u32  rpos = 0;                  // 離してからの段の、つぎに書く位置
 		int  rel_att = 0;               // 離しのときに書いた減衰（戻さないための下限）
 		int part = -1, note = -1, att = 0;
 		const u8 *elem = nullptr;
@@ -187,6 +188,31 @@ public:
 		const auto it = m_cal.find(cal_key(rec, part));
 		return it == m_cal.end() ? nullptr : &it->second;
 	}
+	// **覚えたときの経路で引く**。写し取りを覚えてからフィルタの動きを
+	// 録り始めるまでに、そのパートの経路が変わっていることがある。
+	// いまの経路で引くと見つからず、録りが丸ごと落ちていた
+	std::vector<nv::voice_cal> *cals_of_ctx(u32 rec, u32 ctx)
+	{
+		const auto it = m_cal.find(u64(rec) | (u64(ctx) << 32));
+		return it == m_cal.end() ? nullptr : &it->second;
+	}
+	// その写し取りを捨てて、つぎの音で取り直させる。
+	// **まだその写しを指しているスロットの指し先を外してから**消すこと。
+	// 外さずに消すと、離しの最中のスロットが消えた中身を読みに行って落ちる
+	void drop_cal(u32 rec, u32 ctx)
+	{
+		const auto it = m_cal.find(u64(rec) | (u64(ctx) << 32));
+		if (it == m_cal.end())
+			return;
+		const nv::voice_cal *first = it->second.data();
+		const nv::voice_cal *last  = first + it->second.size();
+		for (slot_use &s : m_slot)
+			if (s.cal >= first && s.cal < last) {
+				s.cal = nullptr;
+				s.rel = false;
+			}
+		m_cal.erase(it);
+	}
 	std::vector<nv::voice_cal> *drum_cals_of(u64 key)
 	{
 		const auto it = m_drum.find(key);
@@ -218,9 +244,40 @@ public:
 		int live = 0;
 		for (int i = 0; i < SLOTS; i++) {
 			slot_use &s = m_slot[i];
-			// 写し取りの途中で段が増えることがあるので、まだ段が無くても数える
-			if (!s.on || !s.cal)
+			if (!s.cal)
 				continue;
+			// **離しの最中もフィルタを動かす**。実機は離しのあいだも
+			// 0x00・0x01・0x04 を書き続ける（doc/native-engine.md の 6.57）
+			if (!s.on) {
+				if (!s.rel || clock - s.rel_at > REL_FOLLOW)
+					continue;
+				const std::vector<nv::fstep> &re = s.cal->filter_env;
+				while (s.rpos < re.size()) {
+					if (!re[s.rpos].rel) { s.rpos++; continue; }
+					if (s.rel_at + re[s.rpos].at > clock)
+						break;
+					u16 v = re[s.rpos].v;
+					if (re[s.rpos].reg == 0x0a) {
+						s.lfo = v;
+						v = lfo_reg(v, *s.cal, s.part);
+					} else if (re[s.rpos].reg == 0x00) {
+						s.cut = v;
+						v = cutoff_reg(v, *s.cal, s.part, s.elem, s.note);
+					} else if (re[s.rpos].reg == 0x04) {
+						v = reso_reg(v, *s.cal, s.part);
+					}
+					m_poke(u32(i) * 64 + re[s.rpos].reg, v);
+					s.rpos++;
+				}
+				while (s.rpos < re.size() && !re[s.rpos].rel)
+					s.rpos++;
+				if (s.rpos < re.size()) {
+					live++;
+					if (s.rel_at + re[s.rpos].at < next)
+						next = s.rel_at + re[s.rpos].at;
+				}
+				continue;
+			}
 			live++;
 			// ポルタメント: 10ms ごとに残りのずれを step だけ 0 へ寄せて、
 			// 音程のレジスタを書き直す（6.41）
@@ -239,7 +296,8 @@ public:
 			if (s.tpos >= s.cal->filter_env.size())
 				continue;
 			const std::vector<nv::fstep> &fe = s.cal->filter_env;
-			while (s.tpos < fe.size() && s.tstart + fe[s.tpos].at <= clock) {
+			while (s.tpos < fe.size() && !fe[s.tpos].rel &&
+			       s.tstart + fe[s.tpos].at <= clock) {
 				u16 v = fe[s.tpos].v;
 				if (fe[s.tpos].reg == 0x0a) {      // 深さにモジュレーションを足す
 					s.lfo = v;
@@ -253,6 +311,9 @@ public:
 				m_poke(u32(i) * 64 + fe[s.tpos].reg, v);
 				s.tpos++;
 			}
+			// 離しの段に行き当たったら、押してからの並びはそこで終わり
+			while (s.tpos < fe.size() && fe[s.tpos].rel)
+				s.tpos++;
 			if (s.tpos < fe.size() && s.tstart + fe[s.tpos].at < next)
 				next = s.tstart + fe[s.tpos].at;
 		}
@@ -619,21 +680,17 @@ private:
 			slot_use &s = m_slot[i];
 			if (s.part != part || !s.cal)
 				continue;
-			// **離しの最中の音も追う**。実機はつまみの動きを鳴り終わるまで
-			// 反映する。追わないと、曲の終わりの CC7 のフェードアウトで
-			// 離したばかりの長い音だけが元の音量で鳴り続ける
-			// （利用者の曲の最後の 8 秒で、実機より最大 +25dB 大きかった）
+			// **離しの最中の音も追う**。0x09 の下位は「素の減衰」で、
+			// 坂の位置（swp30 の m_envelope_level）とは別に持たれている
+			// （swp30.cpp の envelope_block: 出る値は level + (glo & 0xff) << 6）。
+			// つまり書き直しても坂は引き直しにならないので、安心して追える。
+			// 追わないと、曲の終わりの CC7 のフェードアウトで離したばかりの
+			// 長い音だけが元の音量のまま鳴り続ける
 			if (!s.on) {
 				if (!s.rel || m_clock - s.rel_at > REL_FOLLOW)
 					continue;
-				// **静かになる方向だけ追う**。0x09 を書き直すと離しの坂が
-				// そこから引き直しになるので、いま鳴っているより大きい音を
-				// 書くと音が生き返ってしまう
-				const int a = note_att(s, part);
-				if (a <= s.rel_att)
-					continue;
-				s.rel_att = a;
-				m_poke(u32(i) * 64 + 9, nv::release_reg(m_rom, s.elem, s.note, a));
+				m_poke(u32(i) * 64 + 9,
+				       nv::release_reg(m_rom, s.elem, s.note, note_att(s, part)));
 				continue;
 			}
 			m_poke(u32(i) * 64 + 9, u16(note_att(s, part)));
@@ -934,13 +991,21 @@ public:
 				any = true;
 				continue;
 			}
+			// 減衰は**いまのつまみで**出す。s.att は鳴らし始めたときの値なので、
+			// 途中で音量を絞られた音を離すと、絞る前の大きさで鳴り終わってしまう
 			if (s.elem)
-				m_poke(u32(i) * 64 + 9, nv::release_reg(m_rom, s.elem, note, s.att));
+				m_poke(u32(i) * 64 + 9,
+				       nv::release_reg(m_rom, s.elem, note, note_att(s, part)));
 			// ドラムは離しでも音を切らない（実機も打ったら鳴りきる）
 			s.on = false;
 			s.rel = s.elem != nullptr;
 			s.rel_at = m_clock;
 			s.rel_att = s.att;
+			s.rpos = 0;
+			if (s.cal && !s.cal->filter_env.empty()) {
+				m_traj = true;
+				m_traj_next = 0;
+			}
 			any = true;
 		}
 		return any;
@@ -1059,22 +1124,41 @@ private:
 		// 窓やプラグインのように MIDI がブロック単位で届くと、同時に鳴る音が
 		// 増えて firmware が上まで伸びる。避けないと、firmware が自分の音の
 		// 続きを書いたときにこちらの音の包絡線が書き替わって壊れる
+		// **離しの最中のスロットは「空き」ではない**。実機は鳴り終わるまで
+		// スロットを持ち続ける。こちらは離した瞬間に空きとして配り直して
+		// いたので、離しの尾が次の音でぶつ切りになっていた。
+		// 利用者の曲は同じパートで 144ms おきに音が来るのに離しは 1.1 秒
+		// あるので、実機が 8 声使うところをこちらは 1〜2 声で鳴らしていた
+		// （その結果、そのパートだけ 1dB 静かだった）。
+		// 空きが無いときだけ、離しの古いものから取る
 		for (int pass = 0; pass < 2; pass++) {
 			const bool avoid = pass == 0;
-			int oldest = -1;
-			u64 oldest_age = ~u64(0);
+			int oldest = -1, oldest_rel = -1;
+			u64 oldest_age = ~u64(0), oldest_rel_age = ~u64(0);
 			for (int n2 = 0; n2 < SLOTS - FW_SLOTS; n2++) {
 				const int i = SLOTS - 1 - n2;
 				if (avoid && fw_recent(i))
 					continue;
-				if (!m_slot[i].on) {
+				const slot_use &u = m_slot[i];
+				const bool ringing = u.rel && m_clock - u.rel_at <= REL_FOLLOW;
+				if (!u.on && !ringing) {
 					m_slot[i] = fresh(part, note);
 					return i;
 				}
-				if (m_slot[i].age < oldest_age) {
-					oldest_age = m_slot[i].age;
+				if (!u.on) {
+					if (u.age < oldest_rel_age) {
+						oldest_rel_age = u.age;
+						oldest_rel = i;
+					}
+				} else if (u.age < oldest_age) {
+					oldest_age = u.age;
 					oldest = i;
 				}
+			}
+			// 離しの古いものを先に取る（まだ押されている音は最後まで残す）
+			if (oldest_rel >= 0) {
+				m_slot[oldest_rel] = fresh(part, note);
+				return oldest_rel;
 			}
 			// 避けた結果どこも空いていなければ、2 周目で避けずに探す
 			// （音が出ないより、稀にぶつかる方がまし）

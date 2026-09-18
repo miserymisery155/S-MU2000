@@ -556,7 +556,7 @@ int main(int argc, char **argv)
 	if (ramdump) {
 		for (u8 bb : { u8(0x90), u8(note & 0x7f), u8(vel & 0x7f) })
 			mu.midi_in(bb, 0);
-		for (u32 i = 0; i < RATE / 4; i++)
+		for (u32 i = 0; i < u32(seconds * RATE); i++)
 			mu.run_sample(l, r);
 		const std::vector<u8> &w = mu.nvram();
 		if (std::FILE *f = std::fopen(ramdump, "wb")) {
