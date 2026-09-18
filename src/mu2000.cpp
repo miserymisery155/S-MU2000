@@ -458,7 +458,7 @@ void mu2000::build_bus()
 		d.r16 = [this, &dev, base](offs_t a) {
 			const u16 v = dev.read16((a - base) >> 1);
 			if (m_swp_trace && m_swp_trace_reads)
-				std::fprintf(m_swp_trace, "R %08x %04x %04x  pc=%08x  t=%.6f\n", base, (a - base) >> 1, v, m_cpu->pc(), double(m_cpu->total_cycles()) / 28000000.0);
+				std::fprintf(m_swp_trace, "R %08x %04x %04x  pc=%08x  t=%.6f s=%llu\n", base, (a - base) >> 1, v, m_cpu->pc(), double(m_cpu->total_cycles()) / 28000000.0, (unsigned long long)trace_sample());
 			return v;
 		};
 		// 幅の内訳を数える。MAME は 16bit ハンドラに mem_mask を渡せるが
@@ -479,10 +479,14 @@ void mu2000::build_bus()
 			m_swp_w32++;
 			const offs_t reg = (a - base) >> 1;
 			if (m_swp_trace) {
-				std::fprintf(m_swp_trace, "%s%08x %04x %04x  pc=%08x  t=%.6f\n",
-				             m_swp_trace_reads ? "W " : "", base, reg, u16(v >> 16), m_cpu->pc(), double(m_cpu->total_cycles()) / 28000000.0);
-				std::fprintf(m_swp_trace, "%s%08x %04x %04x  pc=%08x  t=%.6f\n",
-				             m_swp_trace_reads ? "W " : "", base, reg + 1, u16(v), m_cpu->pc(), double(m_cpu->total_cycles()) / 28000000.0);
+				std::fprintf(m_swp_trace, "%s%08x %04x %04x  pc=%08x  t=%.6f s=%llu\n",
+				             m_swp_trace_reads ? "W " : "", base, reg, u16(v >> 16), m_cpu->pc(), double(m_cpu->total_cycles()) / 28000000.0, (unsigned long long)trace_sample());
+				std::fprintf(m_swp_trace, "%s%08x %04x %04x  pc=%08x  t=%.6f s=%llu\n",
+				             m_swp_trace_reads ? "W " : "", base, reg + 1, u16(v), m_cpu->pc(), double(m_cpu->total_cycles()) / 28000000.0, (unsigned long long)trace_sample());
+			}
+			if (m_swp_watch) {
+				m_swp_watch(base == 0x800000, reg, u16(v >> 16));
+				m_swp_watch(base == 0x800000, reg + 1, u16(v));
 			}
 			dev.write16(reg, u16(v >> 16));
 			dev.write16(reg + 1, u16(v));
@@ -491,8 +495,10 @@ void mu2000::build_bus()
 		d.w16 = [this, &dev, base, hold](offs_t a, u16 v) {
 			m_swp_w16++;
 			if (m_swp_trace)
-				std::fprintf(m_swp_trace, "%s%08x %04x %04x  pc=%08x  t=%.6f\n",
-				             m_swp_trace_reads ? "W " : "", base, (a - base) >> 1, v, m_cpu->pc(), double(m_cpu->total_cycles()) / 28000000.0);
+				std::fprintf(m_swp_trace, "%s%08x %04x %04x  pc=%08x  t=%.6f s=%llu\n",
+				             m_swp_trace_reads ? "W " : "", base, (a - base) >> 1, v, m_cpu->pc(), double(m_cpu->total_cycles()) / 28000000.0, (unsigned long long)trace_sample());
+			if (m_swp_watch)
+				m_swp_watch(base == 0x800000, (a - base) >> 1, v);
 			dev.write16((a - base) >> 1, v);
 			hold((a - base) >> 1);
 		};
@@ -979,17 +985,16 @@ void mu2000::set_native_fx(int mode)
 {
 	m_nfx_on = mode;
 	// 遅延の線は作り直さない（音声の糸が読んでいる最中に切り替えても危なくないように）。
-	// 大きさは 44100Hz ぶんで固定なので、1 度用意すれば足りる
-	static bool ready = false;
-	// 軽量モードは float で計算する。非正規化数（0 に近すぎる値）が出ると命令が何十倍も遅くなるので、
-	// この糸では 0 に丸める（FTZ/DAZ）
-#if defined(__SSE2__) || defined(_M_X64) || defined(__x86_64__)
-	if (mode)
-		_mm_setcsr(_mm_getcsr() | 0x8040);
-#endif
-	if (!ready) {
+	// 大きさは 44100Hz ぶんで固定なので、1 度用意すれば足りる。
+	// **台ごとに持つ**。前は関数の static で、DAW に 2 枚目を挿すと
+	// 2 台目の遅延の線が空のままになって落ちていた
+	// 非正規化数（0 に近すぎる値）を 0 に丸める設定は、**ここでは触らない**。
+	// 糸ごとの設定なので、音声の糸が入れ替わると消えてしまうし、
+	// 音源として挿されている側が host の糸の設定を変えたままにするのも行儀が悪い。
+	// 1 ブロックごとに smu2000::denormals_off を置く（compat/platform.h）
+	if (!m_nfx_ready) {
 		m_nfx.set_rate(44100.0f);
-		ready = true;
+		m_nfx_ready = true;
 	}
 	m_nfx.reset();
 	int mask = 15;
@@ -1132,6 +1137,8 @@ void mu2000::run_sample(s32 &left, s32 &right)
 	if (m_want_threaded && !(++m_thread_check & 0x1fff))
 		apply_threading();
 
+	m_sample_count++;
+
 	// SWP30 は 44100Hz で 1 サンプル。CPU はその間に 28MHz/44100 ≒ 634.9 サイクル
 	m_cycle_debt += 28000000;
 	const u64 cycles = m_cycle_debt / 44100;
@@ -1144,7 +1151,8 @@ void mu2000::run_sample(s32 &left, s32 &right)
 	if (m_profile)
 		pt0 = smu2000::perf_ticks();
 
-	run_cycles(cycles);
+	if (m_cpu_enabled)
+		run_cycles(cycles);
 
 	if (m_profile) {
 		pt1 = smu2000::perf_ticks();
@@ -1347,5 +1355,12 @@ bool mu2000::load_state(const u8 *p, size_t n, std::string &err)
 	// MIDI OUT の途中の枠と溜めは保存していない。空から始める
 	m_tx_r = m_tx_w = 0;
 	m_tx_bit = -1;
+
+	// 軽量モード（C++ のエフェクト）の中身は状態に**入れない**。ディレイと残響の
+	// 遅延線だけで 5MB 近くあって、DAW の企画ファイルが膨らむわりに、得られるのは
+	// 「尾が切れない」だけだから（MEG の側の尾は SWP30 のリバーブ RAM に入っている）。
+	// ただし前の曲の尾が残ったままだと、戻した曲に混ざる。ここで消す
+	if (m_nfx_on)
+		m_nfx.reset();
 	return true;
 }

@@ -239,6 +239,18 @@ $(BUILD)/fxsweep$(EXE): $(OBJS) $(BUILD)/src/mu2000.o $(BUILD)/tools/fxsweep/fxs
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
 
+# SH-2 を止めたまま音を出す（doc/native-engine.md の段 2）。
+#   build/nativeplay.exe ../MU2000/roms out.wav -b 0,0,0 -n 60
+$(BUILD)/nativeplay$(EXE): $(OBJS) $(BUILD)/src/mu2000.o $(BUILD)/tools/native/nativeplay.o
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
+
+# 音色の記録（ROM の 84 バイト）と SWP30 のレジスタを組で集める（doc/native-engine.md の段 1）。
+#   build/voicesweep.exe ../MU2000/roms > voicesweep.txt
+$(BUILD)/voicesweep$(EXE): $(OBJS) $(BUILD)/src/mu2000.o $(BUILD)/tools/voicesweep/voicesweep.o
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
+
 $(BUILD)/render$(EXE): $(OBJS) $(BUILD)/src/mu2000.o $(BUILD)/src/smf.o $(BUILD)/src/render.o
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)

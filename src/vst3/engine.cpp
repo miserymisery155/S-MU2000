@@ -576,6 +576,8 @@ void engine::fill(float *left, float *right, int n, const float *in_l, const flo
 {
 	if (n <= 0)
 		return;
+	// 非正規化数を 0 に丸める（軽量モード用。出るときに host の設定へ戻す）
+	const smu2000::denormals_off no_denormals;
 	// 音声スレッドは待たない。保存などで機械が使われていれば、この区間は無音
 	std::unique_lock<std::mutex> lock(m_machine, std::try_to_lock);
 	if (!lock.owns_lock() || state() != status::ready) {

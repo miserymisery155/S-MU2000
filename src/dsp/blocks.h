@@ -56,8 +56,12 @@ public:
 			const float t = span * std::pow(u, 0.8f) * (0.6f + 0.8f * m_p.room);
 			m_tap[i] = t * m_rate;
 			float g = std::pow(0.15f + 0.85f * m_p.liveness, u * 4.0f);
-			if (m_p.gate)
-				g = u < 0.85f ? 1.0f : 0.0f;      // 切るまでは減らさない
+			if (m_p.gate) {
+				// 切るまでは減らさず、切り際は 2 つぶんかけて落とす。
+				// 真っ二つに切ると、実機より尾が 12dB 小さくなっていた
+				g = u < 0.85f ? 1.0f : clampf((1.0f - u) / 0.15f, 0.0f, 1.0f);
+				g = g * g;
+			}
 			if (m_p.reverse)
 				g = u * u;                      // だんだん大きく
 			m_gain[i] = g * (i % 2 ? -1.0f : 1.0f) * (0.5f + 0.5f * m_p.diffuse);
@@ -103,6 +107,8 @@ public:
 		float hpf_hz = 60.0f, lpf_hz = 8000.0f;
 		bool  cross = false;       // 左右を入れ替えて戻す
 		float level = 1.0f;
+		// 2 本目の組（ECHO の LchDelay2/RchDelay2）。level2 が 0 なら使わない
+		float l2_ms = 0.0f, r2_ms = 0.0f, level2 = 0.0f;
 	};
 
 	void set_rate(float rate)
@@ -142,17 +148,24 @@ public:
 
 		// 戻すのは、出ている音（左右と真ん中）をまとめたもの。実機の LCR ディレイは
 		// 尾がはっきり残るので、1 本だけ戻すと足りない
-		const float mix = (fl + fr) * 0.5f + dc * 0.5f;
-		float bl = m_lp[0].lp(m_hp[0].hp(m_p.cross ? mix : mix)) * m_p.feedback;
-		float br = m_lp[1].lp(m_hp[1].hp(m_p.cross ? mix : mix)) * m_p.feedback;
+		// クロスディレイは左右を入れ替えて戻す。ほかは左右をまとめて戻す
+		// （まとめないと、片側だけに音がある曲で尾が細くなる）
+		const float mix = (fl + fr) * 0.5f + dc * 0.5f * (m_p.c_level > 0.0f ? 1.0f : 0.0f);
+		float bl = m_lp[0].lp(m_hp[0].hp(m_p.cross ? fr : mix)) * m_p.feedback;
+		float br = m_lp[1].lp(m_hp[1].hp(m_p.cross ? fl : mix)) * m_p.feedback;
 		bl = clampf(bl, -4.0f, 4.0f);
 		br = clampf(br, -4.0f, 4.0f);
 
 		m_l.push(l + bl);
 		m_r.push(r + br);
 
-		ol = (dl + dc) * m_p.level;
-		orr = (dr + dc) * m_p.level;
+		float el = 0.0f, er = 0.0f;
+		if (m_p.level2 > 0.0f) {
+			el = m_l.tapf(ms(m_p.l2_ms)) * m_p.level2;
+			er = m_r.tapf(ms(m_p.r2_ms)) * m_p.level2;
+		}
+		ol = (dl + dc + el) * m_p.level;
+		orr = (dr + dc + er) * m_p.level;
 	}
 
 private:
@@ -577,8 +590,11 @@ public:
 			const float over = e / m_thresh;
 			g = std::pow(over, 1.0f / std::max(1.0f, m_p.ratio)) / over;
 		}
-		ol = l * g * m_p.out_level * m_makeup;
-		orr = r * g * m_p.out_level * m_makeup;
+		// 持ち上げは「入っている音の大きさ」に応じて掛ける。いつでも掛けると、
+		// 音を離したあとの尾まで持ち上がって実機より 12dB 大きくなっていた
+		const float boost = 1.0f + (m_makeup - 1.0f) * clampf(e / std::max(1e-6f, m_thresh), 0.0f, 1.0f);
+		ol = l * g * m_p.out_level * boost;
+		orr = r * g * m_p.out_level * boost;
 	}
 
 private:

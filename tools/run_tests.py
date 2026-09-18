@@ -142,9 +142,11 @@ def step_statetest(rep, roms, midi):
     # 読む 2 つ目の A/D 変換器）の写し忘れは、DIN だけでは見つからない（issue #18）
     ok = True
     note = ""
-    for tag, extra in (("statetest", []), ("statetest USB", ["--usb"])):
-        log = WORK / ("statetest%s.log" % ("_usb" if extra else ""))
-        rc = run([exe, roms, midi, "--warm", "2.0", "--steps", "50"] + extra, out=log, err=log)
+    # 3 つ目は軽量モード（C++ のエフェクト）。2 台が同時に軽量モードで動く道を通す
+    for tag, extra, env in (("statetest", [], None), ("statetest USB", ["--usb"], None),
+                            ("statetest 軽量", [], {"SMU2000_NATIVE_FX": "2"})):
+        log = WORK / ("statetest%s.log" % ("_usb" if extra else ("_nfx" if env else "")))
+        rc = run([exe, roms, midi, "--warm", "2.0", "--steps", "50"] + extra, out=log, err=log, env=env)
         this = ""
         for line in log.read_text(encoding="utf-8", errors="replace").splitlines():
             if line.startswith("詰めると"):

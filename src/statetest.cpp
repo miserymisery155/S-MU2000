@@ -55,6 +55,10 @@ bool boot(mu2000 &mu, const std::string &dir)
 	if (!mu.load_lcd_font(dir + "/hd44780u_b04.bin"))
 		mu.load_lcd_font(dir + "/standin/hd44780u_b04.bin");
 	mu.set_threaded(false);          // 突き合わせなので 1 本で回す
+	// 軽量モード（doc/native-dsp.md）でも通るか見る。2 台が同時に軽量モードで
+	// 動く道は、前に 2 台目の遅延線が空のままになるバグがあった
+	if (const char *e = std::getenv("SMU2000_NATIVE_FX"))
+		mu.set_native_fx(std::atoi(e));
 	mu.set_usb_host(g_usb_host);     // **reset() の前に**
 	mu.reset();
 
@@ -216,6 +220,13 @@ int main(int argc, char **argv)
 				report_where(x, from);
 				shown++;
 			}
+		}
+		// 軽量モード（C++ のエフェクト）では、DSP の中身を状態に入れていないので
+		// **ずれて当たり前**（doc/native-dsp.md「機械まるごとの状態には入らない」）。
+		// ここでは「2 台が同時に軽量モードで動いても落ちない」ことだけを見る
+		if (std::getenv("SMU2000_NATIVE_FX")) {
+			std::printf("軽量モードなので、ここのずれは想定どおり（DSP の中身は状態に入れていない）\n");
+			return 0;
 		}
 		std::printf("写し忘れている状態がある\n");
 		return 1;

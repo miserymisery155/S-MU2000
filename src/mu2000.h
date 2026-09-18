@@ -21,6 +21,7 @@
 #include "mame/video/hd44780.h"
 
 #include <cstdio>
+#include <functional>
 #include <cstring>
 #include <atomic>
 #include <array>
@@ -87,6 +88,12 @@ public:
 
 	// n サイクルぶん進める。周辺のイベントはこの中で挟む
 	void run_cycles(u64 n);
+
+	// S-MU2000: SH-2 を回さずに SWP30 だけ進める（レジスタ列の再生。doc/native-engine.md）
+	void set_cpu_enabled(bool on) { m_cpu_enabled = on; }
+	// 記録した書き込みを、外から SWP30 へ入れる（master=false でスレーブ）
+	void poke_swp(bool master, u32 reg, u16 value)
+	{ (master ? m_swpm : m_swps).write16(reg, value); }
 
 	// MIDI の入口。実機の DIN は **A と B の 2 口**で、それぞれ SH7043 の
 	// 内蔵 SCI ch0 / ch1 に繋がっている（docs/hardware.md）。
@@ -298,6 +305,10 @@ public:
 	void set_swp_trace(std::FILE *f, bool with_reads = false)
 	{ m_swp_trace = f; m_swp_trace_reads = with_reads; }
 
+	// SWP30 への書き込みを、その場で拾う（掃引の道具用。doc/native-engine.md の段 1）
+	using swp_watch_fn = std::function<void(bool master, u32 reg, u16 value)>;
+	void set_swp_watch(swp_watch_fn fn) { m_swp_watch = std::move(fn); }
+
 private:
 	void build_bus();
 	void start_devices();
@@ -306,6 +317,8 @@ private:
 	running_machine m_machine;   // 時計とタイマの置き場
 	required_device<sh7043a_device> m_cpu_finder;
 	sh7043a_device *m_cpu = nullptr;
+
+	bool m_cpu_enabled = true;     // false なら SH-2 を回さない（再生のとき）
 
 	swp30_device m_swpm, m_swps;   // マスタ 0x800000 / スレーブ 0x802000
 	required_device<sci4_device> m_sci4_finder;
@@ -355,6 +368,10 @@ private:
 	// SWP30 へのアクセス幅の内訳（byte 幅があると片側が壊れる）
 	u64 m_swp_w8 = 0, m_swp_r8 = 0, m_swp_w16 = 0, m_swp_w32 = 0;
 
+	// 記録に入れるサンプル番号（0 起点。run_sample の頭で進めるので 1 引く）
+	u64 trace_sample() const { return m_sample_count ? m_sample_count - 1 : 0; }
+	u64         m_sample_count = 0;  // 電源投入から数えたサンプル数（記録と再生の目印）
+	swp_watch_fn m_swp_watch;
 	std::FILE  *m_swp_trace = nullptr;
 	bool        m_swp_trace_reads = false;
 
@@ -401,6 +418,7 @@ private:
 
 	smu2000::dsp::native_fx m_nfx;
 	int  m_nfx_on = 0;
+	bool m_nfx_ready = false;      // 遅延の線を用意したか（台ごと）
 	u32  m_nfx_tick = 0;
 
 	// MIDI IN A / B。バイトを 31250bps の直列に崩して RX 線に流す。

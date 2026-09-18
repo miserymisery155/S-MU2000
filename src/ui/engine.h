@@ -159,6 +159,8 @@ struct engine {
 	// 音声デバイスに頼まれた分だけ進める
 	void fill(s16 *out, u32 n)
 	{
+		// 非正規化数を 0 に丸める（軽量モード用。出るときに元へ戻す）
+		const smu2000::denormals_off no_denormals;
 		const std::lock_guard<std::mutex> hold(card_lock);
 		// 先に「触っている」を立ててから state を見る。逆にすると、見た直後に
 		// 起動し直しが始まって、両方が機械に触ってしまう

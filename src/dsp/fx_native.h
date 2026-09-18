@@ -119,6 +119,12 @@ public:
 		m_talk.reset();
 	}
 
+	// インサーションに掛かっているか。インサーションでは、そのパートの乾いた音は
+	// ミキサの乾いた出口に出ない（MEG の中を通ってから戻る）。だから残響やディレイのように
+	// 「濡れた音しか出さない」作りのものは、ここで Dry/Wet のぶんだけ乾いた音を足す。
+	// 足さないと、ディレイを掛けたパートの直の音が丸ごと消える
+	void set_insertion(bool on) { m_insertion = on; }
+
 	void process(float l, float r, float &ol, float &orr)
 	{
 		// 入り口が黙ったままなら、中身が落ち着いたところで回すのをやめる（軽くするため）。
@@ -165,12 +171,24 @@ public:
 				a += x * m_chain_delay_mix;
 				b += y * m_chain_delay_mix;
 			}
-			ol = a;
-			orr = b;
+			ol = a * m_chain_level;
+			orr = b * m_chain_level;
 			break;
 		}
 		case kind::thru:   ol = l; orr = r; break;
 		default:           ol = orr = 0.0f; break;
+		}
+
+		// 濡れた音しか出さない作りのものを、インサーションで使うとき。
+		// Dry/Wet のぶんだけ濡れた音を弱めて、乾いた音を足す
+		if (m_insertion && m_dry_mix > 0.0f) {
+			// 濡れた音は Dry/Wet の割合そのまま。乾いた音は、ディレイ・残響では
+			// Dry/Wet を下げても小さくならない（実測でディレイ 6 種が実機と 0.1dB 差）。
+			// AMBIENCE だけは乾いた音も割合で下がる
+			const float w = 1.0f - m_dry_mix;
+			const float d = m_dry_full ? 1.0f : m_dry_mix;
+			ol  = ol * w + l * d;
+			orr = orr * w + r * d;
 		}
 	}
 
@@ -199,7 +217,7 @@ public:
 		if (msb == 0x45 || msb == 0x46 || msb == 0x47 || msb == 0x56 || msb == 0x63) return kind::rotary;
 		if (msb == 0x49 || msb == 0x4a || msb == 0x4b || msb == 0x62) return kind::drive;
 		if (msb == 0x4c || msb == 0x4d || msb == 0x73) return kind::eq;
-		if (msb == 0x4e || msb == 0x52 || msb == 0x6d || msb == 0x74) return kind::wah;
+		if (msb == 0x4e || msb == 0x52 || msb == 0x6d) return kind::wah;
 		if (msb == 0x53 || msb == 0x54 || msb == 0x69) return kind::dyn;
 		if (msb == 0x5e || msb == 0x72 || msb == 0x75 || msb == 0x76) return kind::lofi;
 		return kind::mod;
@@ -257,6 +275,12 @@ private:
 		for (int i = 0; i < MAX_PAR; i++)
 			m_raw[i] = i < count ? raw[i] : 0;
 
+		// 濡れた音しか出さない作り（残響・初期反射・ディレイ）は、インサーションのとき
+		// Dry/Wet のぶんの乾いた音を足す。ほかの種類は中で混ぜてある
+		m_dry_mix = (m_kind == kind::reverb || m_kind == kind::early || m_kind == kind::delay)
+		            ? 1.0f - wet_of(0.5f) : 0.0f;
+		m_dry_full = (m_type >> 7) != 0x58;
+
 		switch (m_kind) {
 		case kind::reverb: {
 			reverb::params p;
@@ -275,10 +299,17 @@ private:
 			early_ref::params p;
 			p.room     = clampf(par("Room Size", 5.0f) / 10.0f, 0.1f, 1.0f);
 			p.liveness = clampf(par("Liveness", 5.0f) / 10.0f, 0.0f, 1.0f);
-			p.time_ms  = par("Gate Time", par("InitDelay", 200.0f));
+			// 切るまでの長さ。GATE REVERB には Gate Time が無く、InitDelay は
+			// 頭の隙間なので、そこを使うと 10ms になって尾が 12dB 足りなかった。
+			// 部屋の大きさから決める
+			p.time_ms  = has("Gate Time") ? par("Gate Time", 200.0f)
+			             : has("Room Size") ? clampf(80.0f + raw_of("Room Size", 10) * 22.0f, 60.0f, 400.0f)
+			             : par("InitDelay", 200.0f);
 			p.diffuse  = clampf(par("Diffusion", 7.0f) / 10.0f, 0.0f, 1.0f);
 			p.gate     = (m_type >> 7) == 0x0a;
 			p.reverse  = (m_type >> 7) == 0x0b;
+			// AMBIENCE（0x58）は初期反射で代わりをしている。そのままだと 4dB 大きい
+			p.level    = 1.0f;
 			m_er.set_params(p);
 			break;
 		}
@@ -288,12 +319,28 @@ private:
 			p.r_ms = par("RchDelay", par("Rch Delay", p.l_ms * 1.3f));
 			p.c_ms = par("CchDelay", (p.l_ms + p.r_ms) * 0.5f);
 			p.fb_ms = par("FB Delay", par("FBDelay1", p.l_ms));
-			// FB Level は 1-127 で 64 が 0。実機の尾に合わせて少し強めにする
-			p.feedback = clampf((raw_of("FB Level", 64) / 64.0f - 1.0f) * 1.2f, -0.95f, 0.95f);
-			p.c_level = clampf(raw_of("Cch Level", 100) / 127.0f, 0.0f, 1.0f);
+			// FB Level は 1-127 で 64 が 0（表 T7 の -63%..+63%）。
+			// ECHO は左右で別々に持つ
+			const float fb_raw = has("FB Level") ? raw_of("FB Level", 64)
+			                     : (raw_of("Lch FBLevl", 64) + raw_of("Rch FBLevl", 64)) * 0.5f;
+			p.feedback = clampf((fb_raw - 64.0f) / 64.0f, -0.95f, 0.95f);
+			// ECHO の 2 本目
+			if (has("LchDelay2")) {
+				p.l2_ms = par("LchDelay2", 0.0f);
+				p.r2_ms = par("RchDelay2", p.l2_ms);
+				p.level2 = clampf(raw_of("Delay2Lvl", 0) / 127.0f, 0.0f, 1.0f);
+			}
+			// 真ん中の音は LCR ディレイだけ。ほかの種類で足すと尾が倍になる
+			p.c_level = has("Cch Level") ? clampf(raw_of("Cch Level", 100) / 127.0f, 0.0f, 1.0f) : 0.0f;
 			p.hpf_hz = par("HPF Cutoff", 60.0f);
 			p.lpf_hz = par("LPF Cutoff", 8000.0f) * clampf(par("High Damp", 5.0f) / 5.0f, 0.3f, 2.0f);
-			p.cross = (m_type >> 7) == 0x07;
+			// クロスディレイ（0x08）と T.CRS DLY（0x16）は左右を入れ替えて戻す
+			p.cross = (m_type >> 7) == 0x08 || (m_type >> 7) == 0x16;
+			if (p.cross) {
+				p.l_ms = par("L~R Delay", par("L~R Dly", p.l_ms));
+				p.r_ms = par("R~L Delay", par("R~L Dly", p.r_ms));
+				p.fb_ms = (p.l_ms + p.r_ms) * 0.5f;
+			}
 			m_dly.set_params(p);
 			break;
 		}
@@ -301,14 +348,17 @@ private:
 			mod_fx::params p;
 			const int msb = m_type >> 7;
 			p.rate_hz = par("LFO Freq", 0.6f);
-			p.depth = clampf(raw_of("LFO Depth", 40) / 127.0f, 0.0f, 1.0f);
-			p.delay_ms = par("DelayOfst", par("ModDlyOfst", 10.0f));
+			p.depth = clampf(raw_of("LFO Depth", raw_of("Mod Depth", 40)) / 127.0f, 0.0f, 1.0f);
+			// ModDlyOfst は 1-127 の生の値。0.1ms きざみとみて 0.1-12.7ms にする
+			p.delay_ms = has("DelayOfst") ? par("DelayOfst", 10.0f)
+			             : has("ModDlyOfst") ? clampf(raw_of("ModDlyOfst", 40) * 0.1f, 0.1f, 20.0f)
+			             : 10.0f;
 			// 戻す量。実機のフランジャーはここまで共振しないので、7 割にしてある
-			p.feedback = clampf((raw_of("FB Level", 64) / 64.0f - 1.0f) * 0.4f, -0.8f, 0.8f);
+			p.feedback = clampf((raw_of("FB Level", raw_of("Mod FB", 64)) / 64.0f - 1.0f) * 0.4f, -0.8f, 0.8f);
 			p.phase_deg = par("LFO Phase", par("PhaseShift", 90.0f));
 			p.stages = par("Stage", 6.0f);
-			p.dry_wet = wet_of(0.3f);
-			if (msb == 0x43 || msb == 0x44 || msb == 0x68 || msb == 0x6b || msb == 0x6e)
+			p.dry_wet = has("Mod Mix") ? clampf(raw_of("Mod Mix", 40) / 127.0f, 0.0f, 1.0f) : wet_of(0.3f);
+			if (msb == 0x43 || msb == 0x44 || msb == 0x68 || msb == 0x6b || msb == 0x6e || msb == 0x74)
 				p.type = mod_fx::kind::flanger;
 			else if (msb == 0x48 || msb == 0x6c || msb == 0x6f)
 				p.type = mod_fx::kind::phaser;
@@ -424,8 +474,13 @@ private:
 		case kind::reso: {
 			reso_fx::params p;
 			// LOW RESO は低いところだけを共振させて残す種類。実機の出音もほぼ低音だけ
-			p.cutoff_hz = clampf(60.0f + raw_of("Resoltn", 0) * 4.0f, 40.0f, 600.0f);
-			p.resonance = clampf(2.0f + raw_of("Mod FB", 64) / 24.0f, 1.0f, 8.0f);
+			// 切る高さのパラメータは無い。実機は素通しに対して -11.7dB で、
+			// 250Hz あたりから上が落ちる形だったので、そこに合わせる
+			p.cutoff_hz = clampf(250.0f + raw_of("Resoltn", 0) * 10.0f, 100.0f, 600.0f);
+			// 共振を強くすると 250Hz が持ち上がりすぎる。実機は山を作らずに、
+			// 全体が小さくなる形（素通しに対して -11.7dB）だった
+			p.resonance = clampf(0.7f + raw_of("Mod FB", 64) / 128.0f, 0.5f, 2.0f);
+			p.level = 0.4f;
 			p.dry_wet = wet_of(1.0f);
 			m_reso.set_params(p);
 			break;
@@ -474,6 +529,8 @@ private:
 			m_chain_rotary = false;
 			m_chain_delay = true;
 			m_chain_delay_mix = clampf(raw_of("Delay Mix", 64) / 127.0f, 0.0f, 1.0f);
+			// ワウを通す組（0x61）は、そのままだと 4.5dB 大きい
+			m_chain_level = m_chain_wah ? 0.6f : 1.0f;
 
 			dyn_fx::params c;
 			c.threshold_db = par("Threshold", -20.0f);
@@ -539,10 +596,15 @@ private:
 	const xg::fx_def *m_def = nullptr;
 	float m_rate = 44100.0f;
 
+	bool  m_insertion = false;
+	float m_dry_mix = 0.0f;       // インサーションのとき、足す乾いた音の量
+	bool  m_dry_full = true;      // 乾いた音を Dry/Wet で下げないか
+
 	// 組み合わせの種類で、どれを通すか
 	bool m_chain_comp = false, m_chain_wah = false, m_chain_drive = true;
 	bool m_chain_rotary = false, m_chain_delay = true;
 	float m_chain_delay_mix = 0.5f;
+	float m_chain_level = 1.0f;
 
 	reverb    m_rev;
 	early_ref m_er;
@@ -579,7 +641,11 @@ public:
 
 	master_eq &meq() { return m_meq; }
 
-	void set(slot_id id, int type, const int *raw, int count) { m_slot[id].set(type, raw, count); }
+	void set(slot_id id, int type, const int *raw, int count)
+	{
+		m_slot[id].set_insertion(id >= INS1);
+		m_slot[id].set(type, raw, count);
+	}
 	void reset() { for (auto &s : m_slot) s.reset(); }
 
 	fx_slot &slot(slot_id id) { return m_slot[id]; }
