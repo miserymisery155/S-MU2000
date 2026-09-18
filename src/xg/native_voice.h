@@ -78,6 +78,7 @@ inline const u8 *wave_entry(const u8 *rom, int setno, int note)
 
 // 波形の記録の中身
 struct wave_info {
+	int level;         // この波形ぶんの減衰（0.375dB 目盛り。多段サンプルで段ごとに違う）
 	int base_key;      // もとの音程（半音）
 	int fine_cents;    // その細かい調整（セント。引く）
 	int key_max;       // この記録を使う鍵の上限
@@ -89,6 +90,7 @@ struct wave_info {
 inline wave_info read_wave(const u8 *e)
 {
 	wave_info w{};
+	w.level      = e[0];
 	w.base_key   = e[1];
 	w.fine_cents = e[2] >= 128 ? int(e[2]) - 256 : int(e[2]);
 	w.key_max    = e[3];
@@ -108,6 +110,22 @@ inline int key_follow(const u8 *elem)
 	return F[elem[19] & 3];
 }
 
+// 要素を**遅らせて鳴らす**段（byte72）。実測（段 0,1,2,3 → 0,311,752,1634 サンプル）は
+// 441 * 2^(n-1) - 130 でぴったり。MusicBox は 2 つ目の要素を 37ms 遅らせている
+inline u32 elem_delay(const u8 *elem)
+{
+	const int n = elem[72] & 0x7f;
+	if (n <= 0)
+		return 0;
+	return u32(441 * (1 << (n < 8 ? n - 1 : 7)) - 130);
+}
+
+// 要素ぶんの音程のずらし（セント）。byte17 が半音、byte18 がセント
+inline int elem_tune(const u8 *elem)
+{
+	return (int(elem[17]) - 64) * 100 + (int(elem[18]) - 64);
+}
+
 inline u16 pitch_reg(const wave_info &w, int note, int follow = 100, int cents_extra = 0)
 {
 	// 整数で計算する（firmware と同じ丸めになる。0 の側へ切り捨て）
@@ -117,6 +135,47 @@ inline u16 pitch_reg(const wave_info &w, int note, int follow = 100, int cents_e
 	const u16 flag = ((w.format_addr >> 30) & 3) == 3 ? 0x4000 : 0;
 	return u16((v & 0x3fff) | flag);
 }
+
+
+// ---- コントローラ（doc/native-engine.md の 6.14）
+//
+// 実機が何を書くかは `nativeplay --ccwatch` で見た:
+//   CC7・CC11 → レジスタ 0x09 の下位バイト（減衰）
+//   CC10      → レジスタ 0x32（上が左・下が右の減衰）
+//   ベンド    → レジスタ 0x11（音程）
+//   CC1       → レジスタ 0x0a の下位バイト（LFO の深さ）
+
+// 音量（CC7）・表現（CC11）の減衰。level→減衰の表（0.375dB 目盛り）を 2 倍すると
+// レジスタ 0x09 の目盛り（0.1875dB）になる。cc>=8 で実測との差は 0.375dB 以内
+inline int cc_vol_att(const u8 *rom, int cc)
+{
+	if (cc <= 0)
+		return 255;
+	return 2 * int(rom[LEVEL_TAB + u32(std::min(127, cc) - 1)]);
+}
+
+// パン（CC10）の減衰。中央で左右とも -3dB になる cos 則。
+// 右側は pan_att(128 - cc10)。128 点すべて実測と 0.1875dB 以内で合う
+inline int pan_att(int x)
+{
+	if (x <= 0)
+		return 0;
+	if (x >= 127)
+		return 255;
+	const double c = std::cos(double(x) / 127.0 * 1.5707963267948966);
+	const int v = int(std::lround(-20.0 * std::log10(c) / 0.375));
+	return v < 0 ? 0 : (v > 255 ? 255 : v);
+}
+
+// ピッチベンド → セント。firmware は 2 回とも 0 の側へ切り捨てる
+// （ベンド幅 2 半音・目一杯で 167 目盛り。実測と一致）
+inline int bend_cents(int bend14, int range_semitones)
+{
+	return (bend14 - 8192) * range_semitones * 100 / 8192;
+}
+
+// 0..255 に収める
+inline int clamp_att(int v) { return v < 0 ? 0 : (v > 255 ? 255 : v); }
 
 // 組み立てたスロットのレジスタ。write が立っている所だけ書く
 struct slot_regs {
@@ -193,19 +252,31 @@ inline int level_from_att(const u8 *rom, int att)
 
 // **校正**: 1 回だけ実機（firmware）に鳴らしてもらった減衰から、その音色の
 // 「素の音量」を出す。これがあれば、ほかの鍵・強さの減衰は式で出せる
+inline int wave_level(const u8 *rom, const u8 *elem, int note)
+{
+	const u8 *we = wave_entry(rom, wave_set(elem), note);
+	return we ? int(we[0]) : 0;
+}
+
+// 鍵の曲線が音量の目盛りに効く倍率。実測（GrandPno の鍵 12-75）では 1 倍
+constexpr int LEVEL_CURVE_MUL = 2;
+
 inline int calibrate_level(const u8 *rom, const u8 *elem, int att_ref, int note_ref, int vel_ref)
 {
-	const int rest = att_ref / 2 - velocity_att(rom, vel_ref);
-	return level_from_att(rom, rest) - 2 * level_key_curve(rom, elem, note_ref);
+	const int rest = att_ref / 2 - velocity_att(rom, vel_ref) - wave_level(rom, elem, note_ref);
+	return level_from_att(rom, rest) - LEVEL_CURVE_MUL * level_key_curve(rom, elem, note_ref);
 }
 
 // 校正した素の音量から、その鍵・強さの減衰（0x09 に入れる値）
 inline int volume_att(const u8 *rom, const u8 *elem, int base_level, int note, int vel)
 {
-	int l = base_level + 2 * level_key_curve(rom, elem, note);
+	int l = base_level + LEVEL_CURVE_MUL * level_key_curve(rom, elem, note);
 	if (l < 0) l = 0;
 	if (l > 127) l = 127;
-	const int a = rom[LEVEL_TAB + 0x80 + u32(l)] + velocity_att(rom, vel);
+	// 波形の記録の先頭のバイトが、その段ぶんの減衰。多段サンプルの音色では
+	// 段の変わり目で 1.5dB ほど動くので、これを入れないと段ごとにずれる
+	const int a = rom[LEVEL_TAB + 0x80 + u32(l)] + velocity_att(rom, vel)
+	            + wave_level(rom, elem, note);
 	return std::min(0xff, a * 2);
 }
 
@@ -240,14 +311,29 @@ inline u16 release_reg(const u8 *rom, const u8 *elem, int note, int att)
 // 起動のときに firmware へ 1 音だけ鳴らしてもらって、そのときの値を覚えておく。
 // 鍵や強さで動かないものが多いので、これだけで実機にかなり近くなる。
 // 覚えるのは**利用者の ROM から起こした値**で、配らない（起動のたびに作る）
+// フィルタの包絡線の 1 段。firmware はこれをソフトで動かして、鳴っている間
+// 0x00・0x01・0x04 を 10ms ごとに書き直す（doc/native-engine.md の 6.17）
+struct fstep {
+	u32 at;            // 鳴らし始めてからのサンプル数
+	u8  reg;
+	u16 v;
+};
+
 struct voice_cal {
 	bool have = false;
 	int  base_level = 64;      // 校正した素の音量
+	int  cal_vel = 100;        // 写し取ったときの強さ（強さを変えるときの基準）
+	// 写し取ったときのコントローラの位置。ここからの差ぶんだけ動かす
+	int  cal_vol = 100, cal_expr = 127, cal_pan = 64;
 	u16  reg[0x40] = {};       // 基準の鍵・強さでの値
 	u64  mask = 0;             // 覚えているレジスタ
 
 	bool has(int r) const { return (mask & (u64(1) << r)) != 0; }
 	void set(int r, u16 v) { reg[r] = v; mask |= u64(1) << r; }
+
+	// 写し取った音で、firmware がフィルタをどう動かしたか。
+	// あとの音でも同じように動かす（鍵と強さは変わるが、形は近い）
+	std::vector<fstep> filter_env;
 
 	// そのスロットが鳴らしていた波形の番地（0x16/0x17）
 	u32 wave_addr() const { return u32(reg[0x16]) << 16 | reg[0x17]; }
@@ -255,18 +341,28 @@ struct voice_cal {
 
 // 要素と、写し取ったスロットを**波形の番地で**結び付ける。
 // 要素の並びとスロットの並びが同じとは限らないので、順番では当てにならない
-inline const voice_cal *match_cal(const std::vector<voice_cal> &cals, u32 want)
+// used には「もう使った写し取り」の印を立てる。同じ波形を鳴らす要素が
+// 2 つあるとき（重ねの音色ではよくある）、両方が同じ写し取りを掴むと
+// 片方の音量が丸ごと違ってしまう
+inline const voice_cal *match_cal(const std::vector<voice_cal> &cals, u32 want, u32 *used = nullptr)
 {
-	for (const voice_cal &c : cals)
-		if (c.has(0x16) && c.has(0x17) && c.wave_addr() == want)
+	for (size_t i = 0; i < cals.size(); i++) {
+		if (used && (*used & (u32(1) << i)))
+			continue;
+		const voice_cal &c = cals[i];
+		if (c.has(0x16) && c.has(0x17) && c.wave_addr() == want) {
+			if (used)
+				*used |= u32(1) << i;
 			return &c;
+		}
+	}
 	return nullptr;
 }
 
 // 1 音ぶんのレジスタを作る。att は 0x09 に入れる減衰（0-255。小さいほど大きい音）
 inline slot_regs build_note(const u8 *rom, const u8 *elem, int note, int att,
                             const voice_cal *cal = nullptr,
-                            const defaults &d = defaults())
+                            const defaults &d = defaults(), int cents_extra = 0)
 {
 	slot_regs r;
 	const u8 *we = wave_entry(rom, wave_set(elem), note);
@@ -308,7 +404,10 @@ inline slot_regs build_note(const u8 *rom, const u8 *elem, int note, int att,
 	r.set(0x09, u16(att & 0xff));
 
 	// --- 音程と波形（6.2）
-	r.set(0x11, pitch_reg(w, note, key_follow(elem)));
+	// 要素の byte17 は**半音単位の粗調**、byte18 は**セント単位の離調**（どちらも 64 が中央）。
+	// 離調は重ねの音色で 2 つの層をずらすのに使う。入れないと層がぴったり重なって
+	// 打ち消し合わず、3dB ほど大きくなる（doc/native-engine.md の 6.18）
+	r.set(0x11, pitch_reg(w, note, key_follow(elem), cents_extra + elem_tune(elem)));
 	r.set(0x12, u16(w.pre_loop >> 16));
 	r.set(0x13, u16(w.pre_loop));
 	r.set(0x14, u16(w.loop_len >> 16));

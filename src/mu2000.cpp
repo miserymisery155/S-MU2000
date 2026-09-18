@@ -989,6 +989,17 @@ void mu2000::set_native_engine(int mode)
 	m_fw_hold = 0;
 	m_learning = false;
 	m_learn_left = 0;
+	for (u8 &c : m_fw_notes)
+		c = 0;
+	m_fw_note_total = 0;
+	m_nq.clear();
+	m_traj_rec = false;
+	m_traj_left = 0;
+	m_traj_cals = nullptr;
+	m_ne_clock = 0;
+	for (u64 &t : m_rx_at)
+		t = 0;
+	std::memset(m_nown, 0, sizeof(m_nown));
 	for (nmidi &n : m_nmidi)
 		n = nmidi();
 	m_ne_samples.store(0, std::memory_order_relaxed);
@@ -1009,6 +1020,18 @@ void mu2000::native_learn_start(u32 rec)
 {
 	m_learning = true;
 	m_learn_rec = rec;
+	// その鍵・強さで鳴るはずの要素の数
+	m_learn_want = 1;
+	if (rec && m_prog) {
+		const u8 *rom0 = m_prog->data();
+		int n = 0;
+		const int nel = xg::nv::element_count(rom0, rec);
+		for (int k = 0; k < nel; k++)
+			if (xg::nv::element_active(xg::nv::element(rom0, rec, k), m_learn_note, m_learn_vel))
+				n++;
+		if (n > 0)
+			m_learn_want = n;
+	}
 	m_learn_first.clear();
 	m_learn_last.clear();
 	m_learn_mask = m_learn_keyed = 0;
@@ -1029,6 +1052,13 @@ void mu2000::native_learn_start(u32 rec)
 			m_learn_keyed |= m_learn_mask;
 			if (m_learn_first.empty())
 				m_learn_first = m_learn_last;
+			// 鳴り始めたら、あと少しだけ見て終える（0x01 が落ち着くぶん）。
+			// ただし**要素がそろうまでは待つ**。MusicBox のように 2 つ目の要素を
+			// 37ms 遅れて鳴らす音色があり、打ち切ると片方しか写し取れない。
+			// 長く占有すると、その間ほかの音色が写し取りを始められないので、
+			// そろったら 5ms で切り上げる
+			m_learn_left = __builtin_popcountll(m_learn_keyed) >= m_learn_want
+			             ? 44100 / 200 : 44100 / 16;
 			break;
 		default: break;
 		}
@@ -1041,6 +1071,36 @@ void mu2000::native_learn_finish()
 	m_learning = false;
 	if (!m_learn_keyed || !m_prog)
 		return;
+	// ドラムは、音色の記録が引けないので中身を写すだけ（音ごとに覚える）
+	if (m_learn_drum) {
+		std::vector<xg::nv::voice_cal> cals;
+		for (int ch = 0; ch < 64; ch++) {
+			if (!(m_learn_keyed & (u64(1) << ch)))
+				continue;
+			xg::nv::voice_cal cal;
+			for (int i = 0; i < 0x40; i++) {
+				const bool at_key = (i == 0x05 || i == 0x0a || i == 0x11);
+				const std::map<u32, u16> &src = at_key ? m_learn_first : m_learn_last;
+				const auto it = src.find(u32(ch) * 64 + u32(i));
+				if (it != src.end())
+					cal.set(i, it->second);
+			}
+			if (!cal.has(0x16) || !cal.has(0x17))
+				continue;
+			cal.cal_vel  = m_learn_vel;
+			cal.cal_vol  = m_ndrv.part_vol(m_learn_part);
+			cal.cal_expr = m_ndrv.part_expr(m_learn_part);
+			cal.cal_pan  = m_ndrv.part_pan(m_learn_part);
+			cal.have = true;
+			cals.push_back(cal);
+		}
+		const int ndcal = int(cals.size());
+		const u64 dkey = m_learn_drum;
+		m_ndrv.learn_drum(m_learn_drum, std::move(cals));
+		traj_start(0, dkey, ndcal);
+		m_learn_drum = 0;
+		return;
+	}
 	// 波形の番地まで取れていなければ、写し取りとして使えない（次の音でやり直す）
 	{
 		bool ok = false;
@@ -1053,6 +1113,7 @@ void mu2000::native_learn_finish()
 	}
 	const u8 *rom = m_prog->data();
 	const int nel = xg::nv::element_count(rom, m_learn_rec);
+	unsigned used_elem = 0;
 	std::vector<xg::nv::voice_cal> cals;
 	for (int ch = 0; ch < 64; ch++) {
 		if (!(m_learn_keyed & (u64(1) << ch)))
@@ -1067,14 +1128,21 @@ void mu2000::native_learn_finish()
 			if (it != src.end())
 				cal.set(i, it->second);
 		}
-		// どの要素かは、そのスロットが鳴らしている波形の番地で見分ける
+		// どの要素かは、そのスロットが鳴らしている波形の番地で見分ける。
+		// 同じ波形の要素が 2 つあるときは、まだ使っていないほうを取る
 		int idx = -1;
 		if (cal.has(0x16) && cal.has(0x17)) {
 			const u32 want = u32(cal.reg[0x16]) << 16 | cal.reg[0x17];
 			for (int k = 0; k < nel; k++) {
+				if (used_elem & (1u << k))
+					continue;
 				const u8 *e2 = xg::nv::element(rom, m_learn_rec, k);
 				const u8 *w2 = xg::nv::wave_entry(rom, xg::nv::wave_set(e2), m_learn_note);
-				if (w2 && xg::nv::read_wave(w2).format_addr == want) { idx = k; break; }
+				if (w2 && xg::nv::read_wave(w2).format_addr == want) {
+					idx = k;
+					used_elem |= 1u << k;
+					break;
+				}
 			}
 		}
 		if (idx < 0)
@@ -1082,10 +1150,111 @@ void mu2000::native_learn_finish()
 		cal.base_level = xg::nv::calibrate_level(rom, xg::nv::element(rom, m_learn_rec, idx),
 		                                         cal.has(9) ? (cal.reg[9] & 0xff) : 64,
 		                                         m_learn_note, m_learn_vel);
+		cal.cal_vel  = m_learn_vel;
+		cal.cal_vol  = m_ndrv.part_vol(m_learn_part);
+		cal.cal_expr = m_ndrv.part_expr(m_learn_part);
+		cal.cal_pan  = m_ndrv.part_pan(m_learn_part);
 		cal.have = true;
 		cals.push_back(cal);
 	}
+	const int ncal = int(cals.size());
+	if (std::getenv("SMU2000_NATIVE_DEBUG")) {
+		std::fprintf(stderr, "learn rec=%06x 要素 %d 写し %d 鍵いた %d\n", m_learn_rec, nel, ncal,
+		             __builtin_popcountll(m_learn_keyed));
+		for (int k = 0; k < ncal; k++) {
+			const xg::nv::voice_cal &c = cals[size_t(k)];
+			const u8 *e2 = xg::nv::element(rom, m_learn_rec, k);
+			const u8 *w2 = xg::nv::wave_entry(rom, xg::nv::wave_set(e2), m_learn_note);
+			std::fprintf(stderr, "  写し%d 0x11=%04x 0x32=%04x 0x09=%04x 波形=%08x"
+			                     " / 式 0x11=%04x 要素b18=%d b0=%d b1=%d\n",
+			             k, c.reg[0x11], c.reg[0x32], c.reg[0x09], c.wave_addr(),
+			             w2 ? xg::nv::pitch_reg(xg::nv::read_wave(w2), m_learn_note,
+			                                    xg::nv::key_follow(e2)) : 0,
+			             e2[18], e2[0], e2[1]);
+			if (w2)
+				std::fprintf(stderr, "        こちらの波形=%08x 基準鍵=%d 微調=%d 上限鍵=%d 追従=%d 組=%d%s",
+				             xg::nv::read_wave(w2).format_addr, xg::nv::read_wave(w2).base_key,
+				             xg::nv::read_wave(w2).fine_cents, xg::nv::read_wave(w2).key_max,
+				             xg::nv::key_follow(e2), xg::nv::wave_set(e2), "\n");
+		}
+	}
 	m_ndrv.learn(m_learn_rec, std::move(cals));
+	traj_start(m_learn_rec, 0, ncal);
+}
+
+// 写し取った音が鳴っている間、firmware がフィルタ（0x00・0x01・0x04）を
+// どう動かすかを録る。あとの音でも同じように動かせば、音色の動きまで揃う
+void mu2000::traj_start(u32 rec, u64 drum_key, int ncal)
+{
+	if (!ncal)
+		return;
+	m_traj_cals = drum_key ? m_ndrv.drum_cals_of(drum_key) : m_ndrv.cals_of(rec);
+	if (!m_traj_cals)
+		return;
+	// 写し取ったチャンネルの順が、そのまま写し取りの並び
+	int n = 0;
+	for (int ch = 0; ch < 64; ch++)
+		m_traj_chan[ch] = (m_learn_keyed & (u64(1) << ch)) ? n++ : -1;
+	m_traj_n = 0;
+	m_traj_rec = true;
+	m_traj_rec_key = rec;
+	m_traj_drum_key = drum_key;
+	m_traj_start = m_ne_clock;
+	m_traj_left = 44100;                 // 1 秒ぶん見る
+	set_swp_watch([this](bool master, u32 reg, u16 value) {
+		if (!master)
+			return;
+		const int ch = int(reg / 64), r = int(reg % 64);
+		if (ch >= 64 || m_traj_chan[ch] < 0)
+			return;
+		// 離しに入ったらそこで打ち切る（離しの動きは鳴らすときには要らない）。
+		// ただし鳴らし始めてすぐは見ない。前の音の離しが同じスロットに来る
+		if (r == 0x09 && (value & 0x8000)) {
+			if (m_ne_clock - m_traj_start > 44100 / 10)
+				m_traj_left = 1;
+			return;
+		}
+		// フィルタ（0x00・0x01・0x04）と LFO（0x05・0x0a）。
+		// LFO は「かけ始めるまでの間」や深さの増やし方を firmware がソフトでやっている
+		if (r != 0x00 && r != 0x01 && r != 0x04 && r != 0x05 && r != 0x0a)
+			return;
+		if (m_traj_n >= 2048 || size_t(m_traj_chan[ch]) >= m_traj_cals->size())
+			return;
+		// **その場で**写し取りに足す。いま鳴っている native の音も、
+		// 次の tick でこの段を拾う（xg/native_driver.h の tick）
+		(*m_traj_cals)[m_traj_chan[ch]].filter_env.push_back(
+		    xg::nv::fstep{ u32(m_ne_clock - m_traj_start), u8(r), value });
+		m_traj_n++;
+	});
+}
+
+void mu2000::traj_finish()
+{
+	set_swp_watch(nullptr);
+	m_traj_rec = false;
+	if (std::getenv("SMU2000_NATIVE_DEBUG"))
+		std::fprintf(stderr, "traj rec=%06x drum=%llx 段 %u%c", m_traj_rec_key,
+		             (unsigned long long)m_traj_drum_key, m_traj_n, 10);
+	m_traj_cals = nullptr;
+}
+
+// 待っている native の出来事を、時が来たものから実行する
+void mu2000::native_pump()
+{
+	while (!m_nq.empty() && m_nq.front().at <= m_ne_clock) {
+		const nev e = m_nq.front();
+		m_nq.pop_front();
+		switch (e.kind) {
+		case 0: m_ndrv.note_off(e.part, e.d0); break;
+		case 1:
+			if (m_ndrv.note_on(e.part, e.d0, e.d1))
+				m_ne_stats.note_native++;
+			break;
+		case 2: m_ndrv.control(e.part, e.d0, e.d1); break;
+		case 3: m_ndrv.bend(e.part, int(e.d1) << 7 | e.d0); break;
+		default: break;
+		}
+	}
 }
 
 // MIDI を 1 バイト受けて、native でさばけたら true。
@@ -1094,6 +1263,9 @@ bool mu2000::native_midi(u8 byte, int port)
 {
 	if (byte >= 0xf8)
 		return false;                    // リアルタイムはそのまま
+	// 実機は 1 バイトずつ線で受ける。和音のように何音も一度に来ると、
+	// あとの音ほど遅れて鳴る。そのぶんをここで数える
+	const u64 fire = rx_advance(port);
 	nmidi &n = m_nmidi[port];
 	if (byte & 0x80) {
 		if (byte >= 0xf0) {              // SysEx など。以後は firmware に任せる
@@ -1105,9 +1277,9 @@ bool mu2000::native_midi(u8 byte, int port)
 		}
 		n.status = byte;
 		n.have = 0;
-		// 鍵の上げ下げ以外は、この場で firmware に渡す
+		// 鍵の上げ下げ・CC・ベンドはこちらで見る。残り（音色の指定など）は firmware へ
 		const u8 kind = byte & 0xf0;
-		if (kind != 0x80 && kind != 0x90) {
+		if (kind != 0x80 && kind != 0x90 && kind != 0xb0 && kind != 0xe0) {
 			m_ne_stats.other++;
 			m_fw_hold = 44100 / 50;
 			return false;
@@ -1115,7 +1287,7 @@ bool mu2000::native_midi(u8 byte, int port)
 		return true;                     // 状態のバイトは飲み込む
 	}
 	const u8 kind = n.status & 0xf0;
-	if (kind != 0x80 && kind != 0x90)
+	if (kind != 0x80 && kind != 0x90 && kind != 0xb0 && kind != 0xe0)
 		return false;
 	if (n.have == 0) {
 		n.d0 = byte;
@@ -1124,28 +1296,69 @@ bool mu2000::native_midi(u8 byte, int port)
 	}
 	n.have = 0;
 	const int part = (n.status & 0x0f) + port * 16;
+
+	// ピッチベンドは、音程のレジスタを自分で作れるので firmware には渡さない。
+	// ただし、そのパートで firmware が鳴らしている音がある間は渡す
+	if (kind == 0xe0) {
+		m_nq.push_back({ fire, 3, u8(part), u8(n.d0 & 0x7f), u8(byte & 0x7f) });
+		if (m_fw_notes[part]) {
+			m_fw_hold = std::max(m_fw_hold, u32(44100 / 500));
+			replay_note(n.status, n.d0, byte, port);
+		}
+		return true;
+	}
+	// コントローラ。音量・表現・パン・ダンパーは自分でさばく。
+	// それでも firmware には渡す（写し取りのとき同じ位置で鳴らしてほしい）が、
+	// 回す時間は短くてよい
+	if (kind == 0xb0) {
+		m_ne_stats.other++;
+		const bool mine = m_ndrv.handles_cc(n.d0 & 0x7f);
+		if (mine)
+			m_nq.push_back({ fire, 2, u8(part), u8(n.d0 & 0x7f), u8(byte & 0x7f) });
+		else
+			m_ndrv.control(part, n.d0 & 0x7f, byte & 0x7f);   // 音を全部切るなどは待たない
+		m_fw_hold = std::max(m_fw_hold, u32(mine ? 44100 / 500 : 44100 / 50));
+		replay_note(n.status, n.d0, byte, port);
+		return true;
+	}
 	const int note = n.d0 & 0x7f, vel = byte & 0x7f;
 	if (kind == 0x80 || vel == 0) {
-		if (m_ndrv.note_off(part, note))
+		if (nown(part, note)) {
+			nown_set(part, note, false);
+			m_nq.push_back({ fire, 0, u8(part), u8(note), u8(vel) });
 			return true;
+		}
 		// native で鳴っていない音は firmware に任せる
+		if (m_fw_notes[part]) {
+			m_fw_notes[part]--;
+			if (m_fw_note_total)
+				m_fw_note_total--;
+		}
 		replay_note(n.status, u8(note), u8(vel), port);
 		return true;
 	}
-	if (m_ndrv.note_on(part, note, vel)) {
-		m_ne_stats.note_native++;
+	if (m_ndrv.can_play(part, note)) {
+		nown_set(part, note, true);
+		m_nq.push_back({ fire, 1, u8(part), u8(note), u8(vel) });
 		return true;
 	}
 	m_ne_stats.note_fw++;
-	// まだ写し取っていない音色。firmware に鳴らさせて、そのときの値を覚える
+	// まだ写し取っていない音（ドラムは音ごと）。firmware に鳴らさせて覚える
 	const u32 rec = m_ndrv.record_of(part);
-	if (rec && !m_learning) {
+	const bool drum = m_ndrv.is_drum(part);
+	if ((rec || drum) && !m_learning) {
 		m_learn_note = note;
 		m_learn_vel = vel;
+		m_learn_drum = drum ? m_ndrv.drum_key(part, note) : 0;
+		m_learn_part = part;
 		m_ne_stats.learn++;
 		native_learn_start(rec);
 	}
 	m_fw_hold = std::max(m_fw_hold, u32(44100 / 20));
+	if (m_fw_notes[part] < 255) {
+		m_fw_notes[part]++;
+		m_fw_note_total++;
+	}
 	replay_note(n.status, u8(note), u8(vel), port);
 	return true;
 }
@@ -1343,15 +1556,27 @@ void mu2000::run_sample(s32 &left, s32 &right)
 	if (m_native_engine) {
 		m_ne_samples.fetch_add(1, std::memory_order_relaxed);
 		if (midi_pending())
-			m_fw_hold = std::max(m_fw_hold, u32(44100 / 100));   // 溜まっている間は回す
-		if (m_fw_hold)
-			m_fw_hold--;
-		else
+			m_fw_hold = std::max(m_fw_hold, u32(44100 / 500));   // 溜まっている間は回す
+		// firmware が鳴らしている音がある間は止めない。LFO・包絡線・ベンドの
+		// 追従をやっているのは firmware なので、止めるとその音だけ変わってしまう
+		if (m_fw_note_total)
+			m_fw_hold = std::max(m_fw_hold, u32(2));
+		if (m_fw_hold) {
+			if (--m_fw_hold == 0)
+				m_ndrv.sync_cc();       // 止める前に、つまみの位置を取り直す
+		} else {
 			run_cpu = false;
+		}
 		if (run_cpu)
 			m_ne_fw_samples.fetch_add(1, std::memory_order_relaxed);
 		if (m_learning && m_learn_left && --m_learn_left == 0)
 			native_learn_finish();
+		m_ne_clock++;
+		if (!m_nq.empty())
+			native_pump();
+		m_ndrv.tick(m_ne_clock);
+		if (m_traj_rec && m_traj_left && --m_traj_left == 0)
+			traj_finish();
 	}
 	if (run_cpu)
 		run_cycles(cycles);

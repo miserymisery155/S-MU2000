@@ -90,6 +90,8 @@ int main(int argc, char **argv)
 			std::fprintf(stderr, "%s\n", err.c_str());
 			return 1;
 		}
+		if (const char *e = std::getenv("SMU2000_NATIVE_ENGINE"))
+			m->set_native_engine(std::atoi(e));
 		more.push_back(std::move(m));
 	}
 	if (copies > 1)
@@ -119,6 +121,12 @@ int main(int argc, char **argv)
 		if (!mu.load_state(booted.data(), booted.size(), err)) { std::fprintf(stderr, "%s\n", err.c_str()); return 1; }
 		for (auto &m : more)
 			if (!m->load_state(booted.data(), booted.size(), err)) { std::fprintf(stderr, "%s\n", err.c_str()); return 1; }
+		// 状態を戻したら、native の口も入れ直す（写し取りは覚え直し）
+		if (const char *e = std::getenv("SMU2000_NATIVE_ENGINE")) {
+			mu.set_native_engine(std::atoi(e));
+			for (auto &m : more)
+				m->set_native_engine(std::atoi(e));
+		}
 		mu.clear_profile();
 
 		// 音源として挿されたときと同じ状態で測る（compat/platform.h）

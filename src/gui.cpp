@@ -1078,6 +1078,8 @@ int main(int argc, char **argv)
 	bool lcd_only = false;
 	bool fast_midi = false;
 	int native_fx = 0;      // --native-fx / --native-fx-full（doc/native-dsp.md）
+	// --native-engine: firmware を走らせない口（doc/native-engine.md）
+	int native_engine = 0;
 	bool grid = false;
 	std::string layout_path, dump_layout, play_path;
 	bool boot_for_shot = false;
@@ -1129,6 +1131,7 @@ int main(int argc, char **argv)
 		else if (!std::strcmp(argv[i], "--master-window")) open_master = true;
 		else if (!std::strcmp(argv[i], "--lcd")) lcd_only = true;
 		else if (!std::strcmp(argv[i], "--fast-midi")) fast_midi = true;
+		else if (!std::strcmp(argv[i], "--native-engine")) native_engine = 1;
 		else if (!std::strcmp(argv[i], "--native-fx")) native_fx = 1;
 		else if (!std::strcmp(argv[i], "--native-fx-full")) native_fx = 2;
 		else if (!std::strcmp(argv[i], "--usb")) usb_host = true;
@@ -1349,6 +1352,9 @@ int main(int argc, char **argv)
 			eng.publish();
 			return;
 		}
+		// 起動が終わってから入れる（起動には firmware が要る）
+		if (native_engine)
+			eng.mu.set_native_engine(native_engine);
 		eng.state.store(1);
 		eng.publish();
 

@@ -314,6 +314,9 @@ void engine::boot()
 	// エフェクトを C++ で鳴らす軽量モード（doc/native-dsp.md）。0 切 / 1 エフェクトだけ /
 	// 2 MEG を回さない。**実機と同じ音にはならない**ので既定は切
 	int native_fx = 0;
+	// **firmware を走らせない口**（doc/native-engine.md）。鍵・つまみを自分でさばき、
+	// SH-2 は必要なときだけ回す。2.3〜2.9 倍軽い。plugin.ini に native_engine=1 で入る
+	int native_engine = 0;
 	if (const std::string local = smu2000::config_dir(); !local.empty())
 		if (std::FILE *f = std::fopen(smu2000::join(local, "plugin.ini").c_str(), "rb")) {
 			char line[256];
@@ -324,6 +327,8 @@ void engine::boot()
 					usb = line[4] != '0';
 				if (!std::strncmp(line, "native_fx=", 10))
 					native_fx = std::atoi(line + 10);
+				if (!std::strncmp(line, "native_engine=", 14))
+					native_engine = std::atoi(line + 14);
 			}
 			std::fclose(f);
 		}
@@ -356,6 +361,10 @@ void engine::boot()
 	// **reset() のあとで読むこと**（タイマが揃っていないと形が合わない）
 	if (bootcache::load(*mu, boot_key)) {
 		logf("起動: 前の写しから（%s）", bootcache::path(boot_key).c_str());
+		if (native_engine) {
+			mu->set_native_engine(native_engine);
+			logf("plugin.ini: native_engine=1（SH-2 は要るときだけ回す）");
+		}
 		m_mu = mu;
 		m_message = warn.empty() ? std::string("ROM: ") + dir
 		                         : std::string("ROM: ") + dir + "\n警告: " + warn;
@@ -408,6 +417,10 @@ void engine::boot()
 	if (bootcache::save(*mu, boot_key))
 		logf("起動の写しを残した: %s", bootcache::path(boot_key).c_str());
 
+	if (native_engine) {
+		mu->set_native_engine(native_engine);
+		logf("plugin.ini: native_engine=1（SH-2 は要るときだけ回す）");
+	}
 	m_mu = mu;
 	m_message = warn.empty() ? std::string("ROM: ") + dir
 	                         : std::string("ROM: ") + dir + "\n警告: " + warn;
