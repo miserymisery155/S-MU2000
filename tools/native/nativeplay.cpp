@@ -185,6 +185,7 @@ int main(int argc, char **argv)
 	bool slotalloc = false;
 	bool levelcheck = false;
 	bool keycut = false;
+	bool nocal = false;
 	const char *ramdump = nullptr;
 	for (int i = 3; i < argc; i++) {
 		if (!std::strcmp(argv[i], "-b") && i + 1 < argc)
@@ -217,6 +218,7 @@ int main(int argc, char **argv)
 		else if (!std::strcmp(argv[i], "--slotalloc")) slotalloc = true;
 		else if (!std::strcmp(argv[i], "--levelcheck")) levelcheck = true;
 		else if (!std::strcmp(argv[i], "--keycut")) keycut = true;
+		else if (!std::strcmp(argv[i], "--nocal")) nocal = true;
 		else if (!std::strcmp(argv[i], "--ramdump") && i + 1 < argc) ramdump = argv[++i];
 		else if (!std::strcmp(argv[i], "--catoff") && i + 1 < argc) catoff = int(std::strtol(argv[++i], nullptr, 0));
 		else if (!std::strcmp(argv[i], "--sweep") && i + 1 < argc) sweep = std::atoi(argv[++i]);
@@ -1972,7 +1974,9 @@ int main(int argc, char **argv)
 		// ---- ここから SH-2 を止める
 		mu.set_cpu_enabled(false);
 		const int att = xg::nv::volume_att(rom, elem, cal.base_level, note, vel);
-		xg::nv::slot_regs regs = xg::nv::build_note(rom, elem, note, att, &cal);
+		// --nocal: 写し取りを一切混ぜず、式だけで組む（段 3 の進み具合を測る）
+		xg::nv::slot_regs regs = xg::nv::build_note(rom, elem, note, att,
+		                                            nocal ? nullptr : &cal);
 		if (copyall) {
 			// 切り分け用: 写し取った値をそのまま全部使う（式を一切使わない）
 			for (int i = 0; i < 0x40; i++)

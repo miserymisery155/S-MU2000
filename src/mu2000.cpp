@@ -453,7 +453,8 @@ void mu2000::build_bus()
 		auto note = [this, want](offs_t a, u32 v, int size) {
 			const u32 pc = m_cpu ? m_cpu->pc() : 0;
 			if (pc >= want && pc <= want + 0x100)
-				std::fprintf(stderr, "ramread pc=%06x 番地=%06x = %x (%d bit)\n",
+				std::fprintf(stderr, "ramread s=%llu pc=%06x 番地=%06x = %x (%d bit)\n",
+				             (unsigned long long)trace_sample(),
 				             pc, u32(a), v, size * 8);
 		};
 		d.r8  = [this, note](offs_t a) {
@@ -475,7 +476,8 @@ void mu2000::build_bus()
 		const u32 wa = wp ? u32(std::strtoul(wp, nullptr, 16)) : 0xffffffffu;
 		auto notew = [this, wa](offs_t a, u32 v, int size) {
 			if (a <= wa && wa < a + u32(size))
-				std::fprintf(stderr, "ramwrite pc=%06x 番地=%06x = %x (%d bit)\n",
+				std::fprintf(stderr, "ramwrite s=%llu pc=%06x 番地=%06x = %x (%d bit)\n",
+				             (unsigned long long)trace_sample(),
 				             m_cpu ? m_cpu->pc() : 0, u32(a), v, size * 8);
 		};
 		d.w8  = [this, notew](offs_t a, u8 v)  { notew(a, v, 1); m_ram[a - 0x400000] = v; };
@@ -1078,6 +1080,10 @@ void mu2000::midi_step(u64 now)
 // 報告があり、LCD を描いているのも firmware なので筋が合う
 void mu2000::note_fw_swp(bool master, u32 reg, u16 value)
 {
+	// **包絡線の格子の位相を拾う**。native の口が始まる前は firmware が
+	// 普通に走っているので、そのときの 0x00 の書き込みが格子の目にあたる
+	if (master && !m_native_engine && reg < 0x1000 && (reg % 64) == 0)
+		m_ndrv.set_eg_phase(u32(trace_sample()));
 	if (!m_native_engine || !master)
 		return;
 	// **firmware が鍵を押した瞬間のマスク**を拾う。これが firmware の

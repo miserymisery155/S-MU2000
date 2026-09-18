@@ -15,6 +15,7 @@
 #include "compat/mamecompat.h"
 
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -301,6 +302,189 @@ inline int velocity_att(const u8 *rom, int vel, int curve = 0)
 	return rom[LEVEL_TAB + u32(i & 0x7f)];
 }
 
+inline int rd16s(const u8 *rom, u32 a)
+{
+	const int v = int(rd16(rom, a));
+	return v >= 0x8000 ? v - 0x10000 : v;
+}
+
+// ---- **音程の包絡線（ピッチ EG）**（doc/native-engine.md の 6.68）
+//
+// スロットの `0x10` は「行き先の音程のずれ」、`0x0b` の上位バイトは「その速さ」で、
+// 近づけるのはチップの仕事（swp30.cpp の `peg_step`）。firmware は
+// **キーオンの直前に初めの高さを書き、キーオンの直後に行き先を書く**だけ。
+//
+// 実機の `0x12BAC8`-`0x12BBA0` を起こした:
+//
+//   速さ = 表 0x1E6C94[ clamp(byte26 + ((64 - パート[26]) >> 2), 0, 63) ]
+//   初めの高さ = 速さが 127（＝即到達）なら byte31、そうでなければ byte30
+//   行き先     = byte31
+//   セント = 段（byte21）で目盛りを変えた (高さ - 64) × 75
+//   レジスタ = 0x4000 | (表 0x1E6D14[セント] & 0x3fff)
+//
+// Violin(40) は byte30=18・byte21=0 → (18-64)×75>>2 = -862 セント → -183。
+// 実機の `0x10` は `7f49`（= 0x4000 | (-183 & 0x3fff)）でぴったり合った。
+// Trumpet・BrssSec・MuteTrp・Piccolo・PanFlute・Clarinet・Recorder でも合う
+constexpr u32 PEG_RATE_TAB  = 0x1E6C94;   // 速さの目盛り → レジスタ（64 語）
+constexpr u32 CENT_PITCH_TAB = 0x1E6D14;  // セント → 音程の目盛り（0-4800）
+
+// 16bit に切り詰める（実機の EXTS.W）
+inline int s16v(int v) { return int(s16(u16(v))); }
+
+// セント → 音程の目盛り（1 オクターブ = 256）。実機の `0x12B860`
+inline int cents_to_pitch(const u8 *rom, int cents)
+{
+	if (!rom || !cents)
+		return 0;
+	if (cents > 0)
+		return cents < 4801 ? rd16s(rom, CENT_PITCH_TAB + u32(cents) * 2) : 1024;
+	return cents > -4801 ? -rd16s(rom, CENT_PITCH_TAB + u32(-cents) * 2) : -1024;
+}
+
+// 高さに掛かる**強さの効き**（実機の `0x12BD40`）。byte22 が 64 なら 0
+inline int peg_vel_depth(const u8 *elem, int vel)
+{
+	const int d = int(elem[22]) - 64;
+	if (!d)
+		return 0;
+	const int x = 36 * (d > 0 ? d : -d);
+	const int m = d > 0 ? (0x80 - (vel & 0x7f)) : (vel & 0x7f);
+	return int((u32(s16v(x * m)) * 2 & 0xffff) >> 8);
+}
+
+// 高さ（0-127、64 が中央）→ セント。実機の `0x12BBAE`。
+// byte21 が目盛り: 0 なら 18.75・1 なら 37.5・2 なら 75・3 なら 150 セント刻み
+inline int peg_cents(const u8 *elem, int level, int vel)
+{
+	const int d = level - 64;
+	if (!d)
+		return 0;
+	const int k = peg_vel_depth(elem, vel);
+	int m;
+	if (d > 0) {
+		m = d + 1;                                   // 実機は正の側だけ 1 を足す
+		m -= int((u32(s16v(m * k)) & 0xffff) >> 8);
+	} else {
+		m = d + int((u32(-s16v(d * k)) & 0xffff) >> 8);
+		m = -m;
+	}
+	int v = s16v(m * 75);
+	switch (elem[21]) {
+	case 0: v = s16v(v) >> 1; v = s16v(v) >> 1; break;
+	case 1: v = s16v(v) >> 1; break;
+	case 3: v = s16v(v) << 1; break;
+	default: break;
+	}
+	return d > 0 ? v : -v;
+}
+
+// 速さのレジスタ（`0x0b` の上位バイト）。実機の `0x12BCF0`
+inline int peg_rate_reg(const u8 *rom, const u8 *elem, int part_rate = 64)
+{
+	int r = int(elem[26]) + (int(s8(u8(64 - part_rate))) >> 2);
+	if (r > 63) r = 63;
+	if (r < 0)  r = 0;
+	return rd16s(rom, PEG_RATE_TAB + u32(r) * 2);
+}
+
+// `SMU2000_NO_PEG` を立てると音程の包絡線をやめる（比べるための逃げ道）
+inline bool peg_on()
+{
+	static const bool on = std::getenv("SMU2000_NO_PEG") == nullptr;
+	return on;
+}
+
+// `0x10` に書く値（セントを渡す）
+inline u16 peg_reg(const u8 *rom, int cents)
+{
+	if (!peg_on())
+		return 0x4000;
+	return u16(0x4000 | (u16(cents_to_pitch(rom, cents)) & 0x3fff));
+}
+
+// ---- **フィルタの包絡線**（doc/native-engine.md の 6.63）
+//
+// 実機は firmware のソフトでこれを動かしていて、10ms ごとに
+// 切る高さへ足す値を作り直す。折れ線で、状態は 3 つ:
+//
+//   累算  段の中でいまどこまで来たか（`[音+66]`）
+//   目標  その段の行き先（`[音+68]`）
+//   増分  1 段あたりの足し引き（`[音+70]`。0x8000 なら「すぐ次の段」）
+//
+// 10ms ごとに 累算 += 増分 して、向きに応じて目標を越えたら次の段へ。
+// 切る高さに足す値は **累算 >> 2**。
+//
+// 段は要素のバイトで決まる（要素 + 2 を基準に読んでいるので、ここでは
+// 要素そのものの番号で書く）:
+//
+//   はじめの累算 = 目標(byte55)
+//   段 1: 目標 = 目標(byte56)、速さ = byte51
+//   段 2: 目標 = 目標(byte57)、速さ = byte52
+//
+// Kitayama（0,72,5）鍵 60・強さ 100 の実機の値で全部合わせた（6.63）
+constexpr u32 FENV_INC_TAB = 0x1E5C58;   // 速さ → 増分（16bit 符号つき × 64）
+
+// 0 の側へ丸める >>8（実機は符号で分けている）
+inline int sh8(int v) { return v >= 0 ? (v >> 8) : -((-v) >> 8); }
+
+// **包絡線の深さ**（実機の `[音+93]`。`0x128ADC`）。
+// 強さの表を byte8 で選び、byte46 の深さと掛け合わせる。
+//   深さ = ((36 × (byte46 - 64)) × (0x80 - 表[強さ]) × 2) >> 8
+// 表は byte8 が 0 なら 0x1E5D58、そうでなければ 0x1E5DD8。
+// GrandPno（byte46=70・byte8=1・強さ 100）で 111、
+// Kitayama（byte46=71・byte8=0）で 72。どちらも実機の値と一致した。
+// **パートの塊 +210 が 0 でないときの枝はまだ起こしていない**
+// （そこは深さがもう一段変わる。既定の音色では 0）
+constexpr u32 FENV_VEL_TAB0 = 0x1E5D58;
+constexpr u32 FENV_VEL_TAB1 = 0x1E5DD8;
+
+inline int fenv_depth(const u8 *rom, const u8 *elem, int vel)
+{
+	if (!rom || !elem)
+		return 0;
+	const int d = int(elem[46]) - 64;
+	if (d < 0)
+		return 0;                    // 負の枝はまだ起こしていない
+	const u32 tab = elem[8] ? FENV_VEL_TAB1 : FENV_VEL_TAB0;
+	const int t = rom[tab + u32(vel & 0x7f)];
+	const int v = (36 * d) * (0x80 - t);
+	return int((u32(v) * 2 & 0xffff) >> 8);
+}
+
+// レベルのバイト → 目標
+inline int fenv_target(const u8 *rom, const u8 *elem, int level, int vel)
+{
+	const int x = (level - 64) * 2;
+	return (x - sh8(x * fenv_depth(rom, elem, vel))) * 64;
+}
+
+// 速さへの足し込み。鍵のぶん（byte48 が深さ・byte49 が基準鍵）と
+// 強さのぶん（byte47 が深さ）
+inline int fenv_key_adj(const u8 *elem, int note)
+{
+	const int d = int(elem[48]) - 64;
+	return d ? sh8((note - int(elem[49])) * (d * 16)) : 0;
+}
+inline int fenv_vel_adj(const u8 *elem, int vel)
+{
+	const int d = int(elem[47]) - 64;
+	if (!d)
+		return 0;
+	const int a = d * 16;
+	return sh8(a >= 0 ? a * vel : -((-a) * (0x80 - vel)));
+}
+
+// 速さ → 増分。63 以上は「すぐ次の段」の印
+constexpr int FENV_NEXT = 0x8000;
+inline int fenv_inc(const u8 *rom, int rate)
+{
+	if (rate >= 63)
+		return FENV_NEXT;
+	if (rate < 0)
+		rate = 0;
+	return rd16s(rom, FENV_INC_TAB + u32(rate) * 2);
+}
+
 // 音色ごとの下駄。firmware は「音色の音量 → 表」と、鍵ごとの足し込みで作る。
 // 式そのものはまだ解けていないので、**1 回だけ実機に鳴らしてもらって校正する**（下）。
 // 校正しないときの当て値（実測の中央値。5〜19 の幅がある）
@@ -498,7 +682,8 @@ inline const voice_cal *match_cal(const std::vector<voice_cal> &cals, u32 want, 
 // 1 音ぶんのレジスタを作る。att は 0x09 に入れる減衰（0-255。小さいほど大きい音）
 inline slot_regs build_note(const u8 *rom, const u8 *elem, int note, int att,
                             const voice_cal *cal = nullptr,
-                            const defaults &d = defaults(), int cents_extra = 0)
+                            const defaults &d = defaults(), int cents_extra = 0,
+                            int vel = 100)
 {
 	slot_regs r;
 	const u8 *we = wave_entry(rom, wave_set(elem), wave_note(elem, note));
@@ -510,7 +695,10 @@ inline slot_regs build_note(const u8 *rom, const u8 *elem, int note, int att,
 	// 実機はここに鍵と強さの倍率を掛ける（`0x127FA4`）が、その係数がまだ分からない。
 	// 倍率 1 として表を引くだけでも、開き切りよりはずっと実機に近い
 	r.set(0x00, u16(0x1000 | (rd16(rom, CUTOFF_TAB + u32(elem[37]) * 2) & 0x7ff)));
-	r.set(0x01, d.bypass);
+	// **鍵を押した瞬間の 0x01 は 0xFFFF**（実機は毎回そう書いて、最初の
+	// 包絡線の目で本当の値に置き換える）。14 音色を実機と突き合わせて
+	// 確かめた（doc/native-engine.md の 6.67）
+	r.set(0x01, 0xffff);
 	r.set(0x02, u16(0x8000 | elem[82]));       // 402 組の 97%
 	r.set(0x03, d.post);
 	// フィルタの第 2 パラメータ（共振）。firmware は byte35 を 1 ビット落として
@@ -519,8 +707,10 @@ inline slot_regs build_note(const u8 *rom, const u8 *elem, int note, int att,
 	r.set(0x05, d.lfo_amp);
 	// LFO の型と刻み。上位は 0x40 | byte11（402 組で例外なし）、下位（音程の深さ）は 0
 	r.set(0x0a, u16((0x40 | (elem[11] & 0x3f)) << 8));
-	r.set(0x0b, d.r0b);
-	r.set(0x10, u16(elem[83] << 8));           // 402 組の 96%
+	// 音程の包絡線。速さが 127（即到達）のときだけ初めの高さは byte31 を使う
+	const int prate = peg_rate_reg(rom, elem);
+	r.set(0x0b, u16(prate << 8));
+	r.set(0x10, peg_reg(rom, peg_cents(elem, prate == 127 ? elem[31] : elem[30], vel)));
 
 	// --- 包絡線（doc/native-engine.md の 6.3・6.4）
 	//
@@ -572,7 +762,10 @@ inline slot_regs build_note(const u8 *rom, const u8 *elem, int note, int att,
 	if (cal && cal->have) {
 		// 0x20-0x2b は**偶数番だけ**でよい（奇数番と 0x30・0x31 は実機の
 		// firmware も一度も書かない。記録を追って確かめた）
-		static const int COPY[] = { 0x00, 0x01, 0x02, 0x04, 0x05, 0x06, 0x0a, 0x0b, 0x10,
+		// **0x0b・0x10 はもう写し取らない**。音程の包絡線を式で出すようになった
+		// （写し取りは包絡線が終わったあとの値を拾うので、入れると出だしの
+		//  しゃくりが丸ごと消えていた。doc/native-engine.md の 6.68）
+		static const int COPY[] = { 0x00, 0x01, 0x02, 0x04, 0x05, 0x06, 0x0a,
 		                            0x20, 0x22, 0x24, 0x26, 0x28, 0x2a,
 		                            0x32, 0x33, 0x34, 0x35, 0x36, 0x37 };
 		for (int i : COPY)
