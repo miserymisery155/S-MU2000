@@ -4,6 +4,7 @@
 
 #include "mu2000.h"
 #include "bootcache.h"
+#include "voicecache.h"
 #include "nvram.h"
 #include "smartmedia.h"
 #include "ui/xg_state.h"
@@ -201,7 +202,10 @@ engine::~engine()
 	m_abort.store(true, std::memory_order_relaxed);
 	if (m_thread.joinable())
 		m_thread.join();
-	// 音声スレッドはもう回っていない。SmartMedia に書いたものをその場で残す
+	// 音声スレッドはもう回っていない。覚えた写し取りを残す（次に挿したときに使う）
+	if (m_mu && m_mu->native_engine())
+		smu2000::voicecache::save(*m_mu, smu2000::voicecache::key(*m_mu));
+	// SmartMedia に書いたものをその場で残す
 	if (m_mu && !card_path().empty()) {
 		std::vector<smartmedia::block> blocks;
 		m_mu->card().take_dirty_blocks(blocks);
@@ -364,6 +368,8 @@ void engine::boot()
 		if (native_engine) {
 			mu->set_native_engine(native_engine);
 			logf("plugin.ini: native_engine=1（SH-2 は要るときだけ回す）");
+			if (smu2000::voicecache::load(*mu, smu2000::voicecache::key(*mu)))
+				logf("写し取り: %d 音色を前の写しから", int(mu->native_cal_count()));
 		}
 		m_mu = mu;
 		m_message = warn.empty() ? std::string("ROM: ") + dir
@@ -420,6 +426,8 @@ void engine::boot()
 	if (native_engine) {
 		mu->set_native_engine(native_engine);
 		logf("plugin.ini: native_engine=1（SH-2 は要るときだけ回す）");
+		if (smu2000::voicecache::load(*mu, smu2000::voicecache::key(*mu)))
+			logf("写し取り: %d 音色を前の写しから", int(mu->native_cal_count()));
 	}
 	m_mu = mu;
 	m_message = warn.empty() ? std::string("ROM: ") + dir

@@ -13,6 +13,7 @@
 
 #include "compat/platform.h"
 #include "mu2000.h"
+#include "voicecache.h"
 #include "bootcache.h"
 #include "smf.h"
 
@@ -402,8 +403,13 @@ int main(int argc, char **argv)
 			}
 		}
 		// native の口は、起動が終わってから入れる（起動には firmware が要る）
-		if (native_engine && i == boot_samples)
+		if (native_engine && i == boot_samples) {
 			mu.set_native_engine(native_engine);
+			// 前に写し取ったものがあれば読む（1 音目から native で鳴らせる）
+			if (!std::getenv("SMU2000_NO_VOICECACHE") &&
+			    smu2000::voicecache::load(mu, smu2000::voicecache::key(mu)))
+				std::printf("写し取り: %d 音色を前の写しから\n", int(mu.native_cal_count()));
+		}
 
 		// 起動ぶんは**整数で引く**。double(i)/rate - boot と書くと桁落ちで
 		// 1e-12 秒ずれ、イベントの時刻がちょうど境に乗ったときに 1 サンプル動く
@@ -523,9 +529,21 @@ int main(int argc, char **argv)
 	}
 
 	write_wav(wav, pcm, rate);
-	if (native_engine)
+	if (native_engine && !std::getenv("SMU2000_NO_VOICECACHE"))
+		smu2000::voicecache::save(mu, smu2000::voicecache::key(mu));
+	if (native_engine) {
 		std::printf("native の口: 演奏中に firmware を回したのは %.1f%%\n",
 		            100.0 * mu.native_firmware_share());
+		const mu2000::native_why w = mu.native_why_counts();
+		if (w.total)
+			std::printf("  内訳: firmware の音 %.1f%% / SysEx %.1f%% / 写し取り %.1f%% / "
+			            "MIDI の受け取り %.1f%% / そのほか %.1f%%\n",
+			            100.0 * double(w.by_note) / double(w.total),
+			            100.0 * double(w.by_sysex) / double(w.total),
+			            100.0 * double(w.by_learn) / double(w.total),
+			            100.0 * double(w.by_midi) / double(w.total),
+			            100.0 * double(w.by_other) / double(w.total));
+	}
 	if (native_engine) {
 		const mu2000::native_stats st = mu.native_counts();
 		std::printf("  鍵: native %llu / firmware %llu（うち写し取り %llu）、そのほかの MIDI %llu\n",

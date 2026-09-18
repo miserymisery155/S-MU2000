@@ -172,7 +172,7 @@ int main(int argc, char **argv)
 	double seconds = 2.0;
 	bool firmware = false, compare = false, song = false, dump_voice = false, copyall = false;
 	int sweep = 0, volsweep = 0, levels = 0;
-	bool bench = false, ccwatch = false, ccsweep = false, ccram = false, attsweep = false, cutsweep = false, listvoices = false;
+	bool bench = false, ccwatch = false, ccsweep = false, ccram = false, attsweep = false, cutsweep = false, listvoices = false, ccfilter = false;
 	for (int i = 3; i < argc; i++) {
 		if (!std::strcmp(argv[i], "-b") && i + 1 < argc)
 			std::sscanf(argv[++i], "%d,%d,%d", &msb, &lsb, &prog);
@@ -192,6 +192,7 @@ int main(int argc, char **argv)
 		else if (!std::strcmp(argv[i], "--attsweep")) attsweep = true;
 		else if (!std::strcmp(argv[i], "--cutsweep")) cutsweep = true;
 		else if (!std::strcmp(argv[i], "--list")) listvoices = true;
+		else if (!std::strcmp(argv[i], "--ccfilter")) ccfilter = true;
 		else if (!std::strcmp(argv[i], "--sweep") && i + 1 < argc) sweep = std::atoi(argv[++i]);
 		else if (!std::strcmp(argv[i], "--volsweep") && i + 1 < argc) volsweep = std::atoi(argv[++i]);
 		else if (!std::strcmp(argv[i], "--levels") && i + 1 < argc) levels = std::atoi(argv[++i]);
@@ -256,6 +257,44 @@ int main(int argc, char **argv)
 				mu.run_sample(l, r);
 			mu.set_swp_watch(nullptr);
 		}
+		// 音色を選び直すのに firmware が何サンプル要るか
+		{
+			const std::vector<u8> &wr = mu.nvram();
+			auto rec_of = [&]() {
+				const u8 *q = wr.data() + part0;
+				return u32(q[xg::ram::PART_VOICE]) << 24 | u32(q[xg::ram::PART_VOICE + 1]) << 16 |
+				       u32(q[xg::ram::PART_VOICE + 2]) << 8 | q[xg::ram::PART_VOICE + 3];
+			};
+			for (int pg : { 48, 0 }) {
+				const u32 was = rec_of();
+				for (u8 bb : { u8(0xc0), u8(pg) })
+					mu.midi_in(bb, 0);
+				u32 n2 = 0;
+				while (rec_of() == was && n2 < RATE) { mu.run_sample(l, r); n2++; }
+				std::printf("音色を %d に変えるのに %u サンプル（%.2f ms）%c",
+				            pg, n2, double(n2) * 1000.0 / RATE, 10);
+				for (u32 i = 0; i < RATE / 10; i++)
+					mu.run_sample(l, r);
+			}
+		}
+		// ベンド幅（RPN 0,0）がワーク RAM のどこに入るか
+		{
+			const std::vector<u8> &wr = mu.nvram();
+			std::vector<u8> a0 = wr;
+			for (u8 bb : { u8(0xb0), u8(74), u8(100), u8(0xb0), u8(71), u8(77),
+			               u8(0xb0), u8(72), u8(55), u8(0xb0), u8(73), u8(33) })
+				mu.midi_in(bb, 0);
+			for (u32 i = 0; i < RATE / 10; i++)
+				mu.run_sample(l, r);
+			for (size_t a = part0; a < part0 + 0x134 && a < wr.size(); a++)
+				if (wr[a] != a0[a])
+					std::printf("CC74=100 CC71=77 CC72=55 CC73=33: パートの塊 +%02x  %d -> %d%c",
+					            unsigned(a - part0), a0[a], wr[a], 10);
+			for (u8 bb : { u8(0xb0), u8(6), u8(2) })
+				mu.midi_in(bb, 0);
+			for (u32 i = 0; i < RATE / 10; i++)
+				mu.run_sample(l, r);
+		}
 		std::map<u32, u16> before, now;
 		mu.set_swp_watch([&](bool master, u32 reg, u16 value) {
 			if (master) now[reg] = value;
@@ -276,7 +315,15 @@ int main(int argc, char **argv)
 			{ "CC10=64",  0xb0, 0x0a, 64 },
 			{ "bend+",    0xe0, 0x00, 0x7f },{ "bend0",    0xe0, 0x00, 0x40 },
 			{ "CC1=64",   0xb0, 0x01, 64 },  { "CC1=0",    0xb0, 0x01, 0 },
-			{ "CC91=0",   0xb0, 0x5b, 0 },   { "CC93=0",   0xb0, 0x5d, 0 },
+			{ "CC91=0",   0xb0, 0x5b, 0 },   { "CC91=127", 0xb0, 0x5b, 127 },
+			{ "CC93=127", 0xb0, 0x5d, 127 }, { "CC93=0",   0xb0, 0x5d, 0 },
+			{ "CC94=127", 0xb0, 0x5e, 127 }, { "CC94=0",   0xb0, 0x5e, 0 },
+			{ "CC74=0",   0xb0, 0x4a, 0 },   { "CC74=127", 0xb0, 0x4a, 127 },
+			{ "CC74=64",  0xb0, 0x4a, 64 },
+			{ "CC71=0",   0xb0, 0x47, 0 },   { "CC71=127", 0xb0, 0x47, 127 },
+			{ "CC71=64",  0xb0, 0x47, 64 },
+			{ "CC72=127", 0xb0, 0x48, 127 }, { "CC73=127", 0xb0, 0x49, 127 },
+			{ "AT=100",   0xd0, 100, 0 },
 		};
 		for (const step &st : steps) {
 			std::map<u32, u16> prev = now;
@@ -322,6 +369,60 @@ int main(int argc, char **argv)
 				std::printf(" %d", xg::nv::element(rom, rec2, k)[72]);
 			std::putchar(10);
 		}
+		return 0;
+	}
+
+	// --ccfilter: CC74（明るさ）・CC71（レゾナンス）を振って、鳴らし始めの
+	// 0x00・0x04 を並べる。包絡線が動く前の値を見たいので、毎回鳴らし直す
+	if (ccfilter) {
+		std::map<u32, u16> now, seen;
+		u64 mask = 0, keyed = 0;
+		mu.set_swp_watch([&](bool master, u32 r2, u16 v2) {
+			if (!master) return;
+			now[r2] = v2;
+			if (r2 == 0x20e && seen.empty()) seen = now;
+			switch (r2) {
+			case 0x18e: mask = (mask & ~(u64(0xffff) << 48)) | (u64(v2) << 48); break;
+			case 0x18f: mask = (mask & ~(u64(0xffff) << 32)) | (u64(v2) << 32); break;
+			case 0x1ce: mask = (mask & ~(u64(0xffff) << 16)) | (u64(v2) << 16); break;
+			case 0x1cf: mask = (mask & ~u64(0xffff)) | v2; break;
+			case 0x20e: keyed |= mask; break;
+			default: break;
+			}
+		});
+		for (int which = 1; which >= 0; which--) {
+			const u8 cc = which ? 0x47 : 0x4a;
+			std::printf("== CC%d%c", int(cc), 10);
+			for (int v = 1; v <= 127; v += 2) {
+				for (u8 bb : { u8(0xb0), cc, u8(v) })
+					mu.midi_in(bb, 0);
+				keyed = 0;
+				now.clear();
+				seen.clear();
+				for (u8 bb : { u8(0x90), u8(note & 0x7f), u8(vel & 0x7f) })
+					mu.midi_in(bb, 0);
+				for (u32 i = 0; i < RATE / 50; i++)
+					mu.run_sample(l, r);
+				for (int ch = 0; ch < 64; ch++)
+					if (keyed & (u64(1) << ch)) {
+						const auto a0 = seen.find(u32(ch) * 64 + 0);
+						const auto a4 = seen.find(u32(ch) * 64 + 4);
+						std::printf("%d %04x %04x%c", v,
+						            a0 == seen.end() ? 0xffff : a0->second,
+						            a4 == seen.end() ? 0xffff : a4->second, 10);
+						break;
+					}
+				for (u8 bb : { u8(0x80), u8(note & 0x7f), u8(64), u8(0xb0), u8(0x78), u8(0) })
+					mu.midi_in(bb, 0);
+				for (u32 i = 0; i < RATE / 8; i++)
+					mu.run_sample(l, r);
+			}
+			for (u8 bb : { u8(0xb0), cc, u8(64) })
+				mu.midi_in(bb, 0);
+			for (u32 i = 0; i < RATE / 10; i++)
+				mu.run_sample(l, r);
+		}
+		mu.set_swp_watch(nullptr);
 		return 0;
 	}
 
