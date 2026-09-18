@@ -184,6 +184,7 @@ int main(int argc, char **argv)
 	bool egwatch = false;
 	bool slotalloc = false;
 	bool levelcheck = false;
+	bool keycut = false;
 	for (int i = 3; i < argc; i++) {
 		if (!std::strcmp(argv[i], "-b") && i + 1 < argc)
 			std::sscanf(argv[++i], "%d,%d,%d", &msb, &lsb, &prog);
@@ -214,6 +215,7 @@ int main(int argc, char **argv)
 		else if (!std::strcmp(argv[i], "--egwatch")) egwatch = true;
 		else if (!std::strcmp(argv[i], "--slotalloc")) slotalloc = true;
 		else if (!std::strcmp(argv[i], "--levelcheck")) levelcheck = true;
+		else if (!std::strcmp(argv[i], "--keycut")) keycut = true;
 		else if (!std::strcmp(argv[i], "--catoff") && i + 1 < argc) catoff = int(std::strtol(argv[++i], nullptr, 0));
 		else if (!std::strcmp(argv[i], "--sweep") && i + 1 < argc) sweep = std::atoi(argv[++i]);
 		else if (!std::strcmp(argv[i], "--volsweep") && i + 1 < argc) volsweep = std::atoi(argv[++i]);
@@ -547,6 +549,51 @@ int main(int argc, char **argv)
 	}
 
 	// --cutsweep: 強さを 1 から 127 まで振って、フィルタ（0x00）と共振（0x04）を並べる
+	// --keycut: **鍵ごとに** 0x00（フィルタの切る高さ）を並べる。1 回の起動で
+	// 端から端まで見る（音は 1 つずつ離すので、声が枯れない）。
+	// レジスタ 0x00 は鍵でも動く（doc/native-engine.md の 6.54）ので、
+	// その形を測るための道具
+	if (keycut) {
+		std::map<u32, u16> now, seen;
+		u64 mask = 0, keyed = 0;
+		mu.set_swp_watch([&](bool master, u32 r2, u16 v2) {
+			if (!master) return;
+			now[r2] = v2;
+			if (r2 == 0x20e && seen.empty())
+				seen = now;
+			switch (r2) {
+			case 0x18e: mask = (mask & ~(u64(0xffff) << 48)) | (u64(v2) << 48); break;
+			case 0x18f: mask = (mask & ~(u64(0xffff) << 32)) | (u64(v2) << 32); break;
+			case 0x1ce: mask = (mask & ~(u64(0xffff) << 16)) | (u64(v2) << 16); break;
+			case 0x1cf: mask = (mask & ~u64(0xffff)) | v2; break;
+			case 0x20e: keyed |= mask; break;
+			default: break;
+			}
+		});
+		for (int nn = 0; nn < 128; nn++) {
+			keyed = 0;
+			now.clear();
+			seen.clear();
+			for (u8 bb : { u8(0x90), u8(nn), u8(vel & 0x7f) })
+				mu.midi_in(bb, 0);
+			for (u32 i = 0; i < RATE / 50; i++)
+				mu.run_sample(l, r);
+			for (int ch = 0; ch < 64; ch++)
+				if (keyed & (u64(1) << ch)) {
+					const auto a0 = seen.find(u32(ch) * 64 + 0);
+					std::printf("KEY %d %04x\n", nn,
+					            a0 == seen.end() ? 0xffff : a0->second);
+					break;
+				}
+			for (u8 bb : { u8(0x80), u8(nn), u8(64) })
+				mu.midi_in(bb, 0);
+			for (u32 i = 0; i < RATE / 25; i++)
+				mu.run_sample(l, r);
+		}
+		mu.set_swp_watch(nullptr);
+		return 0;
+	}
+
 	if (cutsweep) {
 		std::map<u32, u16> now, seen;
 		u64 mask = 0, keyed = 0;
