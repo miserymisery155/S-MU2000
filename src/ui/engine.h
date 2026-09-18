@@ -124,6 +124,23 @@ struct engine {
 		return true;
 	}
 
+	// **NVRAM を残す前に、firmware を落ち着かせる。**
+	// NVRAM はワーク RAM 256KB を丸ごと残すので、firmware の生きた状態も
+	// 一緒に残る。native の口では firmware をほとんど回さないため、
+	// そのまま残すと firmware から見て中途半端な状態が保存され、
+	// 次に開いたときは曲の頭からおかしくなる。
+	// native を切って（鳴っている音は離される）、少し回してから残す
+	void settle_for_save()
+	{
+		if (!mu.native_engine())
+			return;
+		mu.set_native_engine(0);
+		native_engine.store(0);
+		s32 l, r;
+		for (int i = 0; i < int(0.5 * AUDIO_RATE); i++)
+			mu.run_sample(l, r);
+	}
+
 	// 工場出荷状態に戻す。覚えている設定を捨てて電源を入れ直す。
 	// 音声の糸が機械から手を離すのを待ってから触る
 	void factory_reset()

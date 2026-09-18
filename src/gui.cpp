@@ -1504,6 +1504,7 @@ int main(int argc, char **argv)
 	flush_card();      // 音はもう止まっている。SmartMedia に書いたものを残す
 	save_settings();   // VOLUME のつまみの位置
 	// 音はもう止まっている。起動できていたときだけ残す
+	eng.settle_for_save();
 	if (eng.state.load() == 1 && !smu2000::nvram::save(eng.mu))
 		std::fprintf(stderr, "設定を残せなかった: %s\n", smu2000::nvram::path(eng.mu).c_str());
 	// 残した設定で起動した写しも用意しておく（src/bootcache.h）。無いと、

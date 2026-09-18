@@ -323,10 +323,13 @@ public:
 	std::atomic<u64> m_ne_by_other{0};   // 音色の指定・CC など
 	std::atomic<u64> m_ne_by_learn{0};   // 写し取り（その音色の 1 音目）
 	std::atomic<u64> m_ne_by_midi{0};    // 渡した MIDI を受け取らせている
+	std::atomic<u64> m_ne_by_keep{0};    // 止めきらないために細く回している
 	u8   m_fw_why = 0;                   // いまの hold の理由（1 SysEx / 2 そのほか）
 	// SysEx の頭を少し覚えて、長く回す必要があるかを見分ける
 	int  m_sx_pos = -1;
-	u8   m_sx[6] = {};
+	// XG のパラメータチェンジは 43 1n 4C hh mm ll dd… の形。パートの設定
+	// （08 pp ll）は自分でも効かせたいので、値まで取っておく
+	u8   m_sx[24] = {};
 
 	struct native_stats { u64 note_native = 0, note_fw = 0, learn = 0, other = 0; };
 	native_stats native_counts() const { return m_ne_stats; }
@@ -338,7 +341,7 @@ public:
 	size_t native_cal_count() const { return m_ndrv.cal_count(); }
 	int native_peak_slots() const { return m_ndrv.peak_slots(); }
 
-	struct native_why { u64 total, by_note, by_sysex, by_other, by_learn, by_midi; };
+	struct native_why { u64 total, by_note, by_sysex, by_other, by_learn, by_midi, by_keep; };
 	native_why native_why_counts() const
 	{
 		return { m_ne_samples.load(std::memory_order_relaxed),
@@ -346,7 +349,8 @@ public:
 		         m_ne_by_sysex.load(std::memory_order_relaxed),
 		         m_ne_by_other.load(std::memory_order_relaxed),
 		         m_ne_by_learn.load(std::memory_order_relaxed),
-		         m_ne_by_midi.load(std::memory_order_relaxed) };
+		         m_ne_by_midi.load(std::memory_order_relaxed),
+		         m_ne_by_keep.load(std::memory_order_relaxed) };
 	}
 
 	// native の口が、いま firmware を回している割合（0-1。小さいほど軽い）
@@ -396,7 +400,8 @@ private:
 	static constexpr u32 NATIVE_PROC  = 32;          // バイトを受け終えてから鳴るまで
 	static constexpr u64 RX_BYTE_TICK = 903;         // 1 バイト（1/64 サンプル単位）
 	u64  m_rx_at[MIDI_PORTS] = {};                   // その口が次のバイトを受け終える時刻
-	struct nev { u64 at; u8 kind, part, d0, d1; };   // kind 0=離し 1=押し 2=CC 3=ベンド
+	// kind 0=離し 1=押し 2=CC 3=ベンド 4=音色の指定 5=XG のパートの設定（08 pp d0=d1）
+	struct nev { u64 at; u8 kind, part, d0, d1; };
 	std::deque<nev> m_nq;
 	u64  m_ne_clock = 0;
 	u32  m_nown[64][4] = {};       // native で鳴らしている鍵（パートごとに 128 ビット）
@@ -435,6 +440,8 @@ private:
 	struct part_prog { u8 msb = 0, lsb = 0, prog = 0; };
 	part_prog m_prog_sel[64];
 	void native_select_voice(int part);
+	// 受け取り終えた XG の SysEx を、native の側にも効かせる
+	void native_sysex(u64 fire);
 
 	// 口ごとの MIDI の読み取り
 	struct nmidi { u8 status = 0; u8 d0 = 0; int have = 0; };
@@ -456,10 +463,19 @@ private:
 	u32  m_ne_learn_dirty = 0;
 	// 写し取りで、その音色のものでないスロットを掴んで捨てた回数
 	u32  m_ne_learn_wrong = 0;
+	// firmware が、こちらが鳴らしているスロットに書いた回数
+	u32  m_ne_fw_stomp = 0;
+	void note_fw_swp(bool master, u32 reg, u16 value);
+	u64  m_fw_keymask = 0;     // firmware がつぎに鳴らすスロットのマスク
+	// firmware を細く回し続ける刻み（100ms ごとに 5ms）。止めきると液晶・
+	// ボタン・firmware 自身の後始末が全部止まる
+	static constexpr u32 KEEPALIVE_EVERY = 4410;
+	static constexpr u32 KEEPALIVE_RUN = 220;
 public:
 	u32  native_slot_clash() const { return m_ne_slot_clash; }
 	u32  native_learn_dirty() const { return m_ne_learn_dirty; }
 	u32  native_learn_wrong() const { return m_ne_learn_wrong; }
+	u32  native_fw_stomp() const { return m_ne_fw_stomp; }
 private:
 	native_stats m_ne_stats;
 

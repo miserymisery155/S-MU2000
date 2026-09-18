@@ -489,6 +489,8 @@ void mu2000::build_bus()
 				m_swp_watch(base == 0x800000, reg, u16(v >> 16));
 				m_swp_watch(base == 0x800000, reg + 1, u16(v));
 			}
+			note_fw_swp(base == 0x800000, reg, u16(v >> 16));
+			note_fw_swp(base == 0x800000, reg + 1, u16(v));
 			dev.write16(reg, u16(v >> 16));
 			dev.write16(reg + 1, u16(v));
 			hold(reg);
@@ -500,6 +502,7 @@ void mu2000::build_bus()
 				             m_swp_trace_reads ? "W " : "", base, (a - base) >> 1, v, m_cpu->pc(), double(m_cpu->total_cycles()) / 28000000.0, (unsigned long long)trace_sample());
 			if (m_swp_watch)
 				m_swp_watch(base == 0x800000, (a - base) >> 1, v);
+			note_fw_swp(base == 0x800000, (a - base) >> 1, v);
 			dev.write16((a - base) >> 1, v);
 			hold((a - base) >> 1);
 		};
@@ -984,6 +987,41 @@ void mu2000::midi_step(u64 now)
 
 // ---- native の口（doc/native-engine.md の段 2）
 
+// **firmware が、こちらが鳴らしているスロットに書いたか**を数える。
+// ここは CPU のバス経由の書き込みだけを通る（native の poke は直に
+// write16 を呼ぶので通らない）ので、firmware の書き込みだけが見える。
+//
+// native の口では firmware を 2% ほどしか回さない。firmware が自分の
+// 仕事の途中で止められ、ずっと後に再開して**古い前提のまま**スロットに
+// 書くと、そのスロットを native が別の音で使っていれば音色が壊れる。
+// 利用者から「LCD が途中で止まり、そのとき音色が壊れて見える」という
+// 報告があり、LCD を描いているのも firmware なので筋が合う
+void mu2000::note_fw_swp(bool master, u32 reg, u16 value)
+{
+	if (!m_native_engine || !master)
+		return;
+	// **firmware が鍵を押した瞬間のマスク**を拾う。これが firmware の
+	// 「このスロットを使う」という宣言なので、以後そこは避ける。
+	// あらゆる書き込みで印を付けると、ほとんどのスロットが firmware の
+	// ものになってしまい、かえってぶつかりが増えた
+	switch (reg) {
+	case 0x18e: m_fw_keymask = (m_fw_keymask & ~(u64(0xffff) << 48)) | (u64(value) << 48); return;
+	case 0x18f: m_fw_keymask = (m_fw_keymask & ~(u64(0xffff) << 32)) | (u64(value) << 32); return;
+	case 0x1ce: m_fw_keymask = (m_fw_keymask & ~(u64(0xffff) << 16)) | (u64(value) << 16); return;
+	case 0x1cf: m_fw_keymask = (m_fw_keymask & ~u64(0xffff)) | value; return;
+	case 0x20e: m_ndrv.mark_fw_slots(m_fw_keymask); return;
+	default: break;
+	}
+	if (reg >= 0x1000)
+		return;
+	const u32 rr = reg % 64;
+	// MEG の戻りのミキサは毎サンプル書き替わるので数えない
+	if (rr == 0x0e || rr == 0x0f || (rr >= 0x38 && rr <= 0x3f))
+		return;
+	if ((m_ndrv.slot_mask() >> (reg / 64)) & 1)
+		m_ne_fw_stomp++;
+}
+
 void mu2000::set_native_engine(int mode)
 {
 	// 切るときは、こちらで鳴らしている音を先に離す。切ったあとは firmware が
@@ -1018,6 +1056,7 @@ void mu2000::set_native_engine(int mode)
 	m_ne_by_other.store(0, std::memory_order_relaxed);
 	m_ne_by_learn.store(0, std::memory_order_relaxed);
 	m_ne_by_midi.store(0, std::memory_order_relaxed);
+	m_ne_by_keep.store(0, std::memory_order_relaxed);
 	m_fw_why = 0;
 	m_ne_stats = native_stats();
 	if (!mode) {
@@ -1027,7 +1066,17 @@ void mu2000::set_native_engine(int mode)
 	m_ndrv.reset();
 	m_ndrv.set_rom(m_prog ? m_prog->data() : nullptr);
 	m_ndrv.set_ram(m_ram.data());
-	m_ndrv.set_poke([this](u32 reg, u16 value) { m_swpm.write16(reg, value); });
+	m_ndrv.set_poke([this](u32 reg, u16 value) {
+		// **--trace-swp に native の書き込みも残す**。firmware の書き込みは
+		// バスの所で記録されるが、こちらは write16 を直に呼ぶので通らない。
+		// 両方を同じ形で残せば、firmware と native の書き込みを 1 つずつ
+		// 突き合わせられる（"N " が native）
+		if (m_swp_trace)
+			std::fprintf(m_swp_trace, "N 00800000 %04x %04x  pc=00000000  t=%.6f s=%llu\n",
+			             reg, value, double(trace_sample()) / 44100.0,
+			             (unsigned long long)trace_sample());
+		m_swpm.write16(reg, value);
+	});
 }
 
 // 音色の 1 音目を firmware に鳴らさせて、スロットに書かれた値を写し取る
@@ -1223,6 +1272,29 @@ void mu2000::native_learn_finish()
 		cal.base_level = xg::nv::calibrate_level(rom, xg::nv::element(rom, m_learn_rec, idx),
 		                                         cal.has(9) ? (cal.reg[9] & 0xff) : 64,
 		                                         m_learn_note, m_learn_vel);
+		// **減衰の目盛りのずれを覚える**。実機が書いた 0x07・0x08 の上位から
+		// 目盛りを引き直し、こちらの式で出した目盛りとの差を取る。
+		// 同じ値が並ぶ表なので、こちらの目盛りにいちばん近いものを選ぶ
+		{
+			const u8 *el2 = xg::nv::element(rom, m_learn_rec, idx);
+			const int corr2 = xg::nv::rate_key_corr(el2, m_learn_note);
+			const int raw[2] = { int(el2[74]), int(el2[75]) };
+			for (int k = 0; k < 2; k++) {
+				if (!cal.has(0x07 + k))
+					continue;
+				const int mine = xg::nv::rate_scale(raw[k], corr2);
+				const u8 want = u8(cal.reg[0x07 + k] >> 8);
+				int best = -1, bestd = 1 << 30;
+				// **奇数の目盛りも見る**（実機は 2 倍の単位に乗らない値も使う）
+				for (int i = 0; i <= 127; i++)
+					if (rom[xg::nv::DECAY_TAB + i] == want && std::abs(i - mine) < bestd) {
+						bestd = std::abs(i - mine);
+						best = i;
+					}
+				if (best >= 0)
+					cal.dec_adj[k] = best - mine;
+			}
+		}
 		cal.cal_vel  = m_learn_vel;
 		cal.cal_vol  = m_ndrv.part_vol(m_learn_part);
 		cal.cal_expr = m_ndrv.part_expr(m_learn_part);
@@ -1245,7 +1317,7 @@ void mu2000::native_learn_finish()
 			const xg::nv::voice_cal &c = cals[size_t(k)];
 			const u8 *e2 = xg::nv::element(rom, m_learn_rec, k);
 			const u8 *w2 = xg::nv::wave_entry(rom, xg::nv::wave_set(e2), xg::nv::wave_note(e2, m_learn_note));
-			std::fprintf(stderr, "  写し%d 0x11=%04x 0x32=%04x 0x09=%04x 波形=%08x"
+						std::fprintf(stderr, "  写し%d 0x11=%04x 0x32=%04x 0x09=%04x 波形=%08x"
 			                     " / 式 0x11=%04x 要素b18=%d b0=%d b1=%d\n",
 			             k, c.reg[0x11], c.reg[0x32], c.reg[0x09], c.wave_addr(),
 			             w2 ? xg::nv::pitch_reg(xg::nv::read_wave(w2), m_learn_note,
@@ -1273,7 +1345,7 @@ void mu2000::native_learn_finish()
 namespace {
 
 constexpr u32 CAL_MAGIC = 0x43563253u;   // "S2VC"
-constexpr u32 CAL_VERSION = 6;
+constexpr u32 CAL_VERSION = 8;
 
 void put8(std::vector<u8> &v, u8 x) { v.push_back(x); }
 void put16v(std::vector<u8> &v, u16 x) { v.push_back(u8(x)); v.push_back(u8(x >> 8)); }
@@ -1307,6 +1379,8 @@ void write_cals(std::vector<u8> &out, u8 kind, u64 key, const std::vector<xg::nv
 		put16v(out, u16(c.cal_bri));
 		put16v(out, u16(c.cal_res));
 		put32v(out, c.cal_ctx);
+		put16v(out, u16(s16(c.dec_adj[0])));
+		put16v(out, u16(s16(c.dec_adj[1])));
 		for (int i = 0; i < 0x40; i++)
 			if (c.mask & (u64(1) << i))
 				put16v(out, c.reg[i]);
@@ -1368,6 +1442,8 @@ bool mu2000::native_cal_load(const u8 *data, size_t n)
 			c.cal_bri = s16(r.g16());
 			c.cal_res = s16(r.g16());
 			c.cal_ctx = r.g32();
+			c.dec_adj[0] = s16(r.g16());
+			c.dec_adj[1] = s16(r.g16());
 			for (int i = 0; i < 0x40; i++)
 				if (c.mask & (u64(1) << i))
 					c.reg[i] = r.g16();
@@ -1485,6 +1561,35 @@ void mu2000::native_select_voice(int part)
 	m_ndrv.set_record(part, rec, rec ? 0 : -1);
 }
 
+// **受け取り終えた XG の SysEx を native の側にも効かせる**。
+// 43 1n 4C hh mm ll dd… のうち、いま見るのは 08 pp ll（パートの設定）だけ。
+// ここを入れるまでは、パートの設定を SysEx で送る曲（CC ではなく SysEx で
+// 送りや音量を決める打ち込みは珍しくない）で、firmware がその SysEx を
+// 処理し終えるまで native が古い値のまま鳴らしていた。native の口では
+// firmware を 100ms につき 5ms しか回さないので、その遅れは 1 秒を超える
+void mu2000::native_sysex(u64 fire)
+{
+	if (m_sx_pos < 7)
+		return;
+	if (!(m_sx[0] == 0x43 && (m_sx[1] & 0xf0) == 0x10 && m_sx[2] == 0x4c))
+		return;
+	const u8 hh = m_sx[3], mm = m_sx[4], ll = m_sx[5];
+	if (hh != 0x08 || mm >= 32)
+		return;
+	// **1 回の SysEx で続けて何バイトも書ける**（ll から順に並ぶ）
+	const int n = m_sx_pos - 6;
+	for (int i = 0; i < n && i + 6 < int(sizeof(m_sx)); i++) {
+		const u8 addr = u8(ll + i), dd = m_sx[6 + i] & 0x7f;
+		if (addr == 0x01 || addr == 0x02 || addr == 0x03) {
+			// バンクと音色。音色の指定と同じ行列に乗せる
+			m_nq.push_back({ fire, 4, u8(mm),
+			                 u8(addr == 0x01 ? 0 : addr == 0x02 ? 1 : 2), dd });
+		} else if (addr <= 0x28) {
+			m_nq.push_back({ fire, 5, u8(mm), addr, dd });
+		}
+	}
+}
+
 // 待っている native の出来事を、時が来たものから実行する
 void mu2000::native_pump()
 {
@@ -1499,6 +1604,23 @@ void mu2000::native_pump()
 			break;
 		case 2: m_ndrv.control(e.part, e.d0, e.d1); break;
 		case 3: m_ndrv.bend(e.part, int(e.d1) << 7 | e.d0); break;
+		// **音色の指定も行列に乗せる**。CC は線の遅れを模して行列に入れて
+		// いるのに、音色の指定だけその場で効かせていたので、順番が入れ替わって
+		// いた。曲が「CC91 → 音色の指定」の順で送っていても、こちらでは
+		// 音色の指定が先に効き、そのあと CC91 が上書きしてしまう。
+		// 実機では音色の指定がパートのつまみを音色の既定値に戻すので、
+		// 送りの値が 7 音ぶん違っていた（doc/native-engine.md の 6.53）
+		case 4:
+			if (e.part >= 0 && e.part < 64) {
+				if (e.d0 == 0) m_prog_sel[e.part].msb = e.d1;
+				else if (e.d0 == 1) m_prog_sel[e.part].lsb = e.d1;
+				else m_prog_sel[e.part].prog = e.d1;
+				native_select_voice(e.part);
+			}
+			break;
+		// XG のパートの設定（08 pp ll）。ワーク RAM の並びと同じなので、
+		// 番地をそのまま渡す
+		case 5: m_ndrv.set_part_param(e.part, e.d0, e.d1); break;
 		default: break;
 		}
 	}
@@ -1522,6 +1644,13 @@ bool mu2000::native_midi(u8 byte, int port)
 				m_sx_pos = 0;
 				m_fw_hold = std::max(m_fw_hold, u32(44100 / 30));
 			} else {
+				// **F7 で XG のパートの設定を自分にも効かせる**。native の口では
+				// firmware を 100ms につき 5ms しか回さないので、firmware が
+				// この SysEx を処理し終えるのは 1 秒以上あと。それまで待つと、
+				// 曲の頭の何音かが古いつまみの値で鳴る（利用者の曲で、送りを
+				// SysEx で 33 にしているのに CC91 の 40 のまま鳴っていた）
+				if (byte == 0xf7)
+					native_sysex(fire);
 				m_sx_pos = -1;
 				m_fw_hold = std::max(m_fw_hold, u32(44100 / 30));
 			}
@@ -1557,14 +1686,14 @@ bool mu2000::native_midi(u8 byte, int port)
 	if (m_sx_pos >= 0) {
 		// 長い SysEx（MEG のプログラムなど）の間は待ちを切らさない
 		m_fw_hold = std::max(m_fw_hold, u32(44100 / 200));
-		if (m_sx_pos < 6)
+		if (m_sx_pos < int(sizeof(m_sx)))
 			m_sx[m_sx_pos] = byte;
 		m_sx_pos++;
 		// XG のパラメータチェンジ（43 1n 4C hh mm ll …）かどうかは 3 バイトで分かる。
 		// そうならもう 1 バイト（ll）まで待って細かく分ける。そうでないもの
 		// （GM システムオンなど）は 5 バイトで決める＝前と同じ
 		const bool xg_param = m_sx[0] == 0x43 && (m_sx[1] & 0xf0) == 0x10 && m_sx[2] == 0x4c;
-		if (m_sx_pos >= (xg_param ? 6 : 5)) {
+		if (m_sx_pos == (xg_param ? 6 : 5)) {
 			// **重いのは「MEG のプログラムを書き直すもの」だけ**。
 			// `nativeplay --sxsettle` で SWP30 を触り終わるまでを測った:
 			//   00 00 7E XG システムオン       212ms
@@ -1593,7 +1722,8 @@ bool mu2000::native_midi(u8 byte, int port)
 				m_fw_hold = std::max(m_fw_hold, u32(44100 * 3 / 10));
 				m_fw_why = 1;
 			}
-			m_sx_pos = -1;
+			// ここでは**止めない**。F7 まで受け取って、パートの設定なら
+			// 値まで読む（native_sysex）
 		}
 		return false;
 	}
@@ -1602,8 +1732,7 @@ bool mu2000::native_midi(u8 byte, int port)
 	// 音色の指定（1 バイト）。自分で記録を引いて、firmware にも渡す
 	if (kind == 0xc0) {
 		const int part2 = (n.status & 0x0f) + port * 16;
-		m_prog_sel[part2].prog = byte & 0x7f;
-		native_select_voice(part2);
+		m_nq.push_back({ fire, 4, u8(part2), 2, u8(byte & 0x7f) });
 		m_ne_stats.other++;
 		// 記録はこちらで引けたが、firmware も自分の下ごしらえに時間が要る
 		// （5ms に詰めると piano の残差が -58dB から -53dB に落ちる）
@@ -1643,8 +1772,8 @@ bool mu2000::native_midi(u8 byte, int port)
 	if (kind == 0xb0) {
 		m_ne_stats.other++;
 		const int cc = n.d0 & 0x7f;
-		if (cc == 0x00) { m_prog_sel[part].msb = byte & 0x7f; native_select_voice(part); }
-		if (cc == 0x20) { m_prog_sel[part].lsb = byte & 0x7f; native_select_voice(part); }
+		if (cc == 0x00) m_nq.push_back({ fire, 4, u8(part), 0, u8(byte & 0x7f) });
+		if (cc == 0x20) m_nq.push_back({ fire, 4, u8(part), 1, u8(byte & 0x7f) });
 		const bool mine = m_ndrv.handles_cc(n.d0 & 0x7f);
 		if (mine)
 			m_nq.push_back({ fire, 2, u8(part), u8(n.d0 & 0x7f), u8(byte & 0x7f) });
@@ -1911,6 +2040,20 @@ void mu2000::run_sample(s32 &left, s32 &right)
 		// MIDI の溜まり具合は、止まっているときだけ見る（毎サンプル数えると重い）
 		if (m_fw_note_total && m_ne_clock < m_fw_note_until)
 			m_fw_hold = std::max(m_fw_hold, u32(2));
+		// **firmware を細く回し続ける**。ここを入れるまでは、全部 native で
+		// 鳴る曲だと MIDI が来たときしか CPU を回さず、firmware が丸ごと
+		// 止まっていた。その結果:
+		//   * 液晶が固まる／前面のボタンが一切効かない（どちらも firmware の仕事）
+		//   * **firmware が自分の鳴らした音の後始末をできない**。声の管理表が
+		//     「使用中」のまま埋まっていき、窓を閉じるとその状態が NVRAM に
+		//     保存されて、次に開いたときは曲の頭から壊れる
+		// 100ms ごとに 5ms だけ回す。止まりっぱなしにしないのが目的なので、
+		// これで十分（パネルの反応は 100ms 以内、CPU は数 % 増えるだけ）
+		if (m_ne_clock % KEEPALIVE_EVERY == 0) {
+			m_fw_hold = std::max(m_fw_hold, KEEPALIVE_RUN);
+			if (!m_fw_why)
+				m_fw_why = 5;
+		}
 		// 「溜まっている間は回す」はやめた。渡した MIDI は 1 バイト 14 サンプルかけて
 		// 線を流れるので、それを待つだけで実時間の 2 割を SH-2 に持っていかれていた。
 		// メッセージごとに置く待ち（下の native_midi）で足りる
@@ -1935,6 +2078,8 @@ void mu2000::run_sample(s32 &left, s32 &right)
 				m_ne_by_learn.fetch_add(1, std::memory_order_relaxed);
 			else if (m_fw_why == 4)
 				m_ne_by_midi.fetch_add(1, std::memory_order_relaxed);
+			else if (m_fw_why == 5)
+				m_ne_by_keep.fetch_add(1, std::memory_order_relaxed);
 			else
 				m_ne_by_other.fetch_add(1, std::memory_order_relaxed);
 		}

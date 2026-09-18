@@ -1,4 +1,4 @@
-// license:BSD-3-Clause
+﻿// license:BSD-3-Clause
 //
 // 音色の記録（ROM の 84 バイト）から、SWP30 のスロットのレジスタを組み立てる。
 // **firmware を走らせずに音を出す**ための最初の部品（doc/native-engine.md の段 2）。
@@ -177,6 +177,27 @@ inline u16 pitch_reg(const wave_info &w, int note, int follow = 100, int cents_e
 
 // 音量（CC7）・表現（CC11）の減衰。level→減衰の表（0.375dB 目盛り）を 2 倍すると
 // レジスタ 0x09 の目盛り（0.1875dB）になる。cc>=8 で実測との差は 0.375dB 以内
+// **音量と表現は掛けてから一度だけ減衰に直す**（実機の 0x12A404 がそうしている）。
+// firmware はパートの塊の +0x12E-0x130 に `((CC7+1) * (CC11+1)) >> 7` を
+// 線形のまま持っていて（`nativeplay --ccbyte 7` と `--ccbyte 11` で確かめた。
+// CC7 だけ振ると cc+1、CC11 だけ振ると 101*(cc+1)/128 でぴったり）、
+// それを音の level に掛けてから減衰に直す。
+// 前は CC7 と CC11 を別々に減衰へ直して足していたので、実機とずれていた
+inline int vol_gain(int vol, int expr)
+{
+	const int v = vol < 0 ? 100 : (vol > 127 ? 127 : vol);
+	const int e = expr < 0 ? 127 : (expr > 127 ? 127 : expr);
+	return ((v + 1) * (e + 1)) >> 7;        // 0-128
+}
+
+// その線形の値（0-128）を減衰に直す
+inline int gain_att(const u8 *rom, int gain)
+{
+	if (gain <= 0)
+		return 255;
+	return 2 * int(rom[LEVEL_TAB + u32(std::min(128, gain) - 1)]);
+}
+
 inline int cc_vol_att(const u8 *rom, int cc)
 {
 	if (cc <= 0)
@@ -300,7 +321,10 @@ inline int level_key_curve(const u8 *rom, const u8 *elem, int note)
 	return int(s8(rom[a]));
 }
 
-// 減衰 → 音量の目盛り（表を逆に引く）。同じ減衰になる目盛りが複数あるので真ん中を返す
+// 減衰 → 音量の目盛り（表を逆に引く）。同じ減衰になる目盛りが 3-4 段
+// 並ぶので、**いちばん上（音量が大きい側）**を返す。真ん中を返していた
+// ときは、鍵の曲線を足したあとで表の段を 1 つ踏み外していた
+// （Strings の鍵 48 が 2 段ぶん静かになっていた）
 inline int level_from_att(const u8 *rom, int att)
 {
 	int lo = -1, hi = -1;
@@ -309,7 +333,7 @@ inline int level_from_att(const u8 *rom, int att)
 			if (lo < 0) lo = i;
 			hi = i;
 		}
-	return lo < 0 ? 64 : (lo + hi) / 2;
+	return lo < 0 ? 64 : hi;
 }
 
 // **校正**: 1 回だけ実機（firmware）に鳴らしてもらった減衰から、その音色の
@@ -320,19 +344,28 @@ inline int wave_level(const u8 *rom, const u8 *elem, int note)
 	return we ? int(we[0]) : 0;
 }
 
-// 鍵の曲線が音量の目盛りに効く倍率。実測（GrandPno の鍵 12-75）では 1 倍
-constexpr int LEVEL_CURVE_MUL = 2;
+// 鍵の曲線が音量の目盛りに効く倍率。**分数で持つ**（1 倍でも 2 倍でもない）。
+// `nativeplay --levelcheck` で音色ごとに総当たりすると、外れがいちばん少なく
+// なるのはどれも 6/4 = 1.5 倍のあたりに集まった（16 音色で確かめた）。
+// 1 倍や 2 倍にすると、鍵 60 から離れたところでずれる
+constexpr int LEVEL_CURVE_NUM = 6;
+constexpr int LEVEL_CURVE_DEN = 4;
+
+inline int level_curve_scaled(const u8 *rom, const u8 *elem, int note)
+{
+	return level_key_curve(rom, elem, note) * LEVEL_CURVE_NUM / LEVEL_CURVE_DEN;
+}
 
 inline int calibrate_level(const u8 *rom, const u8 *elem, int att_ref, int note_ref, int vel_ref)
 {
 	const int rest = att_ref / 2 - velocity_att(rom, vel_ref) - wave_level(rom, elem, note_ref);
-	return level_from_att(rom, rest) - LEVEL_CURVE_MUL * level_key_curve(rom, elem, note_ref);
+	return level_from_att(rom, rest) - level_curve_scaled(rom, elem, note_ref);
 }
 
 // 校正した素の音量から、その鍵・強さの減衰（0x09 に入れる値）
 inline int volume_att(const u8 *rom, const u8 *elem, int base_level, int note, int vel)
 {
-	int l = base_level + LEVEL_CURVE_MUL * level_key_curve(rom, elem, note);
+	int l = base_level + level_curve_scaled(rom, elem, note);
 	if (l < 0) l = 0;
 	if (l > 127) l = 127;
 	// 波形の記録の先頭のバイトが、その段ぶんの減衰。多段サンプルの音色では
@@ -350,6 +383,9 @@ inline int rate_key_corr(const u8 *elem, int note)
 		c += 0xff;
 	return c >> 8;
 }
+
+// 減衰の表の目盛りを 0-127 に収める
+inline int clamp_idx(int i) { return i < 0 ? 0 : (i > 127 ? 127 : i); }
 
 inline int rate_scale(int raw, int corr)
 {
@@ -393,6 +429,13 @@ struct voice_cal {
 	// パートの EQ・インサーションの掛かり先）をまとめた印。
 	// ここが違うと、写し取った 0x20-0x2b・0x32-0x37 はそのまま使えない
 	u32  cal_ctx = 0;
+	// **減衰の表の目盛りのずれ**（写し取ったときの実機の値と、こちらの式の差）。
+	// 減衰は鍵で変わるので写し取った値をそのまま使えないが、ずれは鍵に
+	// よらないとみて、式で出した目盛りにこれを足す。これでパート側の
+	// EG の設定（CC75 など）も、こちらの式の小さなずれも一緒に吸収できる。
+	// **表の目盛りそのもの**で持つ（実機は奇数の目盛りも使うので、
+	// rate_scale の「2 倍」の単位では足りない）
+	int  dec_adj[2] = { 0, 0 };
 	u16  reg[0x40] = {};       // 基準の鍵・強さでの値
 	u64  mask = 0;             // 覚えているレジスタ
 
@@ -463,8 +506,11 @@ inline slot_regs build_note(const u8 *rom, const u8 *elem, int note, int att,
 	// 深さは byte70、折れ点の鍵は byte71（鍵 36・60・84 で確かめた）。
 	const int corr = rate_key_corr(elem, note);
 	const u8 atk = rom[ATTACK_TAB + std::min(0x7f, int(elem[73]) * 2)];
-	const u8 dc1 = rom[DECAY_TAB  + rate_scale(elem[74], corr)];
-	const u8 dc2 = rom[DECAY_TAB  + rate_scale(elem[75], corr)];
+	// 写し取りがあれば、そのときのずれを表の目盛りに足す（上の dec_adj を見よ）
+	const int a1 = cal && cal->have ? cal->dec_adj[0] : 0;
+	const int a2 = cal && cal->have ? cal->dec_adj[1] : 0;
+	const u8 dc1 = rom[DECAY_TAB  + clamp_idx(rate_scale(elem[74], corr) + a1)];
+	const u8 dc2 = rom[DECAY_TAB  + clamp_idx(rate_scale(elem[75], corr) + a2)];
 	// はじめの音量。アタックが最速（63）のときだけ 0 で、あとは 0x7e
 	r.set(0x06, u16(atk << 8 | (elem[73] >= 0x3f ? 0x00 : 0x7e)));
 	r.set(0x07, u16(dc1 << 8 | (((0x7f - elem[77]) * 2) & 0xff)));
@@ -490,8 +536,18 @@ inline slot_regs build_note(const u8 *rom, const u8 *elem, int note, int att,
 		r.set(0x32 + i, d.mix[i]);
 
 	// --- 写し取った値で上書き。式が分かっていない所だけ
+	//
+	// **0x06（立ち上がり）もここに入れる。** 入れていなかったので、
+	// パート側の EG の設定（CC73 など）が native の音に一切効いていなかった。
+	// CC73 を全パートに送る曲では全部の音の立ち上がりが狂う（実測で
+	// firmware 417e に対しこちらは 387e ＝ ずっと遅い）。
+	// 立ち上がりは鍵でも強さでも変わらないと測ってあるので（nativeplay
+	// --egwatch を鍵 36-96・強さ 1-127 で確認）、写し取った値をそのまま使える。
+	// 0x07・0x08（減衰）は鍵で変わるので、ここには入れられない（宿題）
 	if (cal && cal->have) {
-		static const int COPY[] = { 0x00, 0x01, 0x02, 0x04, 0x05, 0x0a, 0x0b, 0x10,
+		// 0x20-0x2b は**偶数番だけ**でよい（奇数番と 0x30・0x31 は実機の
+		// firmware も一度も書かない。記録を追って確かめた）
+		static const int COPY[] = { 0x00, 0x01, 0x02, 0x04, 0x05, 0x06, 0x0a, 0x0b, 0x10,
 		                            0x20, 0x22, 0x24, 0x26, 0x28, 0x2a,
 		                            0x32, 0x33, 0x34, 0x35, 0x36, 0x37 };
 		for (int i : COPY)
