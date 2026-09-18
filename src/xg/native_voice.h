@@ -308,6 +308,23 @@ constexpr int VOICE_ATT_TYPICAL = 12;
 
 constexpr u32 LEVEL_CURVE = 0x23CED0;   // 鍵による音量の曲線（128 バイトの行が並ぶ）
 
+// **鍵による切る高さのずれ**（実機の 0x12C1E4 → 0x12C20E）。
+// 音量の鍵曲線とまったく同じ仕掛けで、記録の byte38 が 0xFF なら
+// ROM の曲線表（LEVEL_CURVE）を byte44,byte45 が指す行で引き、
+// **その符号つきの値を 32 倍**して 12bit の切る高さに足す。
+// 32 倍なので、鍵を上げ下げすると 32 きざみの階段になる（実測と一致）。
+// 実測（`nativeplay --keycut`）と Strngs2・GrandPno・DrawOrg で
+// 差が完全に一定になった（doc/native-engine.md の 6.56）
+inline int cutoff_key_curve(const u8 *rom, const u8 *elem, int note)
+{
+	if (!rom || !elem || elem[38] != 0xff)
+		return 0;        // 折れ線の枝はまだ起こしていない
+	const u32 row = (u32(elem[44]) << 8 | elem[45]) * 128;
+	const u32 a = LEVEL_CURVE + row + u32(note & 0x7f);
+	return s8(rom[a]) * 32;
+}
+
+
 // 音量の鍵による増減。記録の byte60 が 0xFF のときは ROM の曲線表を引く
 // （byte66,byte67 が行の番号）。符号付きで、鍵ごとに ±10 ほど動く
 inline int level_key_curve(const u8 *rom, const u8 *elem, int note)
@@ -421,6 +438,9 @@ struct voice_cal {
 	bool have = false;
 	int  base_level = 64;      // 校正した素の音量
 	int  cal_vel = 100;        // 写し取ったときの強さ（強さを変えるときの基準）
+	// 写し取ったときの鍵。レジスタ 0x00（切る高さ）は鍵でも動くので、
+	// ここからの差ぶんだけずらす（doc/native-engine.md の 6.56）
+	int  cal_note = 60;
 	// 写し取ったときのコントローラの位置。ここからの差ぶんだけ動かす
 	int  cal_vol = 100, cal_expr = 127, cal_pan = 64, cal_mod = 0;
 	int  cal_rev = 40, cal_cho = 0;      // 写し取ったときの送り（CC91・CC93）

@@ -50,6 +50,13 @@ public:
 		u32 tpos = 0;                   // フィルタの包絡線の、つぎに書く段
 		u64 tstart = 0;                 // 鳴らし始めた時刻
 		bool held = false;              // ダンパーで離しを待たせている
+		// **離しの最中**（on は落ちたが、まだ鳴り終わっていない）。
+		// 実機はこの間もつまみの動きを反映するので、こちらも追う必要がある。
+		// 追わないと、曲の終わりの CC7 のフェードアウトで、離したばかりの
+		// 長い音（ストリングスなど）だけが元の音量のまま鳴り続ける
+		bool rel = false;
+		u64  rel_at = 0;                // 離した時刻
+		int  rel_att = 0;               // 離しのときに書いた減衰（戻さないための下限）
 		int part = -1, note = -1, att = 0;
 		const u8 *elem = nullptr;
 		const u8 *wave = nullptr;       // ベンドで音程を作り直すのに要る
@@ -239,7 +246,7 @@ public:
 					v = lfo_reg(v, *s.cal, s.part);
 				} else if (fe[s.tpos].reg == 0x00) {   // 切る高さに明るさを足す
 					s.cut = v;
-					v = cutoff_reg(v, *s.cal, s.part);
+					v = cutoff_reg(v, *s.cal, s.part, s.elem, s.note);
 				} else if (fe[s.tpos].reg == 0x04) {
 					v = reso_reg(v, *s.cal, s.part);
 				}
@@ -610,8 +617,25 @@ private:
 	{
 		for (int i = 0; i < SLOTS; i++) {
 			slot_use &s = m_slot[i];
-			if (!s.on || s.part != part || !s.cal)
+			if (s.part != part || !s.cal)
 				continue;
+			// **離しの最中の音も追う**。実機はつまみの動きを鳴り終わるまで
+			// 反映する。追わないと、曲の終わりの CC7 のフェードアウトで
+			// 離したばかりの長い音だけが元の音量で鳴り続ける
+			// （利用者の曲の最後の 8 秒で、実機より最大 +25dB 大きかった）
+			if (!s.on) {
+				if (!s.rel || m_clock - s.rel_at > REL_FOLLOW)
+					continue;
+				// **静かになる方向だけ追う**。0x09 を書き直すと離しの坂が
+				// そこから引き直しになるので、いま鳴っているより大きい音を
+				// 書くと音が生き返ってしまう
+				const int a = note_att(s, part);
+				if (a <= s.rel_att)
+					continue;
+				s.rel_att = a;
+				m_poke(u32(i) * 64 + 9, nv::release_reg(m_rom, s.elem, s.note, a));
+				continue;
+			}
 			m_poke(u32(i) * 64 + 9, u16(note_att(s, part)));
 			if (s.cal->has(0x32))
 				m_poke(u32(i) * 64 + 0x32, pan_reg(*s.cal, part));
@@ -624,7 +648,8 @@ private:
 				m_poke(u32(i) * 64 + 0x34,
 				       send_reg(*s.cal, 0x34, true, m_cc[part].cho, s.cal->cal_cho));
 			if (s.cut)
-				m_poke(u32(i) * 64 + 0x00, cutoff_reg(s.cut, *s.cal, part));
+				m_poke(u32(i) * 64 + 0x00,
+				       cutoff_reg(s.cut, *s.cal, part, s.elem, s.note));
 			if (s.cal->has(0x04))
 				m_poke(u32(i) * 64 + 0x04, reso_reg(s.cal->reg[0x04], *s.cal, part));
 		}
@@ -679,12 +704,22 @@ private:
 	}
 
 	// フィルタのレジスタ。下 12bit が切る高さで、明るさ（CC74）のぶんをずらす
-	u16 cutoff_reg(u16 base, const nv::voice_cal &c, int part) const
+	// elem と note を渡すのは、**鍵による切る高さのずれ**を入れるため。
+	// 写し取りは音色あたり 1 音なので、写した鍵と違う鍵ではここがずれる
+	// （利用者の曲で、食い違いの大半がこれだった）
+	u16 cutoff_reg(u16 base, const nv::voice_cal &c, int part,
+	               const u8 *elem = nullptr, int note = -1) const
 	{
 		const int now = m_cc[part].bri;
-		if (now < 0 || now == c.cal_bri)
+		int d = 0;
+		if (elem && note >= 0)
+			d = nv::cutoff_key_curve(m_rom, elem, note)
+			  - nv::cutoff_key_curve(m_rom, elem, c.cal_note);
+		if (d == 0 && (now < 0 || now == c.cal_bri))
 			return base;
-		int v = int(base & 0xfff) + nv::bright_shift(now) - nv::bright_shift(c.cal_bri);
+		int v = int(base & 0xfff) + d;
+		if (now >= 0)
+			v += nv::bright_shift(now) - nv::bright_shift(c.cal_bri);
 		v = v < 0 ? 0 : (v > nv::CUTOFF_MAX ? nv::CUTOFF_MAX : v);
 		return u16((base & 0xf000) | u16(v));
 	}
@@ -845,7 +880,7 @@ public:
 			su.cut = sr.v[0x00];
 			if (c) {
 				sr.set(0x0a, lfo_reg(su.lfo, *c, part));
-				sr.set(0x00, cutoff_reg(su.cut, *c, part));
+				sr.set(0x00, cutoff_reg(su.cut, *c, part, el, note));
 				if (c->has(0x04))
 					sr.set(0x04, reso_reg(c->reg[0x04], *c, part));
 				if (c->has(0x33))
@@ -903,6 +938,9 @@ public:
 				m_poke(u32(i) * 64 + 9, nv::release_reg(m_rom, s.elem, note, s.att));
 			// ドラムは離しでも音を切らない（実機も打ったら鳴りきる）
 			s.on = false;
+			s.rel = s.elem != nullptr;
+			s.rel_at = m_clock;
+			s.rel_att = s.att;
 			any = true;
 		}
 		return any;
@@ -1078,6 +1116,9 @@ private:
 	// firmware がそのスロットに最後に書いた時刻（+1。0 は触っていない）
 	u64 m_fw_touch[SLOTS] = {};
 	static constexpr u64 FW_KEEP = 44100 * 2;   // 2 秒は firmware のものとみなす
+	// 離したあと、つまみの動きを追い続ける長さ。いちばん遅い離しでも
+	// これだけあれば鳴り終わる（それ以上はスロットを取り直しているはず）
+	static constexpr u64 REL_FOLLOW = 44100 * 8;
 	std::array<u32, PARTS> m_recsel{};
 	std::array<s8, PARTS> m_recsel_drum{};
 	u64 m_clock = 0;

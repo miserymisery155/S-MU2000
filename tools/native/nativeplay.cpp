@@ -185,6 +185,7 @@ int main(int argc, char **argv)
 	bool slotalloc = false;
 	bool levelcheck = false;
 	bool keycut = false;
+	const char *ramdump = nullptr;
 	for (int i = 3; i < argc; i++) {
 		if (!std::strcmp(argv[i], "-b") && i + 1 < argc)
 			std::sscanf(argv[++i], "%d,%d,%d", &msb, &lsb, &prog);
@@ -216,6 +217,7 @@ int main(int argc, char **argv)
 		else if (!std::strcmp(argv[i], "--slotalloc")) slotalloc = true;
 		else if (!std::strcmp(argv[i], "--levelcheck")) levelcheck = true;
 		else if (!std::strcmp(argv[i], "--keycut")) keycut = true;
+		else if (!std::strcmp(argv[i], "--ramdump") && i + 1 < argc) ramdump = argv[++i];
 		else if (!std::strcmp(argv[i], "--catoff") && i + 1 < argc) catoff = int(std::strtol(argv[++i], nullptr, 0));
 		else if (!std::strcmp(argv[i], "--sweep") && i + 1 < argc) sweep = std::atoi(argv[++i]);
 		else if (!std::strcmp(argv[i], "--volsweep") && i + 1 < argc) volsweep = std::atoi(argv[++i]);
@@ -549,6 +551,22 @@ int main(int argc, char **argv)
 	}
 
 	// --cutsweep: 強さを 1 から 127 まで振って、フィルタ（0x00）と共振（0x04）を並べる
+	// --ramdump <ファイル>: 1 音鳴らしてからワーク RAM を丸ごと書き出す。
+	// firmware が音色ごとに作る表（鍵の追従など）を外から探すための道具
+	if (ramdump) {
+		for (u8 bb : { u8(0x90), u8(note & 0x7f), u8(vel & 0x7f) })
+			mu.midi_in(bb, 0);
+		for (u32 i = 0; i < RATE / 4; i++)
+			mu.run_sample(l, r);
+		const std::vector<u8> &w = mu.nvram();
+		if (std::FILE *f = std::fopen(ramdump, "wb")) {
+			std::fwrite(w.data(), 1, w.size(), f);
+			std::fclose(f);
+			std::printf("ワーク RAM %zu バイトを書き出した%c", w.size(), 10);
+		}
+		return 0;
+	}
+
 	// --keycut: **鍵ごとに** 0x00（フィルタの切る高さ）を並べる。1 回の起動で
 	// 端から端まで見る（音は 1 つずつ離すので、声が枯れない）。
 	// レジスタ 0x00 は鍵でも動く（doc/native-engine.md の 6.54）ので、

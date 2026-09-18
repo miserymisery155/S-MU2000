@@ -416,10 +416,82 @@ void mu2000::build_bus()
 	m_bus = mem_bus();
 
 	// 000000-3fffff: プログラム ROM
-	if (m_prog && !m_prog->empty())
+	// SMU2000_ROMTRACE=<pc16進> なら、その辺りの命令が読んだ ROM の番地を出す
+	if (m_prog && !m_prog->empty() && std::getenv("SMU2000_ROMTRACE")) {
+		const u32 want = u32(std::strtoul(std::getenv("SMU2000_ROMTRACE"), nullptr, 16));
+		const u8 *base = m_prog->data();
+		mem_bus::device d;
+		d.start = 0x000000; d.end = 0x3fffff;
+		// want は**読まれる側の番地**。表の引き方を見るための仕掛け
+		auto note = [this, want](offs_t a, u32 v, int size) {
+			if (a >= want && a < want + 0x100)
+				std::fprintf(stderr, "romread pc=%06x 番地=%06x = %x (%d bit)\n",
+				             m_cpu ? m_cpu->pc() : 0, u32(a), v, size * 8);
+		};
+		d.r8  = [base, note](offs_t a) { const u8 v = base[a]; note(a, v, 1); return v; };
+		d.r16 = [base, note](offs_t a) {
+			const u16 v = u16(base[a] << 8 | base[a + 1]); note(a, v, 2); return v;
+		};
+		d.r32 = [base, note](offs_t a) {
+			const u32 v = u32(base[a]) << 24 | u32(base[a + 1]) << 16 |
+			              u32(base[a + 2]) << 8 | base[a + 3];
+			note(a, v, 4);
+			return v;
+		};
+		m_bus.add_device(std::move(d));
+	} else if (m_prog && !m_prog->empty()) {
 		m_bus.add_region(0x000000, 0x3fffff, m_prog->data(), false);
+	}
 	// 400000-43ffff: ワーク RAM
-	m_bus.add_region(0x400000, 0x43ffff, m_ram.data(), true);
+	// SMU2000_RAMTRACE=<pc16進> が立っていれば、素通しの region ではなく
+	// device として繋いで、**その番地の命令が読んだワーク RAM の番地**を出す。
+	// 実機がどの表を引いているかを外から突き止めるための仕掛け（とても遅い）
+	if (const char *tp = std::getenv("SMU2000_RAMTRACE")) {
+		const u32 want = u32(std::strtoul(tp, nullptr, 16));
+		mem_bus::device d;
+		d.start = 0x400000; d.end = 0x43ffff;
+		auto note = [this, want](offs_t a, u32 v, int size) {
+			const u32 pc = m_cpu ? m_cpu->pc() : 0;
+			if (pc >= want && pc <= want + 0x100)
+				std::fprintf(stderr, "ramread pc=%06x 番地=%06x = %x (%d bit)\n",
+				             pc, u32(a), v, size * 8);
+		};
+		d.r8  = [this, note](offs_t a) {
+			const u8 v = m_ram[a - 0x400000]; note(a, v, 1); return v;
+		};
+		d.r16 = [this, note](offs_t a) {
+			const u16 v = u16(m_ram[a - 0x400000] << 8 | m_ram[a - 0x400000 + 1]);
+			note(a, v, 2);
+			return v;
+		};
+		d.r32 = [this, note](offs_t a) {
+			const u8 *p = m_ram.data() + (a - 0x400000);
+			const u32 v = u32(p[0]) << 24 | u32(p[1]) << 16 | u32(p[2]) << 8 | p[3];
+			note(a, v, 4);
+			return v;
+		};
+		// SMU2000_RAMWRITE=<番地16進> で、その番地に**書いた**命令の番地を出す
+		const char *wp = std::getenv("SMU2000_RAMWRITE");
+		const u32 wa = wp ? u32(std::strtoul(wp, nullptr, 16)) : 0xffffffffu;
+		auto notew = [this, wa](offs_t a, u32 v, int size) {
+			if (a <= wa && wa < a + u32(size))
+				std::fprintf(stderr, "ramwrite pc=%06x 番地=%06x = %x (%d bit)\n",
+				             m_cpu ? m_cpu->pc() : 0, u32(a), v, size * 8);
+		};
+		d.w8  = [this, notew](offs_t a, u8 v)  { notew(a, v, 1); m_ram[a - 0x400000] = v; };
+		d.w16 = [this, notew](offs_t a, u16 v) {
+			notew(a, v, 2);
+			m_ram[a - 0x400000] = u8(v >> 8); m_ram[a - 0x400000 + 1] = u8(v);
+		};
+		d.w32 = [this, notew](offs_t a, u32 v) {
+			notew(a, v, 4);
+			u8 *p = m_ram.data() + (a - 0x400000);
+			p[0] = u8(v >> 24); p[1] = u8(v >> 16); p[2] = u8(v >> 8); p[3] = u8(v);
+		};
+		m_bus.add_device(std::move(d));
+	} else {
+		m_bus.add_region(0x400000, 0x43ffff, m_ram.data(), true);
+	}
 	// 1000000-107ffff: DRAM
 	m_bus.add_region(0x1000000, 0x107ffff, m_dram.data(), true);
 	// fffff000-ffffffff: CPU 内蔵 RAM
@@ -1192,6 +1264,7 @@ void mu2000::native_learn_finish()
 			if (int(cals.size()) >= m_learn_want)
 				break;
 			cal.cal_vel  = m_learn_vel;
+			cal.cal_note = m_learn_note;
 			cal.cal_vol  = m_ndrv.part_vol(m_learn_part);
 			cal.cal_expr = m_ndrv.part_expr(m_learn_part);
 			cal.cal_pan  = m_ndrv.part_pan(m_learn_part);
@@ -1296,6 +1369,7 @@ void mu2000::native_learn_finish()
 			}
 		}
 		cal.cal_vel  = m_learn_vel;
+		cal.cal_note = m_learn_note;
 		cal.cal_vol  = m_ndrv.part_vol(m_learn_part);
 		cal.cal_expr = m_ndrv.part_expr(m_learn_part);
 		cal.cal_pan  = m_ndrv.part_pan(m_learn_part);
@@ -1345,7 +1419,7 @@ void mu2000::native_learn_finish()
 namespace {
 
 constexpr u32 CAL_MAGIC = 0x43563253u;   // "S2VC"
-constexpr u32 CAL_VERSION = 8;
+constexpr u32 CAL_VERSION = 9;
 
 void put8(std::vector<u8> &v, u8 x) { v.push_back(x); }
 void put16v(std::vector<u8> &v, u16 x) { v.push_back(u8(x)); v.push_back(u8(x >> 8)); }
@@ -1370,6 +1444,7 @@ void write_cals(std::vector<u8> &out, u8 kind, u64 key, const std::vector<xg::nv
 		put64v(out, c.mask);
 		put16v(out, u16(c.base_level));
 		put16v(out, u16(c.cal_vel));
+		put16v(out, u16(c.cal_note));
 		put16v(out, u16(c.cal_vol));
 		put16v(out, u16(c.cal_expr));
 		put16v(out, u16(c.cal_pan));
@@ -1433,6 +1508,7 @@ bool mu2000::native_cal_load(const u8 *data, size_t n)
 			c.mask = r.g64();
 			c.base_level = s16(r.g16());
 			c.cal_vel = s16(r.g16());
+			c.cal_note = s16(r.g16());
 			c.cal_vol = s16(r.g16());
 			c.cal_expr = s16(r.g16());
 			c.cal_pan = s16(r.g16());
