@@ -980,6 +980,190 @@ void mu2000::midi_step(u64 now)
 }
 
 
+
+// ---- native の口（doc/native-engine.md の段 2）
+
+void mu2000::set_native_engine(int mode)
+{
+	m_native_engine = mode;
+	m_fw_hold = 0;
+	m_learning = false;
+	m_learn_left = 0;
+	for (nmidi &n : m_nmidi)
+		n = nmidi();
+	m_ne_samples.store(0, std::memory_order_relaxed);
+	m_ne_fw_samples.store(0, std::memory_order_relaxed);
+	m_ne_stats = native_stats();
+	if (!mode) {
+		set_swp_watch(nullptr);
+		return;
+	}
+	m_ndrv.reset();
+	m_ndrv.set_rom(m_prog ? m_prog->data() : nullptr);
+	m_ndrv.set_ram(m_ram.data());
+	m_ndrv.set_poke([this](u32 reg, u16 value) { m_swpm.write16(reg, value); });
+}
+
+// 音色の 1 音目を firmware に鳴らさせて、スロットに書かれた値を写し取る
+void mu2000::native_learn_start(u32 rec)
+{
+	m_learning = true;
+	m_learn_rec = rec;
+	m_learn_first.clear();
+	m_learn_last.clear();
+	m_learn_mask = m_learn_keyed = 0;
+	// レジスタは鍵を押した所でまとめて書かれるので、短くてよい。
+	// 長くすると、その間の音が全部 firmware に回ってしまう。
+	// ただし短すぎると 0x01（鳴らしてから上がっていく）が落ち着く前に切れる
+	m_learn_left = 44100 / 50;          // 20ms ぶん見る
+	set_swp_watch([this](bool master, u32 reg, u16 value) {
+		if (!master)
+			return;
+		m_learn_last[reg] = value;
+		switch (reg) {
+		case 0x18e: m_learn_mask = (m_learn_mask & ~(u64(0xffff) << 48)) | (u64(value) << 48); break;
+		case 0x18f: m_learn_mask = (m_learn_mask & ~(u64(0xffff) << 32)) | (u64(value) << 32); break;
+		case 0x1ce: m_learn_mask = (m_learn_mask & ~(u64(0xffff) << 16)) | (u64(value) << 16); break;
+		case 0x1cf: m_learn_mask = (m_learn_mask & ~u64(0xffff)) | value; break;
+		case 0x20e:
+			m_learn_keyed |= m_learn_mask;
+			if (m_learn_first.empty())
+				m_learn_first = m_learn_last;
+			break;
+		default: break;
+		}
+	});
+}
+
+void mu2000::native_learn_finish()
+{
+	set_swp_watch(nullptr);
+	m_learning = false;
+	if (!m_learn_keyed || !m_prog)
+		return;
+	// 波形の番地まで取れていなければ、写し取りとして使えない（次の音でやり直す）
+	{
+		bool ok = false;
+		for (int ch = 0; ch < 64 && !ok; ch++)
+			if ((m_learn_keyed & (u64(1) << ch)) &&
+			    m_learn_last.count(u32(ch) * 64 + 0x16) && m_learn_last.count(u32(ch) * 64 + 0x17))
+				ok = true;
+		if (!ok)
+			return;
+	}
+	const u8 *rom = m_prog->data();
+	const int nel = xg::nv::element_count(rom, m_learn_rec);
+	std::vector<xg::nv::voice_cal> cals;
+	for (int ch = 0; ch < 64; ch++) {
+		if (!(m_learn_keyed & (u64(1) << ch)))
+			continue;
+		xg::nv::voice_cal cal;
+		for (int i = 0; i < 0x40; i++) {
+			// 0x05・0x0a・0x11 は LFO が動かし続けるので引き金の瞬間、
+			// ほかは落ち着いた値（doc/native-engine.md の 6.10）
+			const bool at_key = (i == 0x05 || i == 0x0a || i == 0x11);
+			const std::map<u32, u16> &src = at_key ? m_learn_first : m_learn_last;
+			const auto it = src.find(u32(ch) * 64 + u32(i));
+			if (it != src.end())
+				cal.set(i, it->second);
+		}
+		// どの要素かは、そのスロットが鳴らしている波形の番地で見分ける
+		int idx = -1;
+		if (cal.has(0x16) && cal.has(0x17)) {
+			const u32 want = u32(cal.reg[0x16]) << 16 | cal.reg[0x17];
+			for (int k = 0; k < nel; k++) {
+				const u8 *e2 = xg::nv::element(rom, m_learn_rec, k);
+				const u8 *w2 = xg::nv::wave_entry(rom, xg::nv::wave_set(e2), m_learn_note);
+				if (w2 && xg::nv::read_wave(w2).format_addr == want) { idx = k; break; }
+			}
+		}
+		if (idx < 0)
+			idx = int(cals.size()) < nel ? int(cals.size()) : 0;
+		cal.base_level = xg::nv::calibrate_level(rom, xg::nv::element(rom, m_learn_rec, idx),
+		                                         cal.has(9) ? (cal.reg[9] & 0xff) : 64,
+		                                         m_learn_note, m_learn_vel);
+		cal.have = true;
+		cals.push_back(cal);
+	}
+	m_ndrv.learn(m_learn_rec, std::move(cals));
+}
+
+// MIDI を 1 バイト受けて、native でさばけたら true。
+// さばけなかったもの（音色の指定・コントローラ・SysEx）は firmware へ回す
+bool mu2000::native_midi(u8 byte, int port)
+{
+	if (byte >= 0xf8)
+		return false;                    // リアルタイムはそのまま
+	nmidi &n = m_nmidi[port];
+	if (byte & 0x80) {
+		if (byte >= 0xf0) {              // SysEx など。以後は firmware に任せる
+			n.status = 0;
+			// **長めに回す**。エフェクトの種類を変える SysEx は、MEG のプログラムを
+			// 1 万件以上書き直す。その途中で止めると音が出なくなる
+			m_fw_hold = 44100 / 2;
+			return false;
+		}
+		n.status = byte;
+		n.have = 0;
+		// 鍵の上げ下げ以外は、この場で firmware に渡す
+		const u8 kind = byte & 0xf0;
+		if (kind != 0x80 && kind != 0x90) {
+			m_ne_stats.other++;
+			m_fw_hold = 44100 / 50;
+			return false;
+		}
+		return true;                     // 状態のバイトは飲み込む
+	}
+	const u8 kind = n.status & 0xf0;
+	if (kind != 0x80 && kind != 0x90)
+		return false;
+	if (n.have == 0) {
+		n.d0 = byte;
+		n.have = 1;
+		return true;
+	}
+	n.have = 0;
+	const int part = (n.status & 0x0f) + port * 16;
+	const int note = n.d0 & 0x7f, vel = byte & 0x7f;
+	if (kind == 0x80 || vel == 0) {
+		if (m_ndrv.note_off(part, note))
+			return true;
+		// native で鳴っていない音は firmware に任せる
+		replay_note(n.status, u8(note), u8(vel), port);
+		return true;
+	}
+	if (m_ndrv.note_on(part, note, vel)) {
+		m_ne_stats.note_native++;
+		return true;
+	}
+	m_ne_stats.note_fw++;
+	// まだ写し取っていない音色。firmware に鳴らさせて、そのときの値を覚える
+	const u32 rec = m_ndrv.record_of(part);
+	if (rec && !m_learning) {
+		m_learn_note = note;
+		m_learn_vel = vel;
+		m_ne_stats.learn++;
+		native_learn_start(rec);
+	}
+	m_fw_hold = std::max(m_fw_hold, u32(44100 / 20));
+	replay_note(n.status, u8(note), u8(vel), port);
+	return true;
+}
+
+// 飲み込んだバイトを firmware へ流し直す。
+// **回す時間も作る**。渡しただけでは、CPU を止めたままなので誰も読まない
+void mu2000::replay_note(u8 status, u8 d0, u8 d1, int port)
+{
+	const int save = m_native_engine;
+	m_native_engine = 0;                 // 二重に読まない
+	midi_in(status, port);
+	midi_in(d0, port);
+	midi_in(d1, port);
+	m_native_engine = save;
+	if (m_fw_hold < 44100 / 50)
+		m_fw_hold = 44100 / 50;
+}
+
 // S-MU2000: 軽量モードの入り切り（doc/native-dsp.md）
 void mu2000::set_native_fx(int mode)
 {
@@ -1151,7 +1335,25 @@ void mu2000::run_sample(s32 &left, s32 &right)
 	if (m_profile)
 		pt0 = smu2000::perf_ticks();
 
-	if (m_cpu_enabled)
+	// native の口が動いているときは、firmware を回すのは
+	//   * 渡した MIDI がまだ溜まっている間（受け取って処理させる）
+	//   * そのあと少しの間（処理が終わるまで）
+	// だけ。ふだんは止めておく
+	bool run_cpu = m_cpu_enabled;
+	if (m_native_engine) {
+		m_ne_samples.fetch_add(1, std::memory_order_relaxed);
+		if (midi_pending())
+			m_fw_hold = std::max(m_fw_hold, u32(44100 / 100));   // 溜まっている間は回す
+		if (m_fw_hold)
+			m_fw_hold--;
+		else
+			run_cpu = false;
+		if (run_cpu)
+			m_ne_fw_samples.fetch_add(1, std::memory_order_relaxed);
+		if (m_learning && m_learn_left && --m_learn_left == 0)
+			native_learn_finish();
+	}
+	if (run_cpu)
 		run_cycles(cycles);
 
 	if (m_profile) {

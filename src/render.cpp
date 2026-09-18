@@ -178,6 +178,7 @@ int main(int argc, char **argv)
 	const char *adc_path = nullptr;    // A/D INPUT に流す WAV
 	const char *card_path = nullptr;   // 差す SmartMedia
 	const char *replay = nullptr;      // --replay-swp。記録したレジスタ列を SH-2 無しで流す
+	int native_engine = 0;             // --native-engine。firmware を走らせない口
 	for (int i = 4; i < argc; i++) {
 		if (!std::strcmp(argv[i], "--trace-swp") && i + 1 < argc)
 			swptrace = argv[++i];
@@ -213,6 +214,8 @@ int main(int argc, char **argv)
 			usb_host = true;
 		else if (!std::strcmp(argv[i], "--native-fx"))
 			native_fx = 1;
+		else if (!std::strcmp(argv[i], "--native-engine"))
+			native_engine = 1;
 		else if (!std::strcmp(argv[i], "--native-fx-full"))
 			native_fx = 2;
 		else if (!std::strcmp(argv[i], "--bootcache"))
@@ -398,6 +401,10 @@ int main(int argc, char **argv)
 				std::fclose(sf);
 			}
 		}
+		// native の口は、起動が終わってから入れる（起動には firmware が要る）
+		if (native_engine && i == boot_samples)
+			mu.set_native_engine(native_engine);
+
 		// 起動ぶんは**整数で引く**。double(i)/rate - boot と書くと桁落ちで
 		// 1e-12 秒ずれ、イベントの時刻がちょうど境に乗ったときに 1 サンプル動く
 		const double t = (double(i) - double(boot_samples)) / rate;
@@ -516,6 +523,15 @@ int main(int argc, char **argv)
 	}
 
 	write_wav(wav, pcm, rate);
+	if (native_engine)
+		std::printf("native の口: 演奏中に firmware を回したのは %.1f%%\n",
+		            100.0 * mu.native_firmware_share());
+	if (native_engine) {
+		const mu2000::native_stats st = mu.native_counts();
+		std::printf("  鍵: native %llu / firmware %llu（うち写し取り %llu）、そのほかの MIDI %llu\n",
+		            (unsigned long long)st.note_native, (unsigned long long)st.note_fw,
+		            (unsigned long long)st.learn, (unsigned long long)st.other);
+	}
 	std::printf("書き出した: %s（%.1f 秒）\n", wav.c_str(), double(total) / rate);
 	return 0;
 }

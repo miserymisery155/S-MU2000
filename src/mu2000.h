@@ -13,6 +13,7 @@
 
 #include "smartmedia.h"
 #include "state.h"
+#include "xg/native_driver.h"
 #include "compat/mamecompat.h"
 #include "compat/membus.h"
 #include "mame/cpu/sh7042.h"
@@ -26,6 +27,7 @@
 #include <atomic>
 #include <array>
 #include <deque>
+#include <map>
 #include <memory>
 #include <thread>
 #include <string>
@@ -130,6 +132,10 @@ public:
 	{
 		if (port < 0 || port >= MIDI_PORTS)
 			port = 0;
+		// native の口が動いているときは、鍵の上げ下げをこちらで処理する
+		// （firmware に渡さない）。詳しくは xg/native_driver.h
+		if (m_native_engine && native_midi(byte, port))
+			return port;
 		if (byte < 0xf8) {                     // リアルタイムは F5 と nn の間に挟まってもよい
 			if (m_cable_wait[port]) {
 				m_cable_wait[port] = false;
@@ -305,6 +311,21 @@ public:
 	void set_swp_trace(std::FILE *f, bool with_reads = false)
 	{ m_swp_trace = f; m_swp_trace_reads = with_reads; }
 
+	// **firmware を走らせない口**（doc/native-engine.md の段 2）。
+	// 1: 鍵の上げ下げを native driver でさばき、CPU はその間止める
+	void set_native_engine(int mode);
+	int native_engine() const { return m_native_engine; }
+	// native の口の内訳（調べ用）
+	struct native_stats { u64 note_native = 0, note_fw = 0, learn = 0, other = 0; };
+	native_stats native_counts() const { return m_ne_stats; }
+
+	// native の口が、いま firmware を回している割合（0-1。小さいほど軽い）
+	double native_firmware_share() const
+	{
+		const u64 t = m_ne_samples.load(std::memory_order_relaxed);
+		return t ? double(m_ne_fw_samples.load(std::memory_order_relaxed)) / double(t) : 0.0;
+	}
+
 	// SWP30 への書き込みを、その場で拾う（掃引の道具用。doc/native-engine.md の段 1）
 	using swp_watch_fn = std::function<void(bool master, u32 reg, u16 value)>;
 	void set_swp_watch(swp_watch_fn fn) { m_swp_watch = std::move(fn); }
@@ -319,6 +340,29 @@ private:
 	sh7043a_device *m_cpu = nullptr;
 
 	bool m_cpu_enabled = true;     // false なら SH-2 を回さない（再生のとき）
+
+	// ---- native の口（段 2）
+	int  m_native_engine = 0;
+	u32  m_fw_hold = 0;            // このサンプル数だけ firmware を回す
+	std::atomic<u64> m_ne_samples{0}, m_ne_fw_samples{0};
+	xg::native_driver m_ndrv;
+	// 写し取り中の状態
+	bool m_learning = false;
+	u32  m_learn_rec = 0;
+	std::map<u32, u16> m_learn_first, m_learn_last;
+	u64  m_learn_mask = 0, m_learn_keyed = 0;
+	int  m_learn_left = 0;         // 残りサンプル数
+	// 口ごとの MIDI の読み取り
+	struct nmidi { u8 status = 0; u8 d0 = 0; int have = 0; };
+	nmidi m_nmidi[MIDI_PORTS];
+
+	int  m_learn_note = 60, m_learn_vel = 100;
+	native_stats m_ne_stats;
+
+	bool native_midi(u8 byte, int port);
+	void replay_note(u8 status, u8 d0, u8 d1, int port);
+	void native_learn_start(u32 rec);
+	void native_learn_finish();
 
 	swp30_device m_swpm, m_swps;   // マスタ 0x800000 / スレーブ 0x802000
 	required_device<sci4_device> m_sci4_finder;

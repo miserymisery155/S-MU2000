@@ -16,6 +16,7 @@
 
 #include <cmath>
 #include <cstring>
+#include <vector>
 
 namespace xg {
 namespace nv {
@@ -31,6 +32,7 @@ constexpr u32 LEVEL_TAB  = 0x1E6798;   // 0-127 → 減衰（128 バイトの行
 constexpr u32 SLOT_TABLE = 0x1F4F58;   // スロット番号 → レジスタの先頭（4 バイト × 64）
 constexpr u32 CUTOFF_TAB = 0x1E5B58;   // フィルタの切る高さ（16bit。索引は記録の byte37）
 
+inline int s8(u8 v) { return v >= 128 ? int(v) - 256 : int(v); }
 inline u16 rd16(const u8 *rom, u32 a) { return u16(rom[a] << 8 | rom[a + 1]); }
 inline u32 rd32(const u8 *rom, u32 a)
 { return u32(rom[a]) << 24 | u32(rom[a + 1]) << 16 | u32(rom[a + 2]) << 8 | rom[a + 3]; }
@@ -40,7 +42,22 @@ inline const u8 *element(const u8 *rom, u32 rec, int index = 0)
 {
 	return rom + rec + 12 + u32(index) * 84;
 }
-inline int element_count(const u8 *rom, u32 rec) { return rom[rec]; }
+// 記録の先頭のバイトは**要素のビットマスク**（1/3/7/15 ＝ 1〜4 要素）。
+// 数ではないので、立っているビットを数える
+inline int element_count(const u8 *rom, u32 rec)
+{
+	int n = 0;
+	for (int i = 0; i < 4; i++)
+		if (rom[rec] & (1 << i))
+			n++;
+	return n;
+}
+
+// その要素が、この鍵と強さで鳴るか（byte4,5 が鍵の範囲、byte6,7 が強さの範囲）
+inline bool element_active(const u8 *elem, int note, int vel)
+{
+	return note >= elem[4] && note <= elem[5] && vel >= elem[6] && vel <= elem[7];
+}
 
 // 波形の組の番号（7bit が 2 つ）
 inline int wave_set(const u8 *elem) { return (elem[2] << 7) | (elem[3] & 0x7f); }
@@ -122,9 +139,10 @@ struct defaults {
 	u16 lfo     = 0x5f00;
 	u16 r0b     = 0x7f00;
 	u16 r10     = 0x4000;
-	// ミキサ（パート 1・音量 100・パン中央・リバーブ送り 40 のときの実測）
-	u16 mix[12] = { 0x0808, 0x182b, 0xffff, 0x4d00, 0x4800, 0x4400,
-	                0x0808, 0xffff, 0xffff, 0x000f, 0x000c, 0x000a };
+	// ミキサ（パート 1・音量 100・パン中央・リバーブ送り 40 のときの実測）。
+	// **0x32-0x37 だけ**。0x38-0x3d は「入力 0x40 から先」＝ MEG の戻りや A/D の
+	// ぶんで、声のスロットのものではない。ここを書くと残響の混ざり方が変わる
+	u16 mix[6] = { 0x0808, 0x182b, 0xffff, 0x4d00, 0x4800, 0x4400 };
 	// 声ごとの IIR（パートの EQ）。素通しのときの実測
 	u16 iir[6] = { 0xe05d, 0x1fa3, 0x2000, 0x0257, 0xfda9, 0x2000 };
 };
@@ -141,9 +159,55 @@ inline int velocity_att(const u8 *rom, int vel, int curve = 0)
 	return rom[LEVEL_TAB + u32(i & 0x7f)];
 }
 
-// 音色ごとの下駄。firmware は「音色の音量 → 表」と、鍵ごとの足し込み（+120）で作る。
-// そこはまだ解けていないので、実測の中央値を置く（5〜19 の幅がある）
+// 音色ごとの下駄。firmware は「音色の音量 → 表」と、鍵ごとの足し込みで作る。
+// 式そのものはまだ解けていないので、**1 回だけ実機に鳴らしてもらって校正する**（下）。
+// 校正しないときの当て値（実測の中央値。5〜19 の幅がある）
 constexpr int VOICE_ATT_TYPICAL = 12;
+
+constexpr u32 LEVEL_CURVE = 0x23CED0;   // 鍵による音量の曲線（128 バイトの行が並ぶ）
+
+// 音量の鍵による増減。記録の byte60 が 0xFF のときは ROM の曲線表を引く
+// （byte66,byte67 が行の番号）。符号付きで、鍵ごとに ±10 ほど動く
+inline int level_key_curve(const u8 *rom, const u8 *elem, int note)
+{
+	if (elem[60] != 0xff)
+		return 0;                       // 折れ線の形はまだ入れていない
+	const u32 idx = u32(elem[66]) << 8 | elem[67];
+	const u32 a = LEVEL_CURVE + idx * 128 + u32(note & 0x7f);
+	if (a >= 0x400000)
+		return 0;
+	return int(s8(rom[a]));
+}
+
+// 減衰 → 音量の目盛り（表を逆に引く）。同じ減衰になる目盛りが複数あるので真ん中を返す
+inline int level_from_att(const u8 *rom, int att)
+{
+	int lo = -1, hi = -1;
+	for (int i = 0; i < 128; i++)
+		if (rom[LEVEL_TAB + 0x80 + i] == att) {
+			if (lo < 0) lo = i;
+			hi = i;
+		}
+	return lo < 0 ? 64 : (lo + hi) / 2;
+}
+
+// **校正**: 1 回だけ実機（firmware）に鳴らしてもらった減衰から、その音色の
+// 「素の音量」を出す。これがあれば、ほかの鍵・強さの減衰は式で出せる
+inline int calibrate_level(const u8 *rom, const u8 *elem, int att_ref, int note_ref, int vel_ref)
+{
+	const int rest = att_ref / 2 - velocity_att(rom, vel_ref);
+	return level_from_att(rom, rest) - 2 * level_key_curve(rom, elem, note_ref);
+}
+
+// 校正した素の音量から、その鍵・強さの減衰（0x09 に入れる値）
+inline int volume_att(const u8 *rom, const u8 *elem, int base_level, int note, int vel)
+{
+	int l = base_level + 2 * level_key_curve(rom, elem, note);
+	if (l < 0) l = 0;
+	if (l > 127) l = 127;
+	const int a = rom[LEVEL_TAB + 0x80 + u32(l)] + velocity_att(rom, vel);
+	return std::min(0xff, a * 2);
+}
 
 // 減衰・離しの速さに乗る、鍵による補正（firmware の 0x12ADD0）
 inline int rate_key_corr(const u8 *elem, int note)
@@ -172,8 +236,36 @@ inline u16 release_reg(const u8 *rom, const u8 *elem, int note, int att)
 	return u16(((0x80 | (r & 0x7f)) << 8) | (att & 0xff));
 }
 
+// **音色の写し取り**。式が分かっていないレジスタ（フィルタ・素通しの量など）は、
+// 起動のときに firmware へ 1 音だけ鳴らしてもらって、そのときの値を覚えておく。
+// 鍵や強さで動かないものが多いので、これだけで実機にかなり近くなる。
+// 覚えるのは**利用者の ROM から起こした値**で、配らない（起動のたびに作る）
+struct voice_cal {
+	bool have = false;
+	int  base_level = 64;      // 校正した素の音量
+	u16  reg[0x40] = {};       // 基準の鍵・強さでの値
+	u64  mask = 0;             // 覚えているレジスタ
+
+	bool has(int r) const { return (mask & (u64(1) << r)) != 0; }
+	void set(int r, u16 v) { reg[r] = v; mask |= u64(1) << r; }
+
+	// そのスロットが鳴らしていた波形の番地（0x16/0x17）
+	u32 wave_addr() const { return u32(reg[0x16]) << 16 | reg[0x17]; }
+};
+
+// 要素と、写し取ったスロットを**波形の番地で**結び付ける。
+// 要素の並びとスロットの並びが同じとは限らないので、順番では当てにならない
+inline const voice_cal *match_cal(const std::vector<voice_cal> &cals, u32 want)
+{
+	for (const voice_cal &c : cals)
+		if (c.has(0x16) && c.has(0x17) && c.wave_addr() == want)
+			return &c;
+	return nullptr;
+}
+
 // 1 音ぶんのレジスタを作る。att は 0x09 に入れる減衰（0-255。小さいほど大きい音）
 inline slot_regs build_note(const u8 *rom, const u8 *elem, int note, int att,
+                            const voice_cal *cal = nullptr,
                             const defaults &d = defaults())
 {
 	slot_regs r;
@@ -227,8 +319,18 @@ inline slot_regs build_note(const u8 *rom, const u8 *elem, int note, int att,
 	// --- 声の EQ とミキサ
 	for (int i = 0; i < 6; i++)
 		r.set(0x20 + i * 2, d.iir[i]);
-	for (int i = 0; i < 12; i++)
+	for (int i = 0; i < 6; i++)
 		r.set(0x32 + i, d.mix[i]);
+
+	// --- 写し取った値で上書き。式が分かっていない所だけ
+	if (cal && cal->have) {
+		static const int COPY[] = { 0x00, 0x01, 0x02, 0x04, 0x05, 0x0a, 0x0b, 0x10,
+		                            0x20, 0x22, 0x24, 0x26, 0x28, 0x2a,
+		                            0x32, 0x33, 0x34, 0x35, 0x36, 0x37 };
+		for (int i : COPY)
+			if (cal->has(i))
+				r.set(i, cal->reg[i]);
+	}
 	return r;
 }
 
