@@ -442,6 +442,7 @@ int main(int argc, char **argv)
 	double seconds = 0.0;   // 0 なら Ctrl+C まで
 	bool nomidi = false, use_waveout = false, single = false, factory = false;
 	bool fast_midi = false;
+	int native_fx = 0;      // --native-fx / --native-fx-full（doc/native-dsp.md）
 	const char *wav = nullptr;
 	std::string dir;
 
@@ -469,6 +470,8 @@ int main(int argc, char **argv)
 		else if (!std::strcmp(argv[i], "--nomidi")) nomidi = true;
 		else if (!std::strcmp(argv[i], "--factory")) factory = true;
 		else if (!std::strcmp(argv[i], "--fast-midi")) fast_midi = true;
+		else if (!std::strcmp(argv[i], "--native-fx")) native_fx = 1;
+		else if (!std::strcmp(argv[i], "--native-fx-full")) native_fx = 2;
 		else if (!std::strcmp(argv[i], "--single"))
 			single = true;
 		else if (!std::strcmp(argv[i], "-v")) smu2000::g_verbose = true;
@@ -498,6 +501,8 @@ int main(int argc, char **argv)
 
 	mu.set_threaded(!single);
 	mu.set_fast_midi(fast_midi);
+	if (native_fx)
+		mu.set_native_fx(native_fx);
 	if (factory)
 		std::printf("工場出荷状態で起動する（覚えていた設定は終わるときに上書きされる）\n");
 	else if (smu2000::nvram::load(mu))

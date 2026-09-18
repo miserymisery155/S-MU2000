@@ -68,7 +68,7 @@ This produces, in `build/`:
 | `build/S-MU2000.vst3/` | VST3 plugin |
 | `build/S-MU2000.clap` | CLAP plugin (Windows) |
 | `build/live.exe` | Plays incoming MIDI without a window |
-| `build/render.exe` | Renders a MIDI file to WAV |
+| `build/render.exe` | Renders a MIDI file to WAV (**Standard MIDI Files only**, format 0 and 1; convert RCP/XWS to SMF first) |
 
 The Windows executables do not depend on MSYS2 DLLs, so they run from plain PowerShell or Explorer.
 macOS differences: [porting-macos.md](porting-macos.md).

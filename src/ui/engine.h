@@ -65,6 +65,10 @@ struct engine {
 	bool use_nvram = false;           // 覚えている設定で起動するか（窓を出すときだけ）
 	// 音の出口。false = デジタル（S/PDIF と同じ。DPCM の直流も残る）、true = アナログ（直流を切る。analog_out.h）
 	std::atomic<bool> analog{false};
+	// エフェクトを C++ で鳴らす軽量モード（doc/native-dsp.md）。0 切 / 1 / 2。
+	// 画面からはここへ頼むだけで、切り替えは音声の糸が fill() の頭で行う
+	std::atomic<int>  want_native_fx{-1};
+	std::atomic<int>  native_fx{0};
 	std::string      message = "起動中...";
 
 	driver drv;
@@ -163,6 +167,12 @@ struct engine {
 			in_fill.store(false);
 			std::memset(out, 0, size_t(n) * 4);
 			return;
+		}
+
+		// 軽量モードの切り替えは、機械を回していない今のうちに
+		if (const int want = want_native_fx.exchange(-1); want >= 0) {
+			mu.set_native_fx(want);
+			native_fx.store(want);
 		}
 
 		guard_a.refill(n, AUDIO_RATE);

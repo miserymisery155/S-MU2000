@@ -1945,6 +1945,9 @@ void swp30_device::reset()
 	m_revram_data = 0;
 	m_revram_enable = 0;
 
+	for(auto &s : m_nsend)
+		s[0] = s[1] = 0;
+
 	std::fill(m_meli.begin(),  m_meli.end(),  0);
 	std::fill(m_melo.begin(),  m_melo.end(),  0);
 	std::fill(m_adc.begin(),   m_adc.end(),   0);
@@ -3025,6 +3028,32 @@ void swp30_device::mixer_step(const std::array<s32, 0x40> &samples_per_chan)
 	m_rec_bus = mixer_out[0x10];   // S-MU2000: 録音はミキサの出力 8 の左（sample_step）
 	std::copy(mixer_out.begin() + 0x00, mixer_out.begin() + 0x10, m_melo.begin());
 	std::copy(mixer_out.begin() + 0x10, mixer_out.begin() + 0x20, m_meg->m_m.begin() + 0x20);
+	// S-MU2000: 軽量モードでは、エフェクトへの送りを横取りして MEG には渡さない。
+	// MEG 側は無音を受けるので、出てくるのはこちらの C++ のエフェクトだけになる
+	if(m_native) {
+		static const int SLOT[4] = { 0x24, 0x26, 0x2c, 0x28 };   // リバーブ・コーラス・バリエーション・インサーション 1
+		for(int i = 0; i != 4; i++) {
+			m_nsend[i][0] = m_meg->m_m[SLOT[i]];
+			m_nsend[i][1] = m_meg->m_m[SLOT[i] + 1];
+			m_meg->m_m[SLOT[i]] = m_meg->m_m[SLOT[i] + 1] = 0;
+		}
+		if(m_native_full) {
+			// 乾いた音はミキサの出力 8（m20/m21）。MEG を回さないので、ミキサの入力 64-79
+			// （MEG の出口）は毎サンプル 0 にしてあり、ここには声だけが集まっている
+			m_ndry[0] = m_meg->m_m[0x20];
+			m_ndry[1] = m_meg->m_m[0x21];
+			for(int i = 0x20; i != 0x30; i++)
+				m_meg->m_m[i] = 0;
+		}
+	}
+	// 調べもの用（一時）: エフェクトへの送り 16 本を書き出す
+	if(m_dbg_dac && m_meg->m_sample_counter >= m_dbg_dac_from &&
+	   m_meg->m_sample_counter < m_dbg_dac_from + m_dbg_dac_count) {
+		fprintf(m_dbg_dac, "send %u", m_meg->m_sample_counter);
+		for(int i = 0x10; i != 0x20; i++)
+			fprintf(m_dbg_dac, " s%02x=%d", i - 0x10, mixer_out[i]);
+		fprintf(m_dbg_dac, "\n");
+	}
 }
 
 
@@ -4116,7 +4145,9 @@ void swp30_device::run_sample(s32 &left, s32 &right)
 	}
 
 	sample_step();
-	if(m_dbg_meg) {
+	if(m_native && m_native_full) {
+		// S-MU2000: 完全な軽量モード。MEG の 384 段は回さない（doc/native-dsp.md）
+	} else if(m_dbg_meg) {
 		// S-MU2000: 1 命令ずつ追うときは元の step() で回す
 		for(int i = 0; i != 384; i++)
 			m_meg->step();
@@ -4134,6 +4165,43 @@ void swp30_device::run_sample(s32 &left, s32 &right)
 	// DAC は出力 0-3 の先頭 2 本。scale は 1<<17。
 	left  = m_adc[0];
 	right = m_adc[1];
+
+	// S-MU2000: 軽量モードの C++ エフェクトを、ここで足す（doc/native-dsp.md）
+	if(m_native) {
+		constexpr float SCALE = 131072.0f;      // m_adc の全振幅（0x20000）
+		using nfx = smu2000::dsp::native_fx;
+		static const nfx::slot_id ID[4] = { nfx::REVERB, nfx::CHORUS, nfx::VARIATION, nfx::INS1 };
+		float wl = 0.0f, wr = 0.0f;
+		for(int i = 0; i != 4; i++) {
+			if(!(m_native_mask & (1 << i)))
+				continue;
+			const float il = float(m_nsend[i][0]) / SCALE, ir = float(m_nsend[i][1]) / SCALE;
+			float ol = 0.0f, orr = 0.0f;
+			m_native->process(ID[i], il, ir, ol, orr);
+			const float g = m_native->ret(ID[i]);
+			wl += ol * g;
+			wr += orr * g;
+		}
+		// MEG を通る道で減るぶん（実測で合わせた）。乾いた音も送りも同じ目盛りなので、
+		// どちらのモードでもこれを掛ける
+		constexpr float DRY_GAIN = 0.1767f;
+		if(m_native_full) {
+			// MEG を回していないので、乾いた音もここで混ぜてマスター EQ を掛ける。
+			// 目盛りは MEG の出口（m30/m31 >> 4）に合わせてある
+			// 乾いた音の大きさ。MEG を通ると減るぶんを実測で合わせた
+			// （同じ曲を MEG 有り・無しで書き出して rms をそろえた）
+			const float dl = float(m_ndry[0]) / SCALE, dr = float(m_ndry[1]) / SCALE;
+			float ml = (dl + wl) * DRY_GAIN, mr = (dr + wr) * DRY_GAIN;
+			m_native->meq().process(ml, mr, ml, mr);
+			left  = std::clamp<s32>(s32(ml * SCALE), -0x20000, 0x1ffff);
+			right = std::clamp<s32>(s32(mr * SCALE), -0x20000, 0x1ffff);
+			m_adc[0] = left;
+			m_adc[1] = right;
+		} else {
+			left  += s32(wl * SCALE * DRY_GAIN);
+			right += s32(wr * SCALE * DRY_GAIN);
+		}
+	}
 
 	// S-MU2000: 音が出ないときの手掛かり。-v のときだけ最大値を覚える
 	if(::smu2000::g_verbose) {

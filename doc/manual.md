@@ -68,7 +68,7 @@ make
 | `build/S-MU2000.vst3/` | VST3 プラグイン |
 | `build/S-MU2000.clap` | CLAP プラグイン（Windows） |
 | `build/live.exe` | 窓を出さずに MIDI を受けて鳴らす |
-| `build/render.exe` | MIDI ファイルを WAV に書き出す |
+| `build/render.exe` | MIDI ファイルを WAV に書き出す（**標準 MIDI ファイル（SMF）の形式 0・1 だけ**。RCP や XWS は先に SMF に直す） |
 
 Windows の exe は MSYS2 の DLL に頼らないので、素の PowerShell やエクスプローラからも起動できる。
 macOS のビルドの違いは [porting-macos.md](porting-macos.md)。

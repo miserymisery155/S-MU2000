@@ -57,7 +57,10 @@ int main(int argc, char **argv)
 	if (!mu.load_program(dir + "/mu2000_flash.bin")) { std::fprintf(stderr, "%s\n", mu.error().c_str()); return 1; }
 	if (!mu.load_wave(dir + "/dump")) { std::fprintf(stderr, "%s\n", mu.error().c_str()); return 1; }
 	mu.load_sintab(dir + "/standin/sin-table.bin");
-	mu.set_threaded(true);
+	mu.set_threaded(!std::getenv("SMU2000_SINGLE"));
+	// 軽量モード（doc/native-dsp.md）でも測れるように
+	if (const char *e = std::getenv("SMU2000_NATIVE_FX"))
+		mu.set_native_fx(std::atoi(e));
 	smu2000::pc_prof_start();
 	mu.reset();
 

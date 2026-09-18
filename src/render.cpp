@@ -163,6 +163,7 @@ int main(int argc, char **argv)
 	bool fast_midi = false;
 	bool usb_host  = false;
 	bool use_bootcache = false;   // --bootcache。起動後の写しから始める（確かめ用）
+	int native_fx = 0;            // --native-fx / --native-fx-full（doc/native-dsp.md）
 	const char *state_at = nullptr; size_t state_sample = 0;   // --state-at（確かめ用）
 	const char *forced_reset = nullptr;
 	const char *swptrace = nullptr;
@@ -206,6 +207,10 @@ int main(int argc, char **argv)
 			fast_midi = true;
 		else if (!std::strcmp(argv[i], "--usb"))
 			usb_host = true;
+		else if (!std::strcmp(argv[i], "--native-fx"))
+			native_fx = 1;
+		else if (!std::strcmp(argv[i], "--native-fx-full"))
+			native_fx = 2;
 		else if (!std::strcmp(argv[i], "--bootcache"))
 			use_bootcache = true;
 		else if (!std::strcmp(argv[i], "--state-at") && i + 2 < argc) {
@@ -283,6 +288,8 @@ int main(int argc, char **argv)
 	mu.set_threaded(!single);
 	mu.set_fast_midi(fast_midi);
 	mu.set_usb_host(usb_host);
+	if (native_fx)
+		mu.set_native_fx(native_fx);
 	// 鍵は起動に使うワーク RAM も混ぜるので reset() の前に作る
 	const u64 boot_key = use_bootcache ? smu2000::bootcache::key(mu) : 0;
 	mu.reset();

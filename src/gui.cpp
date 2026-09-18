@@ -262,6 +262,7 @@ enum : UINT {
 	ID_CARD_OPEN = 5010, ID_CARD_EJECT = 5011,
 	ID_PLAY_FILE = 5100, ID_STOP_FILE = 5101, ID_PORTS34_FOLD = 5102, ID_PORTS34_DROP = 5103,
 	ID_FACTORY = 5200,
+	ID_NATIVE_FX = 5215,     // エフェクトを C++ で鳴らす（軽量モード）
 	ID_PC_EDITOR = 5201,
 	ID_OVERVIEW = 5202,
 	ID_OUTPUT_DIGITAL = 5300, ID_OUTPUT_ANALOG = 5301,
@@ -368,6 +369,8 @@ void show_port_menu(HWND hwnd, POINT screen)
 	add_item(top, MF_STRING, ID_OVERVIEW, "一覧を開く	F3");
 	add_item(top, MF_STRING, ID_PC_EDITOR, "エディタを開く	F2");
 	const bool ready = g_win.eng && g_win.eng->state.load() == 1;
+	add_item(top, MF_STRING | (g_win.eng->native_fx.load() ? MF_CHECKED : 0), ID_NATIVE_FX,
+	         "エフェクトを C++ で鳴らす（軽い・音は実機と違う）");
 	add_item(top, MF_STRING | (ready ? 0 : MF_GRAYED), ID_FACTORY, "工場出荷状態に戻す...");
 
 	TrackPopupMenu(top, TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON,
@@ -897,6 +900,8 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 			g_win.play_file.set_fold_extra_ports(id == ID_PORTS34_FOLD);
 			save_settings();
 		}
+		else if (id == ID_NATIVE_FX)
+			g_win.eng->want_native_fx.store(g_win.eng->native_fx.load() ? 0 : 2);
 		else if (id == ID_FACTORY) choose_factory_reset(hwnd);
 		else if (id == ID_PC_EDITOR) open_window(hwnd, g_win.pc);
 		else if (id == ID_OVERVIEW) open_window(hwnd, g_win.list);
@@ -1072,6 +1077,7 @@ int main(int argc, char **argv)
 	bool size_given = false;
 	bool lcd_only = false;
 	bool fast_midi = false;
+	int native_fx = 0;      // --native-fx / --native-fx-full（doc/native-dsp.md）
 	bool grid = false;
 	std::string layout_path, dump_layout, play_path;
 	bool boot_for_shot = false;
@@ -1123,6 +1129,8 @@ int main(int argc, char **argv)
 		else if (!std::strcmp(argv[i], "--master-window")) open_master = true;
 		else if (!std::strcmp(argv[i], "--lcd")) lcd_only = true;
 		else if (!std::strcmp(argv[i], "--fast-midi")) fast_midi = true;
+		else if (!std::strcmp(argv[i], "--native-fx")) native_fx = 1;
+		else if (!std::strcmp(argv[i], "--native-fx-full")) native_fx = 2;
 		else if (!std::strcmp(argv[i], "--usb")) usb_host = true;
 		else if (!std::strcmp(argv[i], "--host-midi")) usb_host = false;
 		else if (!std::strcmp(argv[i], "--shot") && i + 1 < argc) shot_path = argv[++i];
@@ -1196,6 +1204,10 @@ int main(int argc, char **argv)
 
 	static engine eng(br, midi_ports[0]);
 	eng.mu.set_fast_midi(fast_midi);
+	if (native_fx) {
+		eng.mu.set_native_fx(native_fx);
+		eng.native_fx.store(native_fx);
+	}
 	for (int p = 1; p < mu2000::MIDI_PORTS; p++)
 		eng.midi_p[p] = &midi_ports[p];
 	eng.mout_b = &mout_b;

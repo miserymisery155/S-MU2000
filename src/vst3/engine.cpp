@@ -311,6 +311,9 @@ void engine::boot()
 	// 同じ姿）。A・B も USB 側を通り、バイトの届き方が DIN の 31250bps から
 	// 実機の USB の速さになる。plugin.ini に usb=0 と書けば DIN に戻る
 	bool usb = true;
+	// エフェクトを C++ で鳴らす軽量モード（doc/native-dsp.md）。0 切 / 1 エフェクトだけ /
+	// 2 MEG を回さない。**実機と同じ音にはならない**ので既定は切
+	int native_fx = 0;
 	if (const std::string local = smu2000::config_dir(); !local.empty())
 		if (std::FILE *f = std::fopen(smu2000::join(local, "plugin.ini").c_str(), "rb")) {
 			char line[256];
@@ -319,6 +322,8 @@ void engine::boot()
 					threaded = line[9] != '0';
 				if (!std::strncmp(line, "usb=", 4))
 					usb = line[4] != '0';
+				if (!std::strncmp(line, "native_fx=", 10))
+					native_fx = std::atoi(line + 10);
 			}
 			std::fclose(f);
 		}
@@ -330,6 +335,11 @@ void engine::boot()
 	mu->set_threaded(threaded);
 	if (!threaded)
 		logf("plugin.ini: threaded=0（スレーブを別スレッドにしない）");
+	if (native_fx) {
+		mu->set_native_fx(native_fx);
+		logf(native_fx >= 2 ? "plugin.ini: native_fx=2（MEG を回さず C++ のエフェクトで鳴らす）"
+		                    : "plugin.ini: native_fx=1（C++ のエフェクトを足す）");
+	}
 	// gui / live が残した設定で起動する。**読むだけで書かない。**VST3 の中で
 	// 変えたものは DAW のプロジェクトに残るし、何枚も挿されたときに
 	// 同じファイルを取り合わずに済む

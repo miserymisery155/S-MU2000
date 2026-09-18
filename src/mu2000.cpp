@@ -4,6 +4,14 @@
 
 #include "mu2000.h"
 
+#if defined(__SSE2__) || defined(_M_X64) || defined(__x86_64__)
+#include <xmmintrin.h>
+#include <pmmintrin.h>
+#endif
+
+#include "xg/ram.h"
+#include "xg/fx_params.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -966,8 +974,160 @@ void mu2000::midi_step(u64 now)
 }
 
 
+// S-MU2000: 軽量モードの入り切り（doc/native-dsp.md）
+void mu2000::set_native_fx(int mode)
+{
+	m_nfx_on = mode;
+	// 遅延の線は作り直さない（音声の糸が読んでいる最中に切り替えても危なくないように）。
+	// 大きさは 44100Hz ぶんで固定なので、1 度用意すれば足りる
+	static bool ready = false;
+	// 軽量モードは float で計算する。非正規化数（0 に近すぎる値）が出ると命令が何十倍も遅くなるので、
+	// この糸では 0 に丸める（FTZ/DAZ）
+#if defined(__SSE2__) || defined(_M_X64) || defined(__x86_64__)
+	if (mode)
+		_mm_setcsr(_mm_getcsr() | 0x8040);
+#endif
+	if (!ready) {
+		m_nfx.set_rate(44100.0f);
+		ready = true;
+	}
+	m_nfx.reset();
+	int mask = 15;
+	if (const char *e = std::getenv("SMU2000_NATIVE_SLOTS"))
+		mask = std::atoi(e);
+	m_swpm.set_native_fx(mode ? &m_nfx : nullptr, mode >= 2, mask);
+	if (mode)
+		native_fx_update();
+}
+
+namespace {
+
+// XG の番地から、ワーク RAM の値を読む（7bit ずつ。無ければ -1）
+int xg_read(const std::vector<u8> &ram, int hi, int mid, int lo, int size)
+{
+	int v = 0;
+	for (int i = 0; i < size; i++) {
+		u32 off = 0;
+		if (!xg::ram::locate(u32(hi << 14 | mid << 7 | (lo + i)), off) || off >= ram.size())
+			return -1;
+		v = (v << 7) | (ram[off] & 0x7f);
+	}
+	return v;
+}
+
+// インサーション n のパラメータ 1-10 が 2 バイトの種類のときの値（16bit がそのまま並ぶ）
+int ins_wide(const std::vector<u8> &ram, int n, int addr)
+{
+	// 2 バイトのパラメータは 0x30, 0x32, ... と 2 番地ずつ使い、RAM にも 2 バイトずつ並ぶ。
+	// つまり RAM での位置は「番地の差」そのもの（前は 2 倍していて 1 つおきに読んでいた）
+	const u32 off = xg::ram::INS_BLOCK[n] + xg::ram::INS_WIDE + u32(addr - 0x30);
+	if (off + 1 >= ram.size())
+		return -1;
+	return ram[off] << 8 | ram[off + 1];
+}
+
+} // namespace
+
+// RAM に入っている XG の設定を読んで、C++ のエフェクトに渡す。
+// 音を作る糸から 512 サンプルごとに呼ぶ（設定はそんなに速く変わらない）
+void mu2000::native_fx_update()
+{
+	using nfx = smu2000::dsp::native_fx;
+	const std::vector<u8> &ram = m_ram;
+	if (ram.size() < 0x30000)
+		return;
+
+	struct slot_def { nfx::slot_id id; int hi, mid, base, ret_lo, ins; };
+	static const slot_def SLOTS[] = {
+		{ nfx::REVERB,    0x02, 0x01, 0x00, 0x0c, -1 },
+		{ nfx::CHORUS,    0x02, 0x01, 0x20, 0x2c, -1 },
+		{ nfx::VARIATION, 0x02, 0x01, 0x40, 0x56, -1 },
+		{ nfx::INS1,      0x03, 0x00, 0x00, -1,    0 },
+	};
+
+	// パラメータの並びは、置き場ごとに違う（表の addr はインサーションの番地）。
+	//   リバーブ・コーラス … 1-10 は base+02〜0B の 1 バイト、11-16 は base+10〜15
+	//   バリエーション     … 1-10 は 02 01 42 から 2 バイトずつ、11-16 は 02 01 70〜75
+	//   インサーション     … 表の番地そのまま（2 バイトのものは +0x18 に 16bit で並ぶ）
+	auto read_param = [&](const slot_def &s, const xg::fx_param &p, int index) {
+		if (s.ins >= 0)
+			return p.addr >= 0x30 ? ins_wide(ram, s.ins, p.addr)
+			                      : xg_read(ram, s.hi, s.mid, s.base + p.addr, p.size);
+		if (s.id == nfx::VARIATION) {
+			if (p.addr >= 0x30 || index < 10)
+				return xg_read(ram, s.hi, s.mid, 0x42 + 2 * index, 2);
+			return xg_read(ram, s.hi, s.mid, 0x70 + (p.addr - 0x20), 1);
+		}
+		if (p.addr >= 0x20)
+			return xg_read(ram, s.hi, s.mid, s.base + 0x10 + (p.addr - 0x20), 1);
+		return xg_read(ram, s.hi, s.mid, s.base + p.addr, p.size);
+	};
+
+	for (const slot_def &s : SLOTS) {
+		const int type = xg_read(ram, s.hi, s.mid, s.base, 2);
+		if (type < 0)
+			continue;
+		const xg::fx_def *def = xg::fx_find(type);
+		int raw[16] = {};
+		const int n = def ? std::min(def->count, 16) : 0;
+		for (int i = 0; i < n; i++) {
+			const xg::fx_param &p = def->params[i];
+			const int v = read_param(s, p, i);
+			raw[i] = v < 0 ? int(p.lo) : v;
+		}
+		m_nfx.set(s.id, type, raw, n);
+		// 調べもの用: SMU2000_NATIVE_FX_DEBUG=1 で、読んだ値を出す
+		static const bool dbg = std::getenv("SMU2000_NATIVE_FX_DEBUG") != nullptr;
+		if (dbg) {
+			std::printf("nfx slot %d type %02x %02x kind %d:", int(s.id), type >> 7, type & 0x7f,
+			            int(m_nfx.slot(s.id).current()));
+			for (int i = 0; i < n; i++)
+				std::printf(" %s=%d", def->params[i].label, raw[i]);
+			std::putchar(10);
+		}
+
+		// 戻り量。XG の 64 を基準にする（送りに対する量で、実機の中身とは別物）
+		if (s.ret_lo >= 0) {
+			const int ret = xg_read(ram, s.hi, s.mid, s.ret_lo, 1);
+			// 戻り量の基準。実機の混ざり具合に合わせた実測の値（SMU2000_NATIVE_RETURN で変えられる）
+			static const float base = [] {
+				const char *e = std::getenv("SMU2000_NATIVE_RETURN");
+				return e ? float(std::atof(e)) : 0.8f;
+			}();
+			float g = ret < 0 ? base : base * float(ret) / 64.0f;
+			// バリエーションを INSERTION でパートに掛けているときは、送りの目盛りが
+			// インサーションと同じになる（戻り量は使われない）
+			if (s.id == nfx::VARIATION && xg_read(ram, 0x02, 0x01, 0x5a, 1) == 0)
+				g = 0.31f;
+			m_nfx.set_return(s.id, g);
+		}
+	}
+
+	// マスター EQ（02 40 00-14）
+	{
+		int gain[5], freq[5], q[5];
+		static const int G[5] = { 0x01, 0x05, 0x09, 0x0d, 0x11 };
+		bool ok = true;
+		for (int i = 0; i < 5; i++) {
+			gain[i] = xg_read(ram, 0x02, 0x40, G[i], 1);
+			freq[i] = xg_read(ram, 0x02, 0x40, G[i] + 1, 1);
+			q[i]    = xg_read(ram, 0x02, 0x40, G[i] + 2, 1);
+			if (gain[i] < 0 || freq[i] < 0 || q[i] < 0)
+				ok = false;
+		}
+		const int shape1 = xg_read(ram, 0x02, 0x40, 0x04, 1);
+		const int shape5 = xg_read(ram, 0x02, 0x40, 0x14, 1);
+		if (ok)
+			m_nfx.meq().set_raw(gain, freq, q, shape1 < 0 ? 0 : shape1, shape5 < 0 ? 0 : shape5);
+	}
+}
+
 void mu2000::run_sample(s32 &left, s32 &right)
 {
+	// S-MU2000: 軽量モードでは、XG の設定をときどき読み直す
+	if (m_nfx_on && !(++m_nfx_tick & 0x1ff))
+		native_fx_update();
+
 	// 台数が変わっていたら別スレッドの使い方を見直す（8192 サンプルごと）
 	if (m_want_threaded && !(++m_thread_check & 0x1fff))
 		apply_threading();

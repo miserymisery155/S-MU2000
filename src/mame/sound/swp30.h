@@ -10,6 +10,8 @@
 
 // S-MU2000: MAME 本体の代わりに互換層を使う
 #include "state.h"
+
+#include "dsp/fx_native.h"
 #include "../../compat/mamecompat.h"
 
 #include <algorithm>
@@ -25,6 +27,11 @@ public:
 	void state(state_io &s);
 
 	swp30_device();
+
+	// S-MU2000: エフェクトを C++ で鳴らす軽量モード（doc/native-dsp.md）。nullptr で切。
+	// full なら MEG そのものを回さず、乾いた音も C++ 側で混ぜる（そのぶん軽い）
+	void set_native_fx(smu2000::dsp::native_fx *fx, bool full = false, int mask = 15)
+	{ m_native = fx; m_native_full = full; m_native_mask = mask; }
 
 	// S-MU2000: address_map の代わり。レジスタは 64ch x 64 スロットの格子
 	u16  read16(offs_t addr);
@@ -459,6 +466,14 @@ private:
 	std::array<s32,  0x10> m_melo = {};
 	std::array<s32,  0x10> m_meli = {};
 	std::array<s32,     4> m_adc = {};
+
+	// S-MU2000: 軽量モードの繋ぎ先（mu2000 が持っている）。ミキサから MEG への送りを
+	// 横取りして 0 にし、代わりに C++ 側の出力を DAC の手前で足す
+	smu2000::dsp::native_fx *m_native = nullptr;
+	bool m_native_full = false;  // MEG を回さない
+	int  m_native_mask = 15;     // どの口を鳴らすか（調べもの用。1 リバーブ / 2 コーラス / 4 バリエーション / 8 インサーション 1）
+	s32 m_nsend[4][2] = {};      // リバーブ・コーラス・バリエーション・インサーション 1
+	s32 m_ndry[2] = {};          // 乾いた音（ミキサ出力 e/f = m2e/m2f）
 
 	// S-MU2000: DRC は使わない。meg_state はそのまま持つ
 	std::unique_ptr<meg_state> m_meg_storage;
