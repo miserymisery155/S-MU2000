@@ -31,11 +31,13 @@ SKIP = set([0x0e, 0x0f, 0x21, 0x23, 0x25, 0x27, 0x29, 0x2b, 0x30, 0x31]
            + list(range(0x38, 0x40)))
 
 
-def trace(roms, mid, out, tag, native, secs, usb):
+def trace(roms, mid, out, tag, native, secs, usb, boot=None):
     trc = out / ('notereg_%s.txt' % tag)
     cmd = [str(BUILD / 'render'), str(roms), str(mid),
            str(out / ('notereg_%s.wav' % tag)), str(secs),
-           '--bootcache', '--trace-swp', str(trc)]
+           '--trace-swp', str(trc)]
+    # **起動のしかたを音の試験とそろえる**（doc/native-engine.md の 6.129）
+    cmd += (['--boot', '%.3f' % boot] if boot else ['--bootcache'])
     if usb:
         cmd.append('--usb')
     if native:
@@ -149,14 +151,16 @@ def main():
                     help='キーオンを全部見て、合っている本数をまとめる')
     ap.add_argument('--at', type=float, default=0.05, help='キーオンから何秒後の値か')
     ap.add_argument('--usb', action='store_true')
+    ap.add_argument('--boot', type=float, default=None,
+                    help='ほんとうに起動させる（run_tests.py と同じ 8.0 秒）')
     a = ap.parse_args()
 
     mid = BUILD / 'tests' / (a.name + '.mid')
     if not mid.exists():
         sys.exit('%s が無い。先に python tools/make_test_midi.py' % mid)
     out = BUILD / 'tests'
-    ka, ra = trace(a.roms, mid, out, 'fw', False, a.secs, a.usb)
-    kb, rb = trace(a.roms, mid, out, 'nv', True, a.secs, a.usb)
+    ka, ra = trace(a.roms, mid, out, 'fw', False, a.secs, a.usb, a.boot)
+    kb, rb = trace(a.roms, mid, out, 'nv', True, a.secs, a.usb, a.boot)
     if not ka or not kb:
         sys.exit('キーオンが見つからない')
 

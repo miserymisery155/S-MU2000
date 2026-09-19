@@ -236,20 +236,30 @@ public:
 		}
 	}
 	static constexpr u16 EG_PHASE_MIN = 16;
-	// **包絡線のほうは格子に乗せても変わらない**（6.121）。滑り
-	// （`porta_grid`）は 81% → 99% になったが、こちらは keylevel が
-	// 100% → 99% とむしろ少し落ちるだけだったので既定は切。
-	// `SMU2000_EG_GRID=1` で試せる
+	// **フィルタの包絡線も 10ms 格子**（6.133）。6.121 のときは
+	// keylevel が 100% → 99% と落ちたので切っていたが、そのあとの直し
+	// （6.123 の鍵の追従の二重掛け・6.124 の写し取りの上書き）で前提が
+	// 変わり、いまは落ちるところが無く rpn が 98% → 99% になる。
+	// firmware の 10ms 割り込みが包絡線も動かしている以上こちらが正しい形。
+	// `SMU2000_EG_GRID=0` で前の道（写し取りの at0 を鍵の時刻に足す）に戻せる
 	static bool eg_grid()
 	{
 		static const bool on = [] {
 			const char *e = std::getenv("SMU2000_EG_GRID");
-			return e && (e[0] != '0' || e[1]);
+			return !e || (e[0] != '0' || e[1]);
 		}();
 		return on;
 	}
 	// **滑りは実機の 10ms 格子に乗せる**（6.121）。`SMU2000_PORTA_GRID=0` で
 	// 前の道（写し取りの相対値を鍵の時刻に足す）に戻せる
+	static bool peg_grid()
+	{
+		static const bool on = [] {
+			const char *e = std::getenv("SMU2000_PEG_GRID");
+			return !e || (e[0] != '0' || e[1]);
+		}();
+		return on;
+	}
 	static bool porta_grid()
 	{
 		static const bool on = [] {
@@ -768,6 +778,16 @@ public:
 
 	// **ノートシフト**（08 pp 08。64 が 0 半音、±24 まで）。実機は鍵を移して
 	// から音色を選ぶので、要素の鍵域も波形の選び方も移した鍵で決まる
+	// **スケールチューニング**（6.127）。音名ごとに音程をずらす
+	// （XG の 08 pp 41-4C。ワーク RAM では +0x3A から 12 個、64 が 0 セント）
+	int part_scale_cents(int part, int note) const
+	{
+		if (!m_ram || part < 0 || part >= PARTS)
+			return 0;
+		const u32 i = u32(((note % 12) + 12) % 12);
+		return int(m_ram[ram::part_base(part) + ram::PART_SCALE_RAM + i]) - 64;
+	}
+
 	// **RPN 1（微調）**（6.125）。パートの塊 +0xCC に「14bit の値 − 8192」が
 	// 入る（8192 で 100 セント）。音程のレジスタにだけ出る
 	int part_fine_cents(int part) const
@@ -1223,7 +1243,8 @@ private:
 		const part_cc &pc = m_cc[s.part];
 		return nv::pitch_reg(nv::read_wave(s.wave), s.note, nv::key_follow(m_rom, s.elem),
 		                     nv::bend_cents(pc.bend, pc.range) + nv::elem_tune(s.elem)
-		                     + part_fine_cents(s.part) + s.glide / 256,
+		                     + part_fine_cents(s.part)
+		                     + part_scale_cents(s.part, s.note) + s.glide / 256,
 		                     nv::key_pivot(s.elem));
 	}
 
@@ -1512,7 +1533,8 @@ public:
 			nv::slot_regs sr = nv::build_note(m_rom, el, pnote, note_att(su, part), c,
 			                                  nv::defaults(),
 			                                  nv::bend_cents(pc.bend, pc.range)
-			                                  + part_fine_cents(part) + su.glide / 256,
+			                                  + part_fine_cents(part)
+		                                  + part_scale_cents(part, pnote) + su.glide / 256,
 			                                  pvel);
 			// 音程の包絡線の行き先（byte31）。初めの高さと同じなら書かない
 			{
@@ -1526,8 +1548,12 @@ public:
 			// タイマで動いている）。録画から取った格子に乗せる
 			// フィルタの包絡線は「1 目遅らせて進め始める」ので、こちらは
 			// その 1 目ぶん手前が実機の格子になる（実測で 312 サンプル）
-			su.pnext = su.fnext > FENV_TICK ? su.fnext - FENV_TICK
-			                                : (m_clock / FENV_TICK + 1) * FENV_TICK;
+			// **音程の包絡線の段も実機の 10ms 格子**（6.132）。
+			// `SMU2000_PEG_GRID=0` で前の道（録画から取った目）に戻せる
+			su.pnext = (m_eg_have && peg_grid())
+			         ? eg_after(u64(s64(m_clock) + EG_LAG))
+			         : (su.fnext > FENV_TICK ? su.fnext - FENV_TICK
+			                                 : (m_clock / FENV_TICK + 1) * FENV_TICK);
 			if (c && c->has(0x32))
 				sr.set(0x32, pan_reg(*c, part));
 			su.lfo = sr.v[0x0a];

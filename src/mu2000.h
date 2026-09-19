@@ -427,6 +427,7 @@ private:
 	}
 	u64  m_rx_at[MIDI_PORTS] = {};                   // その口が次のバイトを受け終える時刻
 	u64  m_rx_at_usb = 0;                            // USB の線（4 口で分け合う）
+	int  m_rx_usb_port = -1;                         // USB で最後に選んだ口
 	// kind 0=離し 1=押し 2=CC 3=ベンド 4=音色の指定 5=XG のパートの設定（08 pp d0=d1）
 	struct nev { u64 at; u8 kind, part, d0, d1; };
 	std::deque<nev> m_nq;
@@ -484,6 +485,12 @@ private:
 	{
 		return m_usb_host || m_cable[port] >= MIDI_DIN_PORTS;
 	}
+	static u64 usb_sub64()
+	{
+		static const u64 v = std::getenv("SMU2000_USB_SUB")
+		                   ? u64(std::atoi(std::getenv("SMU2000_USB_SUB"))) : 6 * 64;
+		return v;
+	}
 	static u64 rx_byte_tick_usb()
 	{
 		static const u64 v = std::getenv("SMU2000_RX_BYTE_USB")
@@ -501,8 +508,20 @@ private:
 		u64 &at = usb ? m_rx_at_usb : m_rx_at[port];
 		if (at < now)
 			at = now;
+		// **口が変わると `F5 <口>` が 2 バイト挟まる**（usb_midi_in と同じ）。
+		// 数えていないと、口をまたぐ曲でこちらだけ早く鳴る
+		if (usb && port != m_rx_usb_port) {
+			m_rx_usb_port = port;
+			at += 2 * rx_byte_tick_usb();
+		}
 		at += usb ? rx_byte_tick_usb() : rx_byte_tick();
-		return (at + native_proc64()) / 64;
+		// **USB の口 B・C・D は実機のほうが 6 サンプル遅い**（6.129）。
+		// 口 A は合っている。DIN では 4 口とも同じなので、USB のときだけ。
+		// 1 口だけ使う曲を 4 通り作って測った（`SMU2000_USB_SUB` で振れる）。
+		// **`--bootcache` で測ってはいけない**。そちらだと 76 サンプルに
+		// 見えるが、ほんとうに起動させると 6 だった（6.121 と同じ罠）
+		const u64 extra = (usb && port > 0) ? usb_sub64() : 0;
+		return (at + extra + native_proc64()) / 64;
 	}
 	bool nown(int part, int note) const
 	{ return (m_nown[part][(note >> 5) & 3] & (u32(1) << (note & 31))) != 0; }

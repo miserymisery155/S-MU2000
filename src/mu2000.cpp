@@ -1156,6 +1156,7 @@ void mu2000::set_native_engine(int mode)
 	for (u64 &t : m_rx_at)
 		t = 0;
 	m_rx_at_usb = 0;
+	m_rx_usb_port = -1;
 	std::memset(m_nown, 0, sizeof(m_nown));
 	for (nmidi &n : m_nmidi)
 		n = nmidi();
