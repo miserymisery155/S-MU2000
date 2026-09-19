@@ -71,6 +71,10 @@ constexpr u32 PART_EQ_SIZE = 6;
 // パートの塊の中の、XG に番地の無い演奏中の値
 constexpr u32 PART_MOD  = 0x7d;     // CC1
 constexpr u32 PART_EXP  = 0x7e;     // CC11
+// **RPN の行き先**（doc/native-engine.md の 6.125）。XG の 08 pp のならびとは
+// 別の場所に入る。実機が書くところを見て突き止めた
+constexpr u32 PART_COARSE = 0xc9;   // RPN 2（粗調）。符号つきの半音（実機の式にある）
+constexpr u32 PART_FINE   = 0xcc;   // RPN 1（微調）。16bit 符号つき、8192 で 100 セント
 constexpr u32 PART_BEND = 0x80;     // ピッチベンドの MSB の半分（0x20 が真ん中）
 constexpr u32 PART_HOLD = 0xd9;     // CC64。0 か 1
 constexpr u32 PART_VOICE = 0xf8;    // 選んでいる音色の記録を指す値（ROM の中。xg/voices.h）
