@@ -155,6 +155,14 @@ inline int wave_note(const u8 *rom, const u8 *elem, int note)
 	return n < 0 ? 0 : (n > 127 ? 127 : n);
 }
 
+// **鍵が 0-127 からはみ出した半音数**（6.141）。`wave_note` が丸めているぶん
+inline int note_overflow(const u8 *rom, const u8 *elem, int note)
+{
+	const int piv = key_pivot(elem);
+	const int n = piv + (note - piv) * key_follow(rom, elem) / 100 + int(elem[17]) - 64;
+	return n > 127 ? n - 127 : (n < 0 ? n : 0);
+}
+
 // 要素ぶんの音程のずらし（セント）。byte17 が半音、byte18 がセント
 inline int elem_tune(const u8 *elem)
 {
@@ -1276,7 +1284,13 @@ inline slot_regs build_note(const u8 *rom, const u8 *elem, int note, int att,
 	// 要素の byte17 は**半音単位の粗調**、byte18 は**セント単位の離調**（どちらも 64 が中央）。
 	// 離調は重ねの音色で 2 つの層をずらすのに使う。入れないと層がぴったり重なって
 	// 打ち消し合わず、3dB ほど大きくなる（doc/native-engine.md の 6.18）
-	r.set(0x11, pitch_reg(w, note, key_follow(rom, elem), cents_extra + elem_tune(elem),
+	// **鍵が 0-127 からはみ出したら、はみ出したぶんを引く**（6.141）。
+	// 実機は粗調（byte17）を足した鍵を 0-127 に収めてから波形も音程も出す
+	// （`wave_note` は丸めているのに、音程だけ丸めていなかった）。
+	// Shakuhachi の第 2 要素は粗調 +12 半音・支点 53 なので、鍵 120 で
+	// 53+67+12 = 132 ＝ 5 半音はみ出す。実機との差はちょうど 500 セントだった
+	r.set(0x11, pitch_reg(w, note, key_follow(rom, elem),
+	                      cents_extra + elem_tune(elem) - note_overflow(rom, elem, note) * 100,
 	                      key_pivot(elem)));
 	// **鳴らし始める位置をずらす**（実機の `0x12A9C8`）。要素の byte79 が
 	// 128 サンプル単位、byte80 が 1 サンプル単位の下駄で、ループ前の長さから

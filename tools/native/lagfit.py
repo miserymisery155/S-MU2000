@@ -29,7 +29,9 @@ BOOT = 8.0                           # run_tests の BOOT_AT と同じ
 MAX = 200                            # 探すずらしの幅（サンプル）
 DEFAULT = ['piano', 'chord', 'drums', 'effects', 'dense', 'port_b', 'bend',
            'lofi', 'egcc', 'porta', 'at', 'sxparam', 'pedals', 'partsx',
-           'keylevel']
+           'keylevel', 'rpn', 'mono', 'ctlreset', 'ports', 'scale', 'kits',
+           'ins2', 'progchg', 'running', 'pat', 'ccramp', 'midreset',
+           'partmode', 'drumnrpn', 'retrig']
 
 
 def corr(sa, sb, na):

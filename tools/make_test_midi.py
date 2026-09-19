@@ -667,6 +667,12 @@ def case_pat():
     return [track(seq(ev))], 7.5
 
 
+def nrpn_note(kind, note, value):
+    """ドラムの NRPN（MSB が種類、LSB が鍵の番号）"""
+    return [b'\xb9\x63' + bytes([kind]), b'\xb9\x62' + bytes([note]),
+            b'\xb9\x06' + bytes([value])]
+
+
 def case_ccramp():
     """**伸ばしている音につまみを刻む**（CC7 音量・CC10 パン・CC91 リバーブ送り・
     CC11 エクスプレッション）。実際の曲がいちばんよくやる形（音量の山・
@@ -698,6 +704,176 @@ def case_ccramp():
     return [track(seq(ev))], 10.0
 
 
+def case_midreset():
+    """**曲の途中でのリセット**（XG System On・GM System On）と
+    **マスターチューン**（00 00 00-03）。実際の曲は頭以外でもリセットを
+    入れることがあるし、マスターチューンで全体の音程をずらす曲もある。
+
+    リセットはパートの設定も音色も全部戻すので、native の写し取りの
+    「経路の印」が付いていかないと、古いつまみのまま鳴る。
+
+    **実機にこの MIDI を流してはいけない**（モードが変わって戻せない）。
+    エミュレータの中だけで使う試験"""
+    ev = head()
+    ev += [(1.0, bytes([0xc0, 0x50]))]                # Square Lead
+    ev += [(1.05, bytes([0xb0, 0x07, 60])),           # 音量を絞る
+           (1.06, bytes([0xb0, 0x0a, 20]))]           # 左へ振る
+    ev += note(0, 60, 100, 1.3, 0.8)                  # 1 音目。ここで写し取る
+    ev += note(0, 64, 100, 2.2, 0.8)                  # native
+    # マスターチューン（00 00 00-03。4 バイトの下 4bit で 12bit の値。
+    # 0x400 が中央、1 きざみ 0.1 セント）
+    ev += [(3.1, xg([0x00, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00]))]
+    ev += note(0, 60, 100, 3.4, 0.8)                  # 音程が上がるはず
+    ev += [(4.3, xg([0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00]))]   # 戻す
+    # 曲の途中で XG System On（音量もパンも音色も既定に戻る）
+    ev += [(4.6, XG_RESET)]
+    ev += note(0, 60, 100, 5.3, 0.8)                  # GrandPno・音量 100 のはず
+    # GM System On
+    ev += [(6.2, sysex([0x7e, 0x7f, 0x09, 0x01, 0xf7]))]
+    ev += note(0, 64, 100, 6.9, 0.8)
+    return [track(seq(ev))], 8.5
+
+
+def case_partmode():
+    """**パートの種類**（08 pp 07。0 が旋律・2-5 がドラム 1-4）。
+    旋律のパートをドラムにしたり、10 番をドラムから旋律に戻したりする。
+    native は種類で写し取りの引き方を変える（`is_drum`）ので、
+    切り替えに付いていけないと、鍵の番号の音色が鳴るか無音になる"""
+    ev = head()
+    ev += [(1.0, bytes([0xc0, 0x00]))]                # ch1 GrandPno
+    ev += note(0, 60, 100, 1.2, 0.6)                  # 旋律として 1 音目
+    # ch1 をドラム（ドラム 1）にする
+    ev += [(2.0, xg([0x08, 0x00, 0x07, 0x02]))]
+    for i, k in enumerate((36, 38, 42)):
+        ev += note(0, k, 110, 2.3 + i * 0.3, 0.1)
+    # 旋律に戻す
+    ev += [(3.5, xg([0x08, 0x00, 0x07, 0x00]))]
+    ev += [(3.6, bytes([0xc0, 0x30]))]                # Strings
+    ev += note(0, 62, 100, 3.9, 0.8)
+    # ch10 をドラムから旋律にする
+    ev += [(4.9, xg([0x08, 0x09, 0x07, 0x00]))]
+    ev += [(5.0, bytes([0xc9, 0x00]))]                # GrandPno
+    ev += note(9, 60, 100, 5.3, 0.8)
+    ev += [(6.3, xg([0x08, 0x09, 0x07, 0x02]))]       # ドラムに戻す
+    ev += note(9, 38, 110, 6.6, 0.1)
+    return [track(seq(ev))], 8.0
+
+
+def case_drumnrpn():
+    """**ドラムの NRPN**（14-1D。1 打ごとの高さ・音量・パン・送り）。
+    `drums` は SysEx の形（3n rr nn）で同じ所を触るが、**NRPN の形**は
+    ここまで 1 度も送っていなかった。実際の XG の打ち込みはこちらをよく使う。
+
+    NRPN MSB が種類、LSB が鍵の番号、CC6 が値:
+      14 高さ（粗）・15 高さ（細）・16 音量・18 パン・19 リバーブ送り・1A コーラス送り"""
+    ev = head()
+    t = 1.0
+    for i, k in enumerate((36, 38, 42)):              # 素の音（ここで写し取る）
+        ev += note(9, k, 110, t + i * 0.3, 0.1)
+    t = 2.1
+    # 鍵 36 の高さを上げ、音量を下げ、左へ振り、リバーブを増やす
+    for msb, val in ((0x14, 64 + 10), (0x16, 80), (0x18, 20), (0x19, 120)):
+        ev += spread(t, nrpn_note(msb, 36, val))
+        t += 0.06
+    # 鍵 38 は高さだけ下げる
+    ev += spread(t, nrpn_note(0x14, 38, 64 - 8))
+    t += 0.3
+    for i, k in enumerate((36, 38, 42, 36)):
+        ev += note(9, k, 110, t + i * 0.35, 0.1)
+    t += 1.6
+    # 戻す
+    for msb, val in ((0x14, 64), (0x16, 127), (0x18, 64), (0x19, 40)):
+        ev += spread(t, nrpn_note(msb, 36, val))
+        t += 0.06
+    ev += note(9, 36, 110, t + 0.3, 0.1)
+    return [track(seq(ev))], t + 1.8
+
+
+def case_retrig():
+    """**同じ鍵の連打**と**極端に短い音**。実際の曲（刻みのベース・ドラムの
+    ロール・トレモロ）が当たり前にやるのに、ここまでの試験は 1 度も
+    やっていなかった。
+
+    * 同じ鍵をすぐ押し直すと、実機は**前の音を残したまま**新しいスロットで
+      鳴らす（離しの尾が重なる）。native がスロットを取り合うときに
+      前の音を切ってしまうと、刻みが痩せる
+    * 10ms しか押さない音は、離しの段に入るのが早い
+    * 離す前に押し直す（重ねる）形も入れてある"""
+    ev = head()
+    ev += [(1.0, bytes([0xc0, 0x21]))]                # Finger Bass（減衰が速い）
+    ev += note(0, 40, 110, 1.2, 0.4)                  # 1 音目。ここで写し取る
+    # 同じ鍵を 16 分で刻む（離してすぐ押す）
+    t = 2.0
+    for i in range(12):
+        ev += note(0, 40, 110, t + i * 0.125, 0.10)
+    t = 3.6
+    # 離す前に押し直す（重なる）
+    for i in range(6):
+        ev += [(t + i * 0.2, bytes([0x90, 40, 110]))]
+    ev += [(t + 1.4, bytes([0x80, 40, 0x40]))]
+    # 極端に短い音（5ms）
+    t = 5.4
+    for i in range(8):
+        ev += [(t + i * 0.15, bytes([0x90, 47, 110])),
+               (t + i * 0.15 + 0.005, bytes([0x80, 47, 0x40]))]
+    # ドラムのロール
+    ev += [(6.8, bytes([0xc9, 0x00]))]
+    for i in range(16):
+        ev += note(9, 38, 100 + (i % 3) * 9, 7.0 + i * 0.06, 0.02)
+    return [track(seq(ev))], 9.0
+
+
+def case_pedretrig():
+    """**ダンパーを踏んだまま同じ鍵を繰り返す**。6.138 で「離しは 1 回ぶん
+    だけ」にしたので、ダンパー（押さえたまま待たせる）とソステヌートとの
+    組み合わせがいちばん危ない所になった。
+
+    * 踏んだまま同じ鍵を 6 回 → 離しても待たされる → 離すと全部鳴り終わる
+    * ソステヌートで一部だけ待たせて、残りは普通に離す
+    * 踏んだまま和音を重ねて、途中で離す"""
+    ev = head()
+    ev += [(1.0, bytes([0xc0, 0x00]))]                # GrandPno
+    ev += note(0, 60, 100, 1.2, 0.6)                  # 1 音目。ここで写し取る
+    # ダンパーを踏んで、同じ鍵を 6 回
+    ev += [(2.0, DAMPER_ON)]
+    for i in range(6):
+        ev += note(0, 60, 100, 2.2 + i * 0.22, 0.12)
+    ev += [(3.8, DAMPER_OFF)]                         # ここで 6 つとも鳴り終わる
+    # ソステヌート: 先に押した音だけ待たせ、あとの音は普通に離す
+    ev += [(4.4, bytes([0x90, 52, 100]))]
+    ev += [(4.7, SOST_ON)]
+    ev += [(4.8, bytes([0x80, 52, 0x40]))]            # 待たされる
+    ev += note(0, 59, 100, 5.0, 0.4)                  # 普通に離れる
+    ev += note(0, 64, 100, 5.5, 0.4)
+    ev += [(6.1, SOST_OFF)]                           # 52 がここで離れる
+    # ダンパーを踏んで和音を重ね、途中で離す
+    ev += [(6.6, DAMPER_ON)]
+    for i, k in enumerate((48, 52, 55, 60)):
+        ev += note(0, k, 100, 6.8 + i * 0.15, 0.1)
+    ev += [(7.6, DAMPER_OFF)]
+    return [track(seq(ev))], 9.0
+
+
+def case_edges():
+    """**鍵と強さの端**（鍵 0・12・120・127、強さ 1・127）。
+    `keylevel` は鍵 36/60/84 × 強さ 30/127 の真ん中あたりだけを見ている。
+    端は曲線の表の頭と尻（音量・切る高さ・強さ・鍵の追従）を当たるので、
+    はみ出しや頭打ちの扱いが違うとここで出る。
+
+    音域の外で鳴らない音色もある（鳴らないことも実機と合っていてほしい）"""
+    ev = head()
+    t = 1.0
+    for prog in (0x00, 0x30, 0x4d):                   # GrandPno・Strings・FX
+        ev += [(t, bytes([0xc0, prog]))]
+        t += 0.2
+        for key in (0, 12, 120, 127):
+            for vel in (1, 127):
+                ev += note(0, key, vel, t, 0.35)
+                t += 0.55
+        t += 0.3
+    return [track(seq(ev))], t + 1.5
+
+
 CASES = {
     "piano":   case_piano,
     "chord":   case_chord,
@@ -725,6 +901,12 @@ CASES = {
     "running": case_running,
     "pat":     case_pat,
     "ccramp":  case_ccramp,
+    "midreset": case_midreset,
+    "partmode": case_partmode,
+    "drumnrpn": case_drumnrpn,
+    "retrig":  case_retrig,
+    "pedretrig": case_pedretrig,
+    "edges":   case_edges,
 }
 
 

@@ -21,6 +21,9 @@ namespace ram {
 
 // ワーク RAM の先頭（0x400000）からの位置
 constexpr u32 SYSTEM   = 0x226c1;   // 00 00 00-06
+// 00 00 00-03（マスターチューン）。4 バイトの下 4bit をつないだ 12bit の値で、
+// 0x400 が 0 セント、1 きざみ 0.1 セント（doc/native-engine.md の 6.136）
+constexpr u32 SYS_TUNE      = SYSTEM + 0;
 constexpr u32 SYS_VOLUME    = SYSTEM + 4;   // 00 00 04（マスター音量）
 // **パートの音量の目盛り**（0-128）。実機はここを音量の目盛りに掛ける
 // （`0x12A4AA`）。音量・エクスプレッション・マスター音量だけでなく、

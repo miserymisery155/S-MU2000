@@ -1145,6 +1145,8 @@ void mu2000::set_native_engine(int mode)
 		c = 0;
 	for (part_prog &p : m_prog_sel)
 		p = part_prog();
+	for (s8 &m : m_part_mode)
+		m = -1;
 	m_fw_note_total = 0;
 	m_fw_note_until = 0;
 	m_nq.clear();
@@ -1751,7 +1753,8 @@ void mu2000::native_select_voice(int part)
 	if (part < 0 || part >= 64 || !m_prog)
 		return;
 	const part_prog &p = m_prog_sel[part];
-	const bool drum = (p.msb == 127 || p.msb == 126);
+	// バンク 127/126 だけでなく、**パートの種類**（08 pp 07）でもドラムになる
+	const bool drum = (p.msb == 127 || p.msb == 126) || part_is_drum(part);
 	if (drum) {
 		m_ndrv.set_record(part, 0, 1);
 		return;
@@ -1771,11 +1774,29 @@ void mu2000::native_select_voice(int part)
 // firmware を 100ms につき 5ms しか回さないので、その遅れは 1 秒を超える
 void mu2000::native_sysex(u64 fire)
 {
+	// **リセットは native にも効かせる**（6.136）。GM システムオン
+	// （7E 7F 09 xx）・GS リセット（41 1n 42 12 40 00 7F）・XG システムオン
+	// （43 1n 4C 00 00 7E/7F）。パートの状態も音色の選びも既定に戻るので、
+	// こちらも戻さないと古い音色・古いつまみで鳴り続ける。
+	// **ヤマハの判定より前に見る**（GM と GS は 43 で始まらない）
+	if (m_sx_pos >= 3 && m_sx[0] == 0x7e && m_sx[2] == 0x09) {
+		m_nq.push_back({ fire, 6, 0, 0, 0 });
+		return;
+	}
+	if (m_sx_pos >= 7 && m_sx[0] == 0x41 && m_sx[2] == 0x42 &&
+	    m_sx[4] == 0x40 && m_sx[6] == 0x7f) {
+		m_nq.push_back({ fire, 6, 0, 0, 0 });
+		return;
+	}
 	if (m_sx_pos < 7)
 		return;
 	if (!(m_sx[0] == 0x43 && (m_sx[1] & 0xf0) == 0x10 && m_sx[2] == 0x4c))
 		return;
 	const u8 hh = m_sx[3], mm = m_sx[4], ll = m_sx[5];
+	if (hh == 0x00 && mm == 0x00 && (ll == 0x7e || ll == 0x7f)) {
+		m_nq.push_back({ fire, 6, 0, 0, 0 });
+		return;
+	}
 	if (hh != 0x08 || mm >= 32)
 		return;
 	// **1 回の SysEx で続けて何バイトも書ける**（ll から順に並ぶ）
@@ -1822,7 +1843,27 @@ void mu2000::native_pump()
 			break;
 		// XG のパートの設定（08 pp ll）。ワーク RAM の並びと同じなので、
 		// 番地をそのまま渡す
-		case 5: m_ndrv.set_part_param(e.part, e.d0, e.d1); break;
+		case 5:
+			m_ndrv.set_part_param(e.part, e.d0, e.d1);
+			// **パートの種類が変わったら音色を引き直す**（6.137）
+			if (e.d0 == 0x07 && e.part < 64) {
+				m_part_mode[e.part] = s8(e.d1);
+				native_select_voice(e.part);
+			}
+			break;
+		// リセット（6.136）。音色の選びもパートの状態も既定に戻す
+		case 6:
+			for (int p = 0; p < 64; p++) {
+				m_prog_sel[p] = part_prog();
+				m_part_mode[p] = -1;
+			}
+			std::memset(m_nown, 0, sizeof(m_nown));
+			m_ndrv.reset_parts();
+			// **音色の記録も引き直す**。m_prog_sel を戻すだけでは、
+			// 口が持っている記録（`set_record`）が古いままになる
+			for (int p = 0; p < 64; p++)
+				native_select_voice(p);
+			break;
 		default: break;
 		}
 	}
@@ -2013,7 +2054,13 @@ bool mu2000::native_midi(u8 byte, int port)
 	}
 	if (m_ndrv.can_play(part, note)) {
 		nown_set(part, note, true);
-		m_nq.push_back({ fire, 1, u8(part), u8(note), u8(vel) });
+		// **ドラムは実機のほうが 3 サンプル早い**（6.139）。旋律は +1 で
+		// 合っているのに、打楽器だけ +3 になる。1 打を引く道が短いためと
+		// 見ている（`SMU2000_DRUM_LEAD` で振れる）。打楽器は立ち上がりが
+		// 鋭いので、2 サンプルでも波形の相関がはっきり変わる
+		const u64 at = (part_is_drum(part) && fire > drum_lead())
+		             ? fire - drum_lead() : fire;
+		m_nq.push_back({ at, 1, u8(part), u8(note), u8(vel) });
 		return true;
 	}
 	m_ne_stats.note_fw++;

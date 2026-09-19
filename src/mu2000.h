@@ -535,6 +535,26 @@ private:
 	// バンクとプログラムをパートごとに覚えて、xg::voice_rom::lookup に渡す
 	struct part_prog { u8 msb = 0, lsb = 0, prog = 0; };
 	part_prog m_prog_sel[64];
+	// **パートの種類**（XG の 08 pp 07。0 が旋律、2-5 がドラム 1-4）。
+	// -1 はまだ SysEx を見ていない（ワーク RAM を読む）。バンク 127/126 で
+	// なくてもここでドラムになるので、音色の引き方を変える必要がある
+	// （doc/native-engine.md の 6.137）
+	s8 m_part_mode[64] = {};
+	static u64 drum_lead()
+	{
+		static const u64 v = std::getenv("SMU2000_DRUM_LEAD")
+		                   ? u64(std::atoi(std::getenv("SMU2000_DRUM_LEAD"))) : 3;
+		return v;
+	}
+	bool part_is_drum(int part) const
+	{
+		if (part < 0 || part >= 64)
+			return false;
+		if (m_part_mode[part] >= 0)
+			return m_part_mode[part] != 0;
+		const u32 off = xg::ram::part_base(part) + 0x07;
+		return m_ram.size() > off && m_ram[off] != 0;
+	}
 	void native_select_voice(int part);
 	// 受け取り終えた XG の SysEx を、native の側にも効かせる
 	void native_sysex(u64 fire);
