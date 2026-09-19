@@ -211,33 +211,47 @@ public:
 	// native の口が始まったあとは firmware の時間が遅れるので、拾い直さない
 	// **10ms タイマの位相を実機から学ぶ**（6.118）。firmware の 10ms 割り込みは
 	// 世界共通なので、包絡線も滑りも「鍵を押した時刻」ではなくこの格子に乗る。
-	// 実機が書く時刻はタイマの目より少し後ろにばらつく（混み具合で 0-13
-	// サンプル）ので、**いちばん早いもの**を目とみなす
+	//
+	// **いちばん早いものを取ってはいけない**。`0x00` はタイマだけでなく
+	// **鍵を押したときにも**書かれる。そちらは好きな時刻に来るので、
+	// 1 回でも早いものが混じると位相がそこに居着いてしまう（`--bootcache`
+	// では正しく、実際に起動させると 141 サンプルずれていた。6.118）。
+	// タイマの書き込みは 1 か所に集まり、鍵のぶんは散らばるので、
+	// **いちばん数の多い位相**を取る
 	void set_eg_phase(u32 sample)
 	{
 		const u32 p = sample % FENV_TICK;
-		if (!m_eg_have) {
-			m_eg_phase = p;
-			m_eg_have = true;
+		if (m_eg_hits[p] == 0xffff)
 			return;
-		}
-		s32 d = s32(p) - s32(m_eg_phase);
-		if (d < -s32(FENV_TICK / 2))
-			d += s32(FENV_TICK);
-		else if (d > s32(FENV_TICK / 2))
-			d -= s32(FENV_TICK);
-		if (d < 0)
+		const u16 n = ++m_eg_hits[p];
+		if (n > m_eg_best) {
+			m_eg_best = n;
 			m_eg_phase = p;
+			// 数が溜まるまでは信じない（鍵のぶんだけで決めないように）
+			if (n >= EG_PHASE_MIN)
+				m_eg_have = true;
+		}
 	}
-	// **まだ既定にできない**（6.118）。`SMU2000_EG_GRID=1` で試せる。
-	// 格子に乗せると滑り（`0x11`）は実機と 1 サンプルまで合うのに、
-	// 音の相関は porta で 81% → 29% と落ちる。レジスタの値も書く時刻も
-	// 7 サンプル以内で合っているので、原因はまだ分かっていない
+	static constexpr u16 EG_PHASE_MIN = 16;
+	// **包絡線のほうは格子に乗せても変わらない**（6.121）。滑り
+	// （`porta_grid`）は 81% → 99% になったが、こちらは keylevel が
+	// 100% → 99% とむしろ少し落ちるだけだったので既定は切。
+	// `SMU2000_EG_GRID=1` で試せる
 	static bool eg_grid()
 	{
 		static const bool on = [] {
 			const char *e = std::getenv("SMU2000_EG_GRID");
 			return e && (e[0] != '0' || e[1]);
+		}();
+		return on;
+	}
+	// **滑りは実機の 10ms 格子に乗せる**（6.121）。`SMU2000_PORTA_GRID=0` で
+	// 前の道（写し取りの相対値を鍵の時刻に足す）に戻せる
+	static bool porta_grid()
+	{
+		static const bool on = [] {
+			const char *e = std::getenv("SMU2000_PORTA_GRID");
+			return !e || (e[0] != '0' || e[1]);
 		}();
 		return on;
 	}
@@ -1368,9 +1382,13 @@ public:
 					// firmware の 10ms タイマは世界共通なので、鍵を押した時刻からで
 					// なく**格子**に乗せる（同時に鳴る音の滑りがそろう）。
 					// 格子は包絡線と同じ（録画から取った実機の目）を使う（6.82）
-					su.glide_next = su.fnext > nv::PORTA_TICK
-					              ? su.fnext - nv::PORTA_TICK
-					              : (m_clock / nv::PORTA_TICK + 1) * nv::PORTA_TICK;
+					// **滑りだけ実機の 10ms 格子に乗せてみる道**（6.118）。
+					// `SMU2000_PORTA_GRID=1` で試せる。包絡線の格子は触らない
+					su.glide_next = (m_eg_have && porta_grid())
+					              ? eg_after(u64(s64(m_clock) + EG_LAG))
+					              : (su.fnext > nv::PORTA_TICK
+					                 ? su.fnext - nv::PORTA_TICK
+					                 : (m_clock / nv::PORTA_TICK + 1) * nv::PORTA_TICK);
 				}
 			}
 			// **移調した鍵と、感度を掛けた強さで組む**（6.104）。ここに元の鍵を
@@ -1759,6 +1777,8 @@ private:
 	static constexpr u64 FENV_TICK = 441;
 	u32 m_eg_phase = 0;
 	bool m_eg_have = false;
+	u16 m_eg_best = 0;
+	std::array<u16, FENV_TICK> m_eg_hits{};
 	std::array<u32, PARTS> m_recsel{};
 	std::array<s8, PARTS> m_recsel_drum{};
 	u64 m_clock = 0;
