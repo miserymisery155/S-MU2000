@@ -403,9 +403,21 @@ inline int peg_rate_vel_adj(const u8 *elem, int vel)
 
 // 速さのレジスタ（`0x0b` の上位バイト）。実機の `0x12BCF0`。
 // 途中で何度も符号つき 1 バイトに切り詰めている
-inline int peg_rate_idx(const u8 *elem, int note, int vel, int part_rate = 64)
+// 段ごとの生の速さ（段 0 は byte26、段 1 は byte27、段 2 は byte28、離しは byte29）
+inline int peg_rate_raw(const u8 *elem, int stage)
 {
-	int r = int(elem[26]) + (int(s8(u8(64 - part_rate))) >> 2);
+	return int(elem[26 + (stage < 0 ? 0 : (stage > 3 ? 3 : stage))]);
+}
+
+// 段ごとの行き先の高さ（段 0 は byte31、段 1 は byte32、段 2 は byte33、離しは byte34）
+inline int peg_level_of(const u8 *elem, int stage)
+{
+	return int(elem[31 + (stage < 0 ? 0 : (stage > 3 ? 3 : stage))]);
+}
+
+inline int peg_rate_idx_of(const u8 *elem, int raw, int note, int vel, int part_rate = 64)
+{
+	int r = raw + (int(s8(u8(64 - part_rate))) >> 2);
 	if (s8(u8(r)) > 63) r = 63;
 	if (s8(u8(r)) < 0)  r = 0;
 	r += peg_rate_key_adj(elem, note);
@@ -417,10 +429,23 @@ inline int peg_rate_idx(const u8 *elem, int note, int vel, int part_rate = 64)
 	return r;
 }
 
+inline int peg_rate_idx(const u8 *elem, int note, int vel, int part_rate = 64)
+{
+	return peg_rate_idx_of(elem, int(elem[26]), note, vel, part_rate);
+}
+
 inline int peg_rate_reg(const u8 *rom, const u8 *elem, int note = 60, int vel = 100,
                         int part_rate = 64)
 {
 	return rd16s(rom, PEG_RATE_TAB + u32(peg_rate_idx(elem, note, vel, part_rate)) * 2);
+}
+
+// 段 stage の速さのレジスタ
+inline int peg_rate_reg_stage(const u8 *rom, const u8 *elem, int stage, int note, int vel,
+                              int part_rate = 64)
+{
+	const int i = peg_rate_idx_of(elem, peg_rate_raw(elem, stage), note, vel, part_rate);
+	return rd16s(rom, PEG_RATE_TAB + u32(i) * 2);
 }
 
 // `SMU2000_NO_PEG` を立てると音程の包絡線をやめる（比べるための逃げ道）
@@ -806,6 +831,59 @@ inline u16 cutoff_keyon(const u8 *rom, const u8 *elem, int note, int vel)
 	return cutoff_of(rom, elem, note, vel, fenv_init(rom, elem, vel));
 }
 
+// ---- **音色そのものが持つパン**（レジスタ `0x32`）。実機の `0x12AF40` と `0x12B794`
+//
+//   位置 = clamp(CC10 + 表 0x1E68DC[byte69] - 64, 0, 127)
+//          （byte69 が 15 のときだけ鍵で 0x1E68EB を引く）
+//   左 = 表 0x1E6B90[パート[14]] + 表 0x1E6C11[位置]
+//   右 = 表 0x1E6B90[0x80-パート[14]] + 表 0x1E6C11[0x80-位置]
+//   レジスタ = (左 << 8) | 右   （どちらも 255 で頭打ち）
+//
+// Warm Pad は 2 つの要素が byte69=2 と 12 で、表を引くと 13 と 115。
+// 実機は片方に `083c`、もう片方に `3c08` を書いていて、式と一致する
+constexpr u32 PAN_SEL_TAB   = 0x1E68DC;   // byte69 → パンの位置（16 個）
+constexpr u32 PAN_SEL_KEY   = 0x1E68EB;   // byte69 が 15 のとき、鍵で引く
+constexpr u32 PAN_BASE_TAB  = 0x1E6B90;   // パートのパン → 下駄（中央で 8 ＝ -3dB）
+constexpr u32 PAN_CURVE_TAB = 0x1E6C11;   // パンの位置 → 減衰（0-128）
+
+inline int elem_pan(const u8 *rom, const u8 *elem, int note)
+{
+	const int i = int(elem[69]);
+	return i == 15 ? int(rom[PAN_SEL_KEY + u32(note & 0x7f)])
+	               : int(rom[PAN_SEL_TAB + u32(i & 0xf)]);
+}
+
+// パンの位置（0-127）
+inline int voice_pan_pos(const u8 *rom, const u8 *elem, int note, int cc10 = 64)
+{
+	const int p = cc10 + elem_pan(rom, elem, note) - 64;
+	return p < 0 ? 0 : (p > 127 ? 127 : p);
+}
+
+// **送りはパンで目減りする**（実機の `0x12C3F8`）。真ん中で 16 を足し、
+// 左右に振るほど減る（表 0x1F2198）。Warm Pad は位置 13 で 4 なので
+// 既定の `2b` から 12 減って `1f`。実機と一致した
+constexpr u32 PAN_SEND_TAB = 0x1F2198;
+
+inline int pan_send_adj(const u8 *rom, int pan_pos)
+{
+	return int(rom[PAN_SEND_TAB + u32(pan_pos & 0x7f)])
+	     - int(rom[PAN_SEND_TAB + 64]);
+}
+
+inline u16 voice_pan_reg(const u8 *rom, const u8 *elem, int note,
+                         int cc10 = 64, int part_pan = 64)
+{
+	const int p = voice_pan_pos(rom, elem, note, cc10);
+	const int q = part_pan & 0x7f;
+	int l = int(rom[PAN_BASE_TAB + u32(q)]) + int(rom[PAN_CURVE_TAB + u32(p)]);
+	int r = int(rom[PAN_BASE_TAB + u32(0x80 - q)])
+	      + int(rom[PAN_CURVE_TAB + u32(0x80 - p)]);
+	if (l > 255) l = 255;
+	if (r > 255) r = 255;
+	return u16((l << 8) | r);
+}
+
 // 1 音ぶんのレジスタを作る。att は 0x09 に入れる減衰（0-255。小さいほど大きい音）
 inline slot_regs build_note(const u8 *rom, const u8 *elem, int note, int att,
                             const voice_cal *cal = nullptr,
@@ -845,11 +923,17 @@ inline slot_regs build_note(const u8 *rom, const u8 *elem, int note, int att,
 	// フィルタの第 2 パラメータ（共振）。byte35 から強さぶんを引いて（byte81）、
 	// 1 ビット落として 5bit にする（0x12806A）。18 音色 × 強さ 3 通りで一致
 	r.set(0x04, u16(reso_level(elem, vel) << 11));
-	// LFO の深さ（音量側）。実機（0x129B34）は byte16 を 2 倍して下位に置く。
-	// 既定の音色はほとんど 0 で、Vibes だけ byte16=2 → 下位 4
-	r.set(0x05, u16((d.lfo_amp & 0xff00) | u16((elem[16] * 2) & 0x7f)));
-	// LFO の型と刻み。上位は 0x40 | byte11（402 組で例外なし）、下位（音程の深さ）は 0
-	r.set(0x0a, u16((0x40 | (elem[11] & 0x3f)) << 8));
+	// LFO の深さ（音量側）。実機（0x129B34）は byte16 を 2 倍して下位に置くが、
+	// **遅れ（byte12）と byte13 がどちらも 0 のときだけ**使う（0x127D18）。
+	// Vibes（byte12=0・byte13=0・byte16=2）は 4、Koto（byte12=48）は 0
+	r.set(0x05, u16((d.lfo_amp & 0xff00)
+	                | u16((elem[12] || elem[13]) ? 0 : ((elem[16] * 2) & 0x7f))));
+	// LFO の型と刻み。上位は byte11 に**byte9 が 0 でなければ** 0x40 を足したもの
+	// （Rain は byte9=0 で `2d`）。下位は**音程の深さ = byte14 × 3**
+	// （PanFlute の byte14=1 で 3、ChiffLead・TnklBell・Helicopter の 2 で 6）
+	// 深さは `0x05` と同じく、**遅れ（byte12）と byte13 がどちらも 0 のとき**だけ
+	r.set(0x0a, u16(((((elem[9] ? 0x40 : 0) | (elem[11] & 0x3f)) << 8))
+	                | u16((elem[12] || elem[13]) ? 0 : ((elem[14] * 3) & 0x7f))));
 	// 音程の包絡線。速さが 127（即到達）のときだけ初めの高さは byte31 を使う
 	const int prate = peg_rate_reg(rom, elem, note, vel);
 	r.set(0x0b, u16(prate << 8));
@@ -892,6 +976,21 @@ inline slot_regs build_note(const u8 *rom, const u8 *elem, int note, int att,
 		r.set(0x20 + i * 2, d.iir[i]);
 	for (int i = 0; i < 6; i++)
 		r.set(0x32 + i, d.mix[i]);
+	// **音色そのものが持つパン**（byte69）。写し取りがあれば下で上書きされる
+	r.set(0x32, voice_pan_reg(rom, elem, note));
+	// 送りはそのパンのぶん目減りする
+	{
+		const int adj = pan_send_adj(rom, voice_pan_pos(rom, elem, note));
+		for (int i = 0; i < 2; i++) {
+			// **切ってある送り（0xff）はそのまま**。実機も頭打ちなので、
+			// ここでパンのぶん引くと切ったはずの送りが開いてしまう
+			if ((d.mix[1 + i] & 0xff) >= 0xff)
+				continue;
+			int v = int(d.mix[1 + i] & 0xff) + adj;
+			v = v < 0 ? 0 : (v > 255 ? 255 : v);
+			r.set(0x33 + i, u16((d.mix[1 + i] & 0xff00) | u16(v)));
+		}
+	}
 
 	// --- 写し取った値で上書き。式が分かっていない所だけ
 	//
