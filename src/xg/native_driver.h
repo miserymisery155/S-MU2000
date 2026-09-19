@@ -276,7 +276,9 @@ public:
 		int live = 0;
 		for (int i = 0; i < SLOTS; i++) {
 			slot_use &s = m_slot[i];
-			if (!s.cal)
+			// **写し取りが無くても包絡線は動かす**（`SMU2000_CUT_EXACT=1` のとき）。
+			// 式だけで `0x00` を出せるようになったので、録画は要らない（6.72）
+			if (!s.cal && !(nv::cut_exact() && fenv_on() && s.elem))
 				continue;
 			// **離しの最中もフィルタを動かす**。実機は離しのあいだも
 			// 0x00・0x01・0x04 を書き続ける（doc/native-engine.md の 6.57）
@@ -293,8 +295,7 @@ public:
 					}
 					if (moved) {
 						s.cut = fenv_cut(s);
-						m_poke(u32(i) * 64 + 0x00,
-						       cutoff_reg(s.cut, *s.cal, s.part, s.elem, s.note));
+						m_poke(u32(i) * 64 + 0x00, cut_with_cc(s, s.cut));
 					}
 					if (s.finc) {
 						live++;
@@ -302,12 +303,15 @@ public:
 							next = s.fnext;
 					}
 				}
+				if (!s.cal)
+					continue;
 				const std::vector<nv::fstep> &re = s.cal->filter_env;
 				while (s.rpos < re.size()) {
 					if (!re[s.rpos].rel) { s.rpos++; continue; }
 					if (u64(s64(s.rel_at + re[s.rpos].at) + EG_LAG) > clock)
 						break;
-					if (fenv_on() && re[s.rpos].reg == 0x00) {
+					if ((fenv_on() && re[s.rpos].reg == 0x00)
+					    || re[s.rpos].reg == 0x04) {
 						s.rpos++;         // 式で出すので録画の分は捨てる
 						continue;
 					}
@@ -335,7 +339,7 @@ public:
 			}
 			live++;
 			// **フィルタの包絡線を式で動かす**（録画の代わり）
-			if (fenv_on() && s.cal && s.elem) {
+			if (fenv_on() && s.elem) {
 				bool moved = false;
 				while (clock >= s.fnext) {
 					fenv_step(s);
@@ -344,8 +348,7 @@ public:
 				}
 				if (moved) {
 					s.cut = fenv_cut(s);
-					m_poke(u32(i) * 64 + 0x00,
-					       cutoff_reg(s.cut, *s.cal, s.part, s.elem, s.note));
+					m_poke(u32(i) * 64 + 0x00, cut_with_cc(s, s.cut));
 				}
 				if (s.fnext < next)
 					next = s.fnext;
@@ -364,13 +367,14 @@ public:
 			}
 			if (s.glide && s.glide_next < next)
 				next = s.glide_next;
-			if (s.tpos >= s.cal->filter_env.size())
+			if (!s.cal || s.tpos >= s.cal->filter_env.size())
 				continue;
 			const std::vector<nv::fstep> &fe = s.cal->filter_env;
 			while (s.tpos < fe.size() && !fe[s.tpos].rel &&
 			       u64(s64(s.tstart + fe[s.tpos].at) + EG_LAG) <= clock) {
 				u16 v = fe[s.tpos].v;
-				if (fenv_on() && fe[s.tpos].reg == 0x00) {
+				if ((fenv_on() && fe[s.tpos].reg == 0x00)
+				    || fe[s.tpos].reg == 0x04) {
 					s.tpos++;          // 式で出すので、録画の分は捨てる
 					continue;
 				}
@@ -833,15 +837,26 @@ private:
 			return;
 		s.fvel = vel;
 		s.fadj = nv::fenv_key_adj(s.elem, s.note) + nv::fenv_vel_adj(s.elem, vel);
-		s.facc = nv::fenv_target(m_rom, s.elem, s.elem[55], s.fvel);
-		s.ftgt = s.facc;
+		s.ftgt = nv::fenv_target(m_rom, s.elem, s.elem[55], s.fvel);
+		// **立ち上がりの段**。byte50 が 63（即到達）なら段 0 の行き先から
+		// 始まり、そうでなければ byte54 から byte50 の速さで登る（6.71）
+		s.facc = nv::cut_exact() ? nv::fenv_init(m_rom, s.elem, s.fvel) : s.ftgt;
 		s.finc = 0;
 		s.fstage = 0;
-		fenv_next(s);
+		if (s.facc == s.ftgt) {
+			fenv_next(s);
+		} else {
+			int rate = int(s.elem[50]) + s.fadj;
+			rate = rate < 0 ? 0 : (rate > 63 ? 63 : rate);
+			s.finc = nv::fenv_inc(m_rom, rate);
+			if (s.facc > s.ftgt && s.finc != nv::FENV_NEXT)
+				s.finc = -s.finc;
+		}
 		// **格子の目は録画の 1 段目から取る**。録画の時刻は firmware が
 		// 実際に書いた時刻なので、そこが格子の目そのもの。
 		// 位相を別に測るより、これがいちばん近い（実測で確かめた）
 		u32 at0 = FENV_TICK;
+		if (s.cal)
 		for (const nv::fstep &e : s.cal->filter_env)
 			if (e.reg == 0x00 && !e.rel) { at0 = e.at; break; }
 		// 鍵を押した直後の 1 目は、実機も値を動かさない（張った値を書くだけ）。
@@ -856,7 +871,7 @@ private:
 	void fenv_release(slot_use &s)
 	{
 		const u8 *e = s.elem;
-		if (!e || !m_rom || !fenv_on() || !s.cal)
+		if (!e || !m_rom || !fenv_on())
 			return;
 		int rate = int(e[53]) + s.fadj;
 		if (rate < 0) rate = 0;
@@ -883,8 +898,24 @@ private:
 	}
 
 	// いまの切る高さ（写し取った鍵を押した時点の値を基準に、包絡線の差ぶんを足す）
+	// 写し取りがあれば CC74 の差ぶん、無ければ 64 からの差ぶんを乗せる
+	u16 cut_with_cc(const slot_use &s, u16 base) const
+	{
+		if (s.cal)
+			return cutoff_reg(base, *s.cal, s.part, s.elem, s.note);
+		const int now = m_cc[s.part].bri;
+		if (now < 0 || now == 64)
+			return base;
+		int v = int(base & 0xfff) + nv::bright_shift(now);
+		v = v < 0 ? 0 : (v > nv::CUTOFF_MAX ? nv::CUTOFF_MAX : v);
+		return u16((base & 0xf000) | u16(v));
+	}
+
 	u16 fenv_cut(const slot_use &s) const
 	{
+		// 式だけで出す道（写し取りが無いときは必ずこちら）
+		if (!s.cal || nv::cut_exact())
+			return nv::cutoff_of(m_rom, s.elem, s.note, s.fvel, s.facc);
 		const u16 base = s.cal->reg[0x00];
 		const int init = nv::fenv_target(m_rom, s.elem, s.elem[55], s.fvel) >> 2;
 		int v = int(base & 0xfff) - init + (s.facc >> 2);
@@ -1088,11 +1119,11 @@ public:
 			su.tpos = 0;
 			su.tstart = m_clock;
 			// **フィルタの包絡線を式で動かす**（録画の代わり）
-			if (fenv_on() && c) {
+			if (fenv_on() && (c || nv::cut_exact())) {
 				su.note = note;
 				fenv_start(su, vel);
 			}
-			if (c) {
+			if (c || (nv::cut_exact() && fenv_on())) {
 				m_traj = true;
 				m_traj_next = 0;       // つぎの tick で見直す
 			}
@@ -1129,8 +1160,9 @@ public:
 			if (c) {
 				sr.set(0x0a, lfo_reg(su.lfo, *c, part));
 				sr.set(0x00, cutoff_reg(su.cut, *c, part, el, note));
-				if (c->has(0x04))
-					sr.set(0x04, reso_reg(c->reg[0x04], *c, part));
+				// **共振は式で出した値に CC71 の差ぶんを乗せる**（写し取った
+				// 値ではない。強さで変わるので写し取りは使えない。6.69）
+				sr.set(0x04, reso_reg(sr.v[0x04], *c, part));
 				if (c->has(0x33))
 					sr.set(0x33, send_reg(*c, 0x33, false, pc.rev, c->cal_rev));
 				if (c->has(0x34))
@@ -1194,7 +1226,8 @@ public:
 			s.rel_att = s.att;
 			s.rpos = 0;
 			fenv_release(s);
-			if (s.cal && !s.cal->filter_env.empty()) {
+			if ((s.cal && !s.cal->filter_env.empty())
+			    || (nv::cut_exact() && fenv_on() && s.elem)) {
 				m_traj = true;
 				m_traj_next = 0;
 			}

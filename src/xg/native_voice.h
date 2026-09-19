@@ -14,6 +14,7 @@
 
 #include "compat/mamecompat.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -378,13 +379,48 @@ inline int peg_cents(const u8 *elem, int level, int vel)
 	return d > 0 ? v : -v;
 }
 
-// 速さのレジスタ（`0x0b` の上位バイト）。実機の `0x12BCF0`
-inline int peg_rate_reg(const u8 *rom, const u8 *elem, int part_rate = 64)
+// 速さの**鍵追従**（実機の `0x12BC72`）。byte24 が深さ、byte25 が折れ点。
+// SquareLd（byte24=62・byte25=60）は鍵 60 で 63（即到達）、鍵 72 で 61、
+// 鍵 84 で 60 になり、実機とぴったり合った
+inline int peg_rate_key_adj(const u8 *elem, int note)
+{
+	const int d = int(elem[24]) - 64;
+	if (!d)
+		return 0;
+	return s16v((note - int(elem[25])) * (d * 16)) >> 8;   // 算術シフト（下へ丸める）
+}
+
+// 速さの**強さ追従**（実機の `0x12BCB2`）。byte23 が深さ
+inline int peg_rate_vel_adj(const u8 *elem, int vel)
+{
+	const int d = int(elem[23]) - 64;
+	if (!d)
+		return 0;
+	const int a = d * 16;
+	const int m = a >= 0 ? a * (vel & 0x7f) : (0x80 - (vel & 0x7f)) * (-a);
+	return int((u32(s16v(m)) & 0xffff) >> 8);
+}
+
+// 速さのレジスタ（`0x0b` の上位バイト）。実機の `0x12BCF0`。
+// 途中で何度も符号つき 1 バイトに切り詰めている
+inline int peg_rate_idx(const u8 *elem, int note, int vel, int part_rate = 64)
 {
 	int r = int(elem[26]) + (int(s8(u8(64 - part_rate))) >> 2);
-	if (r > 63) r = 63;
-	if (r < 0)  r = 0;
-	return rd16s(rom, PEG_RATE_TAB + u32(r) * 2);
+	if (s8(u8(r)) > 63) r = 63;
+	if (s8(u8(r)) < 0)  r = 0;
+	r += peg_rate_key_adj(elem, note);
+	if (s8(u8(r)) < 0)  r = 0;
+	if (s8(u8(r)) >= 63)
+		return 63;
+	r += peg_rate_vel_adj(elem, vel);
+	if (s8(u8(r)) > 62) r = 62;
+	return r;
+}
+
+inline int peg_rate_reg(const u8 *rom, const u8 *elem, int note = 60, int vel = 100,
+                        int part_rate = 64)
+{
+	return rd16s(rom, PEG_RATE_TAB + u32(peg_rate_idx(elem, note, vel, part_rate)) * 2);
 }
 
 // `SMU2000_NO_PEG` を立てると音程の包絡線をやめる（比べるための逃げ道）
@@ -596,6 +632,47 @@ inline int rate_scale(int raw, int corr)
 	return v * 2;
 }
 
+// **減衰 2 だけは下限が 0**（実機の `0x127338`。減衰 1 の `0x1272F4` は 1）。
+// 表の頭は 1,1,2,2,… なので、0 と 1 で値が変わる。byte75 が 0 の音色
+// （Trumpet・BrssSec・SquareLd）で実機は 1、こちらは 2 になっていた
+inline int rate_scale2(int raw, int corr)
+{
+	int v = raw + corr;
+	if (v < 0) v = 0;
+	if (v > 63) v = 63;
+	return v * 2;
+}
+
+// ---- **共振**（レジスタ `0x04`）。実機の `0x12806A` と `0x12810A`
+//
+//   目減り = (18 × |byte81 - 64| × (byte81>64 ? 0x80-強さ : 強さ)) & 0xffff >> 8
+//   値     = max(byte35 - 目減り, 0)
+//   パート（+25）の下駄を足して、>>1 して 5bit に収める
+//
+// 18 音色 × 強さ 30/100/127 の 54 通りで実機と一致した（EPiano1 は強さで
+// 要素が切り替わる音色で、鳴っている側の要素で計算すれば合う）
+inline int reso_vel_drop(const u8 *elem, int vel)
+{
+	const int d = int(elem[81]) - 64;
+	if (!d)
+		return 0;
+	const int x = 18 * (d > 0 ? d : -d);
+	const int m = d > 0 ? (0x80 - (vel & 0x7f)) : (vel & 0x7f);
+	return int((u32(x * m) & 0xffff) >> 8);
+}
+
+inline int reso_level(const u8 *elem, int vel, int part_res = 64)
+{
+	int v = int(elem[35]) - reso_vel_drop(elem, vel);
+	if (v < 0)
+		v = 0;
+	const int p = part_res - 64;
+	int r = p >= 0 ? (p >= v ? p : v) : p + v;
+	if (r < 0)
+		r = 0;
+	return (r >> 1) & 31;
+}
+
 // 鍵を離すときに 0x09 へ入れる値。
 // 上位のビット 15 が「離せ」の印で、残りが離しの速さ（swp30.cpp の release_glo_w）。
 // 速さは減衰と同じ表を **byte76** で引き、鍵の補正も同じだけ乗る
@@ -679,6 +756,56 @@ inline const voice_cal *match_cal(const std::vector<voice_cal> &cals, u32 want, 
 	return nullptr;
 }
 
+// **フィルタの包絡線の初めの値**（実機の `0x1288E4`-`0x12895C`）。
+// 立ち上がりが最速（byte50 が 63）の音色は**いきなり段 0 の行き先から
+// 始まる**。そうでなければ byte54（既定は 64 ＝ ずれ 0）から始めて、
+// byte50 の速さで段 0 の行き先へ登る。
+// GrandPno（byte50=63）は 0x400、Flute（byte50=62）は 0 で実機と一致した
+inline int fenv_start_level(const u8 *elem)
+{
+	return elem[50] >= 63 ? elem[55] : elem[54];
+}
+
+inline int fenv_init(const u8 *rom, const u8 *elem, int vel)
+{
+	return fenv_target(rom, elem, fenv_start_level(elem), vel);
+}
+
+// **鍵を押した瞬間の `0x00`**（実機の `0x12AC98`）。
+//   表 0x1E5B58[byte37] ＋ 鍵の追従 を 0-0xFFF に収め、
+//   そこへ包絡線の初めの値（>>2）を足して下 11bit を取る
+// 包絡線の今の値（facc）を渡すと、そのときの `0x00` を返す。
+// 実機は 10ms ごとにこれを書き直している
+// `SMU2000_CUT_EXACT=1` で、鍵を押した瞬間の `0x00` を実機と同じ式にする。
+// 既定は切（上の但し書きを見よ）
+inline bool cut_exact()
+{
+	static const bool on = std::getenv("SMU2000_CUT_EXACT") != nullptr;
+	return on;
+}
+
+inline u16 cutoff_of(const u8 *rom, const u8 *elem, int note, int vel, int facc)
+{
+	int cut = int(rd16(rom, CUTOFF_TAB + u32(elem[37]) * 2))
+	        + cutoff_key_curve(rom, elem, note);
+	cut = cut < 0 ? 0 : (cut > 0xfff ? 0xfff : cut);
+	cut += facc >> 2;
+	// 実機（0x127E08）は足したあとも 0xFFF で頭打ちにして、下 11bit を取る。
+	// そのうえで `0x12E79C` が「**共振が 4 未満なら 0x7C0 で頭打ち**」を掛ける
+	// （EPiano1 は強さ 100 で共振 0 → 0x7C0、強さ 127 で共振 4 → 0x7FF）
+	if (cut > 0xfff) cut = 0xfff;
+	cut &= 0x7ff;
+	if (cut < 0) cut = 0;
+	if (reso_level(elem, vel) < 4 && cut > CUTOFF_MAX)
+		cut = CUTOFF_MAX;
+	return u16(0x1000 | u16(cut));
+}
+
+inline u16 cutoff_keyon(const u8 *rom, const u8 *elem, int note, int vel)
+{
+	return cutoff_of(rom, elem, note, vel, fenv_init(rom, elem, vel));
+}
+
 // 1 音ぶんのレジスタを作る。att は 0x09 に入れる減衰（0-255。小さいほど大きい音）
 inline slot_regs build_note(const u8 *rom, const u8 *elem, int note, int att,
                             const voice_cal *cal = nullptr,
@@ -694,21 +821,37 @@ inline slot_regs build_note(const u8 *rom, const u8 *elem, int note, int att,
 	// --- フィルタ。切る高さは ROM の表（0x1E5B58）を byte37 で引く。
 	// 実機はここに鍵と強さの倍率を掛ける（`0x127FA4`）が、その係数がまだ分からない。
 	// 倍率 1 として表を引くだけでも、開き切りよりはずっと実機に近い
-	r.set(0x00, u16(0x1000 | (rd16(rom, CUTOFF_TAB + u32(elem[37]) * 2) & 0x7ff)));
+	// 実機（0x12AC98）は表を引いた値に**鍵の追従**（0x12C1E4）を足して
+	// 0-0xFFF に収める。鍵の追従を入れていなかったので、Flute のように
+	// 曲線を持つ音色で鍵を押した瞬間の値がずれていた（6.71）
+	// **鍵を押した瞬間の値そのもの**は `cutoff_keyon` が出せる（14 音色 ×
+	// 鍵 5 通り × 強さ 3 通りで実機と完全に一致）。けれども今はまだ既定で
+	// 使えない: 写し取りの無いスロットはフィルタの包絡線が動かないので、
+	// 包絡線の初めのぶんだけ開いたままになり、試し曲が 0.36dB 明るくなる。
+	// `SMU2000_CUT_EXACT=1` で試せる（doc/native-engine.md の 6.71）
+	r.set(0x00, cut_exact()
+	            ? cutoff_keyon(rom, elem, note, vel)
+	            : u16(0x1000 | (rd16(rom, CUTOFF_TAB + u32(elem[37]) * 2) & 0x7ff)));
 	// **鍵を押した瞬間の 0x01 は 0xFFFF**（実機は毎回そう書いて、最初の
 	// 包絡線の目で本当の値に置き換える）。14 音色を実機と突き合わせて
 	// 確かめた（doc/native-engine.md の 6.67）
 	r.set(0x01, 0xffff);
-	r.set(0x02, u16(0x8000 | elem[82]));       // 402 組の 97%
+	// フィルタの第 2 係数。実機（0x12AFCE）は **byte82 を 16 倍**して
+	// 0x800 の下駄を履かせ、0x800-0xFFF に収めてから下 11bit を取る。
+	// つまり素直に byte82 * 16 で、0x7FF で頭打ち（DistGtr の 0x180、
+	// Kitayama の 0x570 が実機と一致した）
+	r.set(0x02, u16(0x8000 | u16(std::min(0x7ff, int(elem[82]) * 16))));
 	r.set(0x03, d.post);
-	// フィルタの第 2 パラメータ（共振）。firmware は byte35 を 1 ビット落として
-	// 5bit にし、レジスタの上 5bit に置く（0x1280FC）。402 組の 90% が一致
-	r.set(0x04, u16((((elem[35] >> 1) & 31) << 11)));
-	r.set(0x05, d.lfo_amp);
+	// フィルタの第 2 パラメータ（共振）。byte35 から強さぶんを引いて（byte81）、
+	// 1 ビット落として 5bit にする（0x12806A）。18 音色 × 強さ 3 通りで一致
+	r.set(0x04, u16(reso_level(elem, vel) << 11));
+	// LFO の深さ（音量側）。実機（0x129B34）は byte16 を 2 倍して下位に置く。
+	// 既定の音色はほとんど 0 で、Vibes だけ byte16=2 → 下位 4
+	r.set(0x05, u16((d.lfo_amp & 0xff00) | u16((elem[16] * 2) & 0x7f)));
 	// LFO の型と刻み。上位は 0x40 | byte11（402 組で例外なし）、下位（音程の深さ）は 0
 	r.set(0x0a, u16((0x40 | (elem[11] & 0x3f)) << 8));
 	// 音程の包絡線。速さが 127（即到達）のときだけ初めの高さは byte31 を使う
-	const int prate = peg_rate_reg(rom, elem);
+	const int prate = peg_rate_reg(rom, elem, note, vel);
 	r.set(0x0b, u16(prate << 8));
 	r.set(0x10, peg_reg(rom, peg_cents(elem, prate == 127 ? elem[31] : elem[30], vel)));
 
@@ -725,7 +868,7 @@ inline slot_regs build_note(const u8 *rom, const u8 *elem, int note, int att,
 	const int a1 = cal && cal->have ? cal->dec_adj[0] : 0;
 	const int a2 = cal && cal->have ? cal->dec_adj[1] : 0;
 	const u8 dc1 = rom[DECAY_TAB  + clamp_idx(rate_scale(elem[74], corr) + a1)];
-	const u8 dc2 = rom[DECAY_TAB  + clamp_idx(rate_scale(elem[75], corr) + a2)];
+	const u8 dc2 = rom[DECAY_TAB  + clamp_idx(rate_scale2(elem[75], corr) + a2)];
 	// はじめの音量。アタックが最速（63）のときだけ 0 で、あとは 0x7e
 	r.set(0x06, u16(atk << 8 | (elem[73] >= 0x3f ? 0x00 : 0x7e)));
 	r.set(0x07, u16(dc1 << 8 | (((0x7f - elem[77]) * 2) & 0xff)));
@@ -765,7 +908,7 @@ inline slot_regs build_note(const u8 *rom, const u8 *elem, int note, int att,
 		// **0x0b・0x10 はもう写し取らない**。音程の包絡線を式で出すようになった
 		// （写し取りは包絡線が終わったあとの値を拾うので、入れると出だしの
 		//  しゃくりが丸ごと消えていた。doc/native-engine.md の 6.68）
-		static const int COPY[] = { 0x00, 0x01, 0x02, 0x04, 0x05, 0x06, 0x0a,
+		static const int COPY[] = { 0x00, 0x01, 0x06, 0x0a,
 		                            0x20, 0x22, 0x24, 0x26, 0x28, 0x2a,
 		                            0x32, 0x33, 0x34, 0x35, 0x36, 0x37 };
 		for (int i : COPY)
