@@ -86,6 +86,21 @@ void show_ctl(mu2000 &mu, const char *tag)
 	std::printf("\n");
 }
 
+// 液晶の中身を 16 進で返す（2 行 × 24 桁）。**字形を起こすときに
+// 「どのコードが実際に使われるか」を数える**のに使う（--lcd-hex）
+std::string lcd_hex(mu2000 &mu)
+{
+	const u8 *dd = mu.lcd().ddram();
+	std::string out;
+	char buf[8];
+	for (int line = 0; line < 2; line++)
+		for (int pos = 0; pos < 24; pos++) {
+			std::snprintf(buf, sizeof buf, "%02x ", dd[line * 0x40 + pos]);
+			out += buf;
+		}
+	return out;
+}
+
 // LCD の 2 行を 1 行にして返す（窓に出ている 24 桁ぶん）。--trace 用
 std::string lcd_line(mu2000 &mu)
 {
@@ -183,12 +198,17 @@ int main(int argc, char **argv)
 	std::string dir, keys;
 	bool list = false;
 	int turn = 0;
+	double turn_at = -1.0;
+	double lcd_at = -1.0;
+	int turn_at_n = 0;
+	std::string wavfile;
 	double hold = 0.0;
 	std::string holdkey;
 	std::string midfile;
 	double play = 0.0;
 	bool watch = false;
 	bool trace = false;
+	bool lcd_hex_on = false;
 	double settle = 1.0;
 	bool usb = false;
 	int native = 0;
@@ -197,11 +217,20 @@ int main(int argc, char **argv)
 		if (!std::strcmp(argv[i], "--keys") && i + 1 < argc) keys = argv[++i];
 		else if (!std::strcmp(argv[i], "--list")) list = true;
 		else if (!std::strcmp(argv[i], "--turn") && i + 1 < argc) turn = std::atoi(argv[++i]);
+		// **MIDI を流している最中にダイヤルを回す**（パネルで音色を替える道を見る）
+		else if (!std::strcmp(argv[i], "--turn-at") && i + 2 < argc)
+			{ turn_at = std::atof(argv[++i]); turn_at_n = std::atoi(argv[++i]); }
+		// 書き出す wav（音を聞き比べる用）
+		else if (!std::strcmp(argv[i], "--wav") && i + 1 < argc) wavfile = argv[++i];
+		// **その時刻の液晶の中身**を 16 進で出す（メーターの棒を突き合わせる用）
+		else if (!std::strcmp(argv[i], "--lcd-at") && i + 1 < argc) lcd_at = std::atof(argv[++i]);
 		else if (!std::strcmp(argv[i], "--hold") && i + 2 < argc) { holdkey = argv[++i]; hold = std::atof(argv[++i]); }
 		else if (!std::strcmp(argv[i], "--settle") && i + 1 < argc) settle = std::atof(argv[++i]);
 		else if (!std::strcmp(argv[i], "--mid") && i + 2 < argc) { midfile = argv[++i]; play = std::atof(argv[++i]); }
 		else if (!std::strcmp(argv[i], "--watch")) watch = true;
 		else if (!std::strcmp(argv[i], "--trace")) trace = true;
+		// **液晶の中身を 16 進でも出す**（字形を起こすときのコードの棚卸し）
+		else if (!std::strcmp(argv[i], "--lcd-hex")) { trace = true; lcd_hex_on = true; }
 		else if (!std::strcmp(argv[i], "--usb")) usb = true;
 		// **native の口**（firmware を細く回す）でパネルを触ってみる。
 		// 段の番号は set_native_engine と同じ（doc/native-engine.md）
@@ -266,7 +295,8 @@ int main(int argc, char **argv)
 	}
 
 	if (trace)
-		std::printf("  %-10s %s\n", "(起動)", lcd_line(mu).c_str());
+		std::printf("  %-10s %s\n", "(起動)",
+		            (lcd_hex_on ? lcd_hex(mu) : lcd_line(mu)).c_str());
 
 	if (!keys.empty()) {
 		size_t at = 0;
@@ -286,7 +316,8 @@ int main(int argc, char **argv)
 					tap(mu, a.b);
 					idle(mu, 0.3);
 					if (trace)
-						std::printf("  %-10s %s\n", a.key, lcd_line(mu).c_str());
+						std::printf("  %-10s %s\n", a.key,
+					            (lcd_hex_on ? lcd_hex(mu) : lcd_line(mu)).c_str());
 					else
 						show_ctl(mu, mu2000::button_name(a.b));
 					found = true;
@@ -308,19 +339,66 @@ int main(int argc, char **argv)
 			size_t at = 0;
 			const size_t total = size_t(play * RATE);
 			s32 l, r;
+			std::vector<s16> pcm;
+			if (!wavfile.empty())
+				pcm.reserve(total * 2);
+			bool turned = false;
 			for (size_t i = 0; i < total; i++) {
 				const double now = double(i) / RATE;
 				while (at < evs.size() && evs[at].time <= now) {
 					for (u8 b : evs[at].bytes) mu.midi_in(b);
 					at++;
 				}
+				if (lcd_at >= 0.0 && now >= lcd_at) {
+					lcd_at = -1.0;
+					const u8 *dd = mu.lcd().ddram();
+					std::printf("LCDHEX");
+					for (int line = 0; line < 2; line++)
+						for (int pos = 0; pos < 24; pos++)
+							std::printf(" %02x", dd[line * 0x40 + pos]);
+					std::printf("\n");
+				}
+				if (!turned && turn_at >= 0.0 && now >= turn_at) {
+					turned = true;
+					mu.turn_encoder(turn_at_n);
+					std::printf("  %.2f 秒でダイヤルを %+d 目盛り\n", now, turn_at_n);
+				}
 				mu.run_sample(l, r);
+				if (!wavfile.empty()) {
+					auto cl = [](s32 v) {
+						const s32 m = 32767;
+						return s16(v > m ? m : (v < -m - 1 ? -m - 1 : v));
+					};
+					pcm.push_back(cl(l >> 8));
+					pcm.push_back(cl(r >> 8));
+				}
 				// どのマスにどの文字コードが出たかを数える
 				if (watch && (i % 441) == 0) {
 					const u8 *dd = mu.lcd().ddram();
 					for (int ln = 0; ln < 2; ln++)
 						for (int pos = 0; pos < 40; pos++)
 							seen[ln * 40 + pos][dd[ln * 0x40 + pos]]++;
+				}
+			}
+			if (!wavfile.empty()) {
+				// 素の WAV（44.1kHz・16bit・2ch）
+				FILE *f = std::fopen(wavfile.c_str(), "wb");
+				if (f) {
+					const u32 bytes = u32(pcm.size() * 2);
+					const u8 hdr[] = { 'R','I','F','F',0,0,0,0,'W','A','V','E',
+					                   'f','m','t',' ',16,0,0,0,1,0,2,0,
+					                   0x44,0xAC,0,0, 0x10,0xB1,2,0, 4,0,16,0,
+					                   'd','a','t','a',0,0,0,0 };
+					u8 h[44];
+					std::memcpy(h, hdr, 44);
+					const u32 riff = bytes + 36;
+					h[4] = u8(riff); h[5] = u8(riff >> 8); h[6] = u8(riff >> 16); h[7] = u8(riff >> 24);
+					h[40] = u8(bytes); h[41] = u8(bytes >> 8);
+					h[42] = u8(bytes >> 16); h[43] = u8(bytes >> 24);
+					std::fwrite(h, 1, 44, f);
+					std::fwrite(pcm.data(), 2, pcm.size(), f);
+					std::fclose(f);
+					std::printf("  %s に書き出した\n", wavfile.c_str());
 				}
 			}
 		}

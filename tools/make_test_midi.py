@@ -903,6 +903,133 @@ def case_fxchange():
     return [track(seq(ev))], 10.0
 
 
+def case_dialloop():
+    """**ノートオン・ノートオフだけを繰り返す曲**（Domino のループ再生と同じ形）。
+    音色の指定を 1 度も送らないので、**パネルのダイヤルで音色を替える道**を
+    そのまま見られる（`run_tests.py` の「ダイヤル」がこれを使う）。
+
+    native の口は音色を自分で引くので、パネルで替えられたことに気づけないと
+    「画面は変わるのに音が変わらない」になる（doc/native-engine.md の 6.146）"""
+    ev = head()
+    t = 1.2
+    for i in range(16):
+        ev += note(0, 60 + (i % 3) * 4, 100, t, 0.4)
+        t += 0.5
+    return [track(seq(ev))], t + 1.0
+
+
+def case_panrnd():
+    """**パンの Rnd**（パートのパン = 0）と、その手前の値。
+
+    実機はパンが 0 のとき、**要素を 1 つ鳴らすたびに 8bit の乱数を進めて**
+    その上位 7bit をパンの位置にする（種はワーク RAM の 0x43E94C、
+    `x = (0xB3 * x + 0x11) & 0xFF`）。音色が持つパンの寄りは無視され、
+    送り（リバーブ・コーラス）は位置 0 で引かれるぶんだけ目減りする。
+    doc/native-engine.md の 6.147。
+
+    要素が 2 つある音色（Warm Pad）で、1 音に 2 回進むことも見る"""
+    ev = head()
+    ev += [(0.9, bytes([0xc0, 89]))]                  # Warm Pad（要素 2 つ）
+    ev += [(0.95, bytes([0xb0, 0x5b, 64])), (0.96, bytes([0xb0, 0x5d, 64]))]
+    ev += note(0, 60, 100, 1.2, 0.6)                  # 1 音目。ここで写し取る
+    t = 2.2
+    # 左端 → 中央 → 右端 → Rnd
+    for val in (1, 64, 127, 0):
+        ev += [(t, xg([0x08, 0x00, 0x0e, val]))]
+        for i in range(4):
+            ev += note(0, 60 + i * 3, 100, t + 0.25 + i * 0.45, 0.35)
+        t += 2.2
+    return [track(seq(ev))], t + 1.0
+
+
+def case_meter():
+    """**液晶のメーター**（doc/native-engine.md の 6.148）。
+
+    実機は「演奏画面を描く係」でメーターを描くが、これは firmware が自分で
+    音を持っている間しか呼ばれない。native の口は note on を firmware に
+    渡さないので、そのままだと棒が 1 本も動かない（利用者からの報告）。
+    native が棒の字を液晶へ直に置くようにしてある。
+
+    15 パートに別々の強さと音量で 1 音ずつ。1 音目で写し取り、2 音目を
+    native が鳴らす。`run_tests.py` の「メーター」が液晶を突き合わせる"""
+    ev = head()
+    chs = [c for c in range(16) if c != 9]
+    combos = [(32, 32), (64, 64), (96, 100), (110, 127), (127, 100),
+              (48, 80), (80, 48), (100, 110), (120, 64), (24, 127),
+              (64, 32), (96, 127), (40, 100), (72, 96), (112, 112)]
+    for i, ch in enumerate(chs):
+        vel, vol = combos[i]
+        ev += [(1.0, bytes([0xc0 | ch, 0x00])), (1.1, bytes([0xb0 | ch, 0x07, vol]))]
+        ev += note(ch, 60, vel, 1.3, 0.5)      # 1 音目（写し取り）
+        ev += note(ch, 62, vel, 2.6, 1.6)      # 2 音目（native が鳴らす）
+    return [track(seq(ev))], 4.8
+
+
+def case_filtcc():
+    """**明るさ（CC74）とレゾナンス（CC71）**、それと
+    **ポルタメントコントロール（CC84）**。
+
+    どれも native の口が自分でさばく CC なのに、試験が 1 度も送っていなかった
+    （`handles_cc` にあるのに `make_test_midi.py` に無い）。CC74 は
+    `cut_with_cc`、CC71 は `reso_reg`、CC84 は「次の音の滑り出しの鍵」を
+    決める道を通る。
+
+    CC84 は「その鍵から滑り出す」指定なので、**ポルタメントが入っていなくても
+    次の 1 音だけ滑る**（doc/native-engine.md の 6.41）"""
+    ev = head()
+    ev += [(1.0, bytes([0xc0, 0x50]))]                # Square Lead（倍音が多い）
+    ev += note(0, 60, 100, 1.2, 0.8)                  # 1 音目。ここで写し取る
+    # 明るさを振る
+    for i, v in enumerate((0x20, 0x50, 0x7f, 0x40)):
+        ev += [(2.1 + i * 0.9, bytes([0xb0, 0x4a, v]))]
+        ev += note(0, 62 + i, 100, 2.2 + i * 0.9, 0.7)
+    t = 2.1 + 4 * 0.9
+    # レゾナンスを振る
+    for i, v in enumerate((0x20, 0x60, 0x40)):
+        ev += [(t + i * 0.9, bytes([0xb0, 0x47, v]))]
+        ev += note(0, 60 + i * 3, 100, t + 0.1 + i * 0.9, 0.7)
+    t += 3 * 0.9
+    # ポルタメントコントロール（CC84 = この鍵から滑る）
+    ev += [(t, bytes([0xb0, 0x05, 0x50]))]            # CC5 滑る速さ
+    ev += [(t + 0.1, bytes([0xb0, 0x54, 48]))]        # 鍵 48 から
+    ev += note(0, 72, 100, t + 0.2, 1.2)
+    ev += [(t + 1.5, bytes([0xb0, 0x54, 84]))]        # 鍵 84 から
+    ev += note(0, 60, 100, t + 1.6, 1.2)
+    return [track(seq(ev))], t + 3.2
+
+
+def case_keyrange():
+    """**鍵の範囲**（08 pp 0F 下限・10 上限）と**キーアサイン**（08 pp 06）。
+
+    実機は範囲の外の鍵を鳴らさない。native がそこを見ていないと、
+    **実機が黙っている所で音が出る**（いちばん分かりやすい食い違い）。
+
+    キーアサイン 0（シングル）は、同じ鍵をもう一度押すと前の音を止める。
+    1（マルチ）は重ねる。余韻の長い音色で押し直すと差が出る"""
+    ev = head()
+    ev += [(1.0, bytes([0xc0, 0x30]))]                # Strings（余韻が長い）
+    ev += note(0, 60, 100, 1.2, 0.6)                  # 1 音目。ここで写し取る
+    # 鍵の範囲を 60-72 に絞る
+    ev += [(2.0, xg([0x08, 0x00, 0x0f, 60])),
+           (2.05, xg([0x08, 0x00, 0x10, 72]))]
+    for i, k in enumerate((48, 59, 60, 67, 72, 73, 84)):
+        ev += note(0, k, 100, 2.4 + i * 0.5, 0.4)
+    t = 2.4 + 7 * 0.5
+    # 範囲を戻す
+    ev += [(t, xg([0x08, 0x00, 0x0f, 0])),
+           (t + 0.05, xg([0x08, 0x00, 0x10, 127]))]
+    # キーアサイン シングル → 同じ鍵を続けて押す
+    ev += [(t + 0.4, xg([0x08, 0x00, 0x06, 0]))]
+    for i in range(3):
+        ev += note(0, 64, 100, t + 0.6 + i * 0.35, 1.2)
+    t += 0.6 + 3 * 0.35 + 1.4
+    # マルチ
+    ev += [(t, xg([0x08, 0x00, 0x06, 1]))]
+    for i in range(3):
+        ev += note(0, 64, 100, t + 0.2 + i * 0.35, 1.2)
+    return [track(seq(ev))], t + 3.0
+
+
 CASES = {
     "piano":   case_piano,
     "chord":   case_chord,
@@ -937,6 +1064,11 @@ CASES = {
     "pedretrig": case_pedretrig,
     "edges":   case_edges,
     "fxchange": case_fxchange,
+    "dialloop": case_dialloop,
+    "panrnd": case_panrnd,
+    "meter": case_meter,
+    "filtcc": case_filtcc,
+    "keyrange": case_keyrange,
 }
 
 
