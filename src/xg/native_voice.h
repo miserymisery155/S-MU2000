@@ -88,6 +88,11 @@ inline int eg_dec1_cc(int base, int cc)
 }
 constexpr u32 DECAY_TAB  = 0x1F4E38;   // 減衰の速さ（128 バイト）
 constexpr u32 VEL_CURVE  = 0x1E5E5E;   // 強さの曲線（128 バイトの行が並ぶ。行 0 はそのまま）
+// **つまみの割り当て「音量」の表**（6.195。実機 0x12A782）。
+// |深さ - 64| を索引に引いて、値と掛けて 8 びったものを
+// パートの目盛り（0-128）に足す。中身は 3 × 索引
+constexpr u32 AMP_ASSIGN_TAB = 0x1E6899;
+
 constexpr u32 LEVEL_TAB  = 0x1E6798;   // 0-127 → 減衰（128 バイトの行が並ぶ。行 1 が 0x1E6818）
 constexpr u32 SLOT_TABLE = 0x1F4F58;   // スロット番号 → レジスタの先頭（4 バイト × 64）
 constexpr u32 CUTOFF_TAB = 0x1E5B58;   // フィルタの切る高さ（16bit。索引は記録の byte37）
@@ -252,6 +257,15 @@ inline int porta_step(const u8 *rom, int cc5)
 	return cc5 < 24 ? raw * 512 : raw * 2;
 }
 
+// **滑りの残りをセントに直す**（6.197）。`glide` はセント × 256 で、
+// 上へ滑るときは負。C++ の `/` は 0 の側へ切り捨てるので、
+// そのままだと**上へ滑るときだけ 1 セント高め**になる。
+// 実機は下へ落とす（CC5=32 の滑りで、レジスタが 1 だけ高かった）
+inline int glide_cents(int glide)
+{
+	return glide >= 0 ? glide / 256 : -((-glide + 255) / 256);
+}
+
 inline u16 pitch_reg(const wave_info &w, int note, int follow = 100,
                      int cents_extra = 0, int pivot = 60)
 {
@@ -329,6 +343,17 @@ inline int level_without_gain(int l, int gain)
 }
 
 // その線形の値（0-128）を減衰に直す
+// つまみ 1 つぶんの、目盛りへの足し分（6.195）
+inline int amp_assign(const u8 *rom, int depth, int value)
+{
+	const int d = depth - 64;
+	if (!d || !value)
+		return 0;
+	const int t = int(rom[AMP_ASSIGN_TAB + u32(d < 0 ? -d : d)]);
+	const int v = int(u16(t * value) >> 8);
+	return d < 0 ? -v : v;
+}
+
 inline int gain_att(const u8 *rom, int gain)
 {
 	if (gain <= 0)
@@ -451,6 +476,7 @@ inline int mod_depth(int cc)
 		i++;
 	return int(STEP[i]);
 }
+
 
 // ピッチベンド → セント。firmware は 2 回とも 0 の側へ切り捨てる
 // （ベンド幅 2 半音・目一杯で 167 目盛り。実測と一致）
@@ -714,6 +740,23 @@ constexpr u32 VIB_CAP_TAB = 0x1E6370;   // パートの深さ → 頭打ち
 constexpr u32 VIB_CNT_TAB = 0x1E63F0;   // カウンタ → 目盛り（＝カウンタ × 2）
 constexpr u32 VIB_REG_TAB = 0x1E6596;   // 目盛り → レジスタ
 constexpr u32 VIB_TICK    = 882;        // 20ms
+
+// **つまみの割り当て「LFO の音程」**（6.198。実機 0x129D62）。
+// つまみごとの `値 × 深さ / 128` を足して 127 で頭打ちし、
+// XG モードなら表 `0x1E62F0`（それ以外は VIB_CAP_TAB）を引いてから
+// VIB_REG_TAB でレジスタの値にする。
+//
+// **既定の深さ（10）なら、上の 10 段の表と完全に同じ**になる
+//（CC1 = 13→09、26→17、64→43、100→60、127→84 を確かめた）。
+// 深さ 64・CC1 = 100 では 0xad で、実機と 1 ビットも違わない
+constexpr u32 PMOD_CAP_XG = 0x1E62F0;
+
+inline int pmod_reg(const u8 *rom, int sum, bool xg = true)
+{
+	const int s = sum < 0 ? 0 : (sum > 127 ? 127 : sum);
+	const u32 tab = xg ? PMOD_CAP_XG : VIB_CAP_TAB;
+	return int(rom[VIB_REG_TAB + u32(rom[tab + u32(s)])]);
+}
 
 // **LFO はフィルタの切る高さも揺らす**（6.189）。音程と音量の LFO は
 // チップが持っているが、**フィルタぶんは firmware が自前で勘定している**

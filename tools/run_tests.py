@@ -257,10 +257,37 @@ def step_threading(rep, roms, first):
 # ここを下回ったら落ちる ＝ 形が崩れたら気づける。
 # dense がまだ低いのは分かっている不具合（写し取りの音だけ、実機の側が
 # 混み具合で遅れる。doc/native-engine.md の 6.90）
+# **1 秒窓の相関の最小の下限**（6.193）。上の SHAPE_MIN は中央なので、
+# 一部の窓だけ壊れていても通ってしまう。書いていない試験は 0.80。
+#
+# `assign` が低いのは**分かっている穴**。つまみの割り当て（6 つ組）の
+# うち、**LFO のフィルタ変調の深さだけ**しか native は鳴らせない。
+# 残り（音程・切る高さ・音量・LFO の音程/音量）は firmware に任せるので、
+# **割り当てを外したあとにツマミを動かすと、鳴っている音に掛からない**
+#（doc/native-engine.md の 6.193）
+SHAPE_LOW = {
+    # 分かっている穴。つまみの割り当て（6 つ組）のうち、音程・音量・
+    # **LFO のフィルタ変調の深さだけ**しか native は鳴らせないので、
+    # 割り当てを外したあとにつまみを動かすと、**すでに鳴っている音に
+    # 掛からない**（測値 50%。doc/native-engine.md の 6.193）
+    "assign":  0.65,
+    # 写し取りの音（実機が鳴らす 1 音目）だけ、実機の側が混み具合で
+    # 遅れる（6.90・6.122）。測値 62%
+    "dense":   0.55,
+    # クラッシュの 1 打目も写し取りなので同じ（測値 -12%）。
+    # 音が雑音に近いので、数サンプルずれるだけで相関が負になる。
+    # 2 サンプルずらすと残差は 6% まで落ちる
+    "althh":  -0.30,
+    # 同じくドラムの雑音。**1 サンプルずらすだけで残差 0.1%**なのに
+    # 相関は 42% まで落ちる（打鍵の ±1 は利用者が妥協してよいと決めた範囲）
+    "drumrcv": 0.35,
+}
+
 SHAPE_MIN = {
     "piano":   0.98, "chord":  0.95, "drums": 0.95, "effects": 0.98,
     "dense":   0.55, "port_b": 0.98, "bend":  0.98, "lofi":    0.98,
     "egcc":    0.98, "porta":  0.95, "at":    0.95, "sxparam": 0.95,
+    "assign":  0.95,
     "pedals":  0.95, "partsx": 0.95, "rpn": 0.95, "mono": 0.95,
     # 一晩で足した軸（6.125-6.139）。どれも中央 98-100% 出ている
     "ctlreset": 0.95, "ports": 0.95, "scale": 0.95, "kits": 0.95,
@@ -346,13 +373,19 @@ def step_native_shape(rep, cases):
         if not cs:
             continue
         med = sorted(cs)[len(cs) // 2]
+        low = min(cs)
         if os.environ.get('SHAPE_VERBOSE'):
             print('    %-10s 波形の相関 中央 %.0f%% 最小 %.0f%%'
-                  % (name, 100 * med, 100 * min(cs)))
+                  % (name, 100 * med, 100 * low))
         if med < worst:
             worst, worst_name = med, name
         if med < SHAPE_MIN.get(name, 0.9):
-            bad.append("%s %.0f%%" % (name, 100 * med))
+            bad.append("%s 中央 %.0f%%" % (name, 100 * med))
+        # **最小も見る**（6.193）。中央だけだと、**一部の窓だけ
+        # 壊れていても気づけない**。`assign` は中央 100%・最小 50% で、
+        # 中央だけの判定をすり抜けていた
+        elif low < SHAPE_LOW.get(name, 0.80):
+            bad.append("%s 最小 %.0f%%" % (name, 100 * low))
     if worst > 1.5:
         rep.add("native の形", True, "測れなかった")
         return

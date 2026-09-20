@@ -2139,7 +2139,10 @@ void mu2000::native_sysex(u64 fire)
 			// バンクと音色。音色の指定と同じ行列に乗せる
 			m_nq.push_back({ fire, 4, u8(mm),
 			                 u8(addr == 0x01 ? 0 : addr == 0x02 ? 1 : 2), dd });
-		} else if (addr <= 0x28) {
+		// **つまみの割り当て（0x4D-0x66）も渡す**（6.195）。
+		// これまでは 0x28 までしか渡していなくて、native はワーク RAM から
+		// 読むしか無かったので、**割り当てを戻しても 100ms 気づかなかった**
+		} else if (addr <= 0x28 || (addr >= 0x4d && addr <= 0x66)) {
 			m_nq.push_back({ fire, 5, u8(mm), addr, dd });
 		}
 	}
