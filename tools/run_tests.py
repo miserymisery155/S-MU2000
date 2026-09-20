@@ -544,6 +544,81 @@ def step_meter(rep, roms):
     rep.add("メーター", ok, note)
 
 
+def step_screen(rep, roms):
+    """**演奏画面の音色まわり**（doc/native-engine.md の 6.190）。firmware の道と
+    native の口で同じ曲を鳴らして、**音色名（行 0 の 9-16）・プログラムの 3 桁
+    （行 1 の 14-16）・楽器の絵（外字 0-2 と 4-6）**を 0.1 秒ごとに突き合わせる。
+    native はこれを自分で描くので、1 マスでも違えば読み違えている"""
+    exe = tool("render")
+    mid = WORK / "progchg.mid"
+    if not exe.exists() or not mid.exists():
+        rep.add("演奏画面", True, "この回では見ない")
+        return
+    got = {}
+    for tag, extra in (("fw", []), ("ne", ["--native-engine"])):
+        log = WORK / ("screen_%s.log" % tag)
+        rc = run([exe, roms, mid, WORK / ("screen_%s.wav" % tag), "7",
+                  "--boot", "%.3f" % BOOT_AT, "--lcd-every", "0.1"] + extra,
+                 out=log, err=log, env={"SMU2000_NO_VOICECACHE": "1"})
+        if rc != 0:
+            rep.add("演奏画面", False, "%s で鳴らせなかった" % tag)
+            return
+        d = {}
+        for line in log.read_text(encoding="utf-8", errors="replace").splitlines():
+            f = line.split()
+            if f and f[0] == "LCD" and len(f) >= 50:
+                d.setdefault(f[1], {})["d"] = f[2:50]
+            elif f and f[0] == "CG" and len(f) >= 66:
+                d.setdefault(f[1], {})["c"] = f[2:66]
+        got[tag] = d
+    ts = sorted(set(got["fw"]) & set(got["ne"]), key=float)
+    if len(ts) < 10:
+        rep.add("演奏画面", False, "液晶が読めなかった")
+        return
+    ICON = list(range(0, 24)) + list(range(32, 56))
+
+    def fields(v):
+        return (v["d"][9:17], v["d"][24 + 14:24 + 17], [v["c"][i] for i in ICON])
+
+    # **native が先を行くのは許す**。native は MIDI を受けた 25ms 後に描き、
+    # firmware は 100ms につき 5ms しか回らないので最大 100ms 遅れる。
+    # だから「その時刻か、そのあと 0.3 秒のどれかの firmware の絵と同じ」なら合格。
+    # 起動の直後（1.2 秒まで）は firmware がまだ絵を描いていないので見ない
+    names = set()
+    bad = []
+    for k, t in enumerate(ts):
+        if float(t) < 1.2:
+            continue
+        b = got["ne"][t]
+        if "d" not in b or "c" not in b:
+            continue
+        fb = fields(b)
+        ahead = []
+        for t2 in ts[k:k + 4]:
+            a = got["fw"][t2]
+            if "d" in a and "c" in a:
+                ahead.append(fields(a))
+        if not ahead:
+            continue
+        names.add(tuple(ahead[0][0]))
+        if fb not in ahead:
+            bad.append((t, ahead[0], fb))
+    if len(names) < 2:
+        rep.add("演奏画面", False, "音色名がひとつも替わっていない")
+        return
+    ok = not bad
+    note = "%d 点 × 音色名 %d 通りが firmware と同じ" % (len(ts), len(names))
+    if bad:
+        t, fa, fb = bad[0]
+        note = "%d 点中 %d 点が違う（%s 秒: %s / %s）" % (
+            len(ts), len(bad), t,
+            "".join(chr(int(x, 16)) if 0x20 <= int(x, 16) < 0x7f else "."
+                    for x in fa[0] + fa[1]),
+            "".join(chr(int(x, 16)) if 0x20 <= int(x, 16) < 0x7f else "."
+                    for x in fb[0] + fb[1]))
+    rep.add("演奏画面", ok, note)
+
+
 def step_dial(rep, roms, cases):
     """**パネルのダイヤルで音色を替える**（doc/native-engine.md の 6.146）。
     ジョグダイヤルの音色替えは MIDI を通らないので、native が拾えないと
@@ -703,6 +778,7 @@ def main():
         print("== 8. パネル（native の口でもボタンと液晶が効くか）")
         step_panel(rep, roms)
         step_meter(rep, roms)
+        step_screen(rep, roms)
         step_dial(rep, roms, cases)
 
         print()

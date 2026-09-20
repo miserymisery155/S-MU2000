@@ -1204,8 +1204,9 @@ void mu2000::set_native_engine(int mode)
 	// そのスロットを知らないので、離さないと鳴りっぱなしになる
 	if (!mode && m_native_engine)
 		m_ndrv.silence();
-	// **液晶のマスを firmware に返す**（6.188）
+	// **液晶のマスを firmware に返す**（6.188・6.190）
 	m_lcd.clear_owned();
+	m_lcd.clear_cg_owned();
 	m_native_engine = mode;
 	m_fw_hold = 0;
 	m_learning = false;
@@ -1846,6 +1847,10 @@ void mu2000::traj_finish_one(int i)
 //   * 上の行の同じ桁は、棒が 8 点を越えたぶん。両方 0 なら空白
 //   * 字のコードは 0x7f + 9a + b（a・b は 0-8 点。mu2000::fill_missing_glyphs）
 //   * 点の数は **目盛り / 8 + 1**（鳴っていないパートも 1 点出る）
+// **いま選んでいるパート**（ワーク RAM 0x42158F。0 から数える。6.190）。
+// 演奏画面の係（0x0D136C）がここを読んで口と番号を作る
+static constexpr u32 SEL_PART = 0x2158f;
+
 void mu2000::draw_meter()
 {
 	// **firmware が思っている画面を見る**（6.188）。ここの 16 マスは
@@ -1917,6 +1922,130 @@ void mu2000::draw_meter()
 			m_meter_cell[8 + c - 1] = hi;
 		} else
 			m_lcd.set_owned(u32(c), false);
+	}
+}
+
+// **演奏画面の音色まわりを native が描く**（doc/native-engine.md の 6.190）。
+//
+// native の口では firmware を 100ms につき 5ms しか回さないので、
+// 音色を替えてから画面が追いつくまで**最大 100ms 遅れる**。
+// ここで描くのは、記録から直に出せる 3 つだけ:
+//
+//   行 0 の 9-16   音色名の頭 8 文字
+//   行 1 の 14-16  プログラム番号 + 1 の 3 桁
+//   外字 0-2・4-6  楽器の絵（16 行 × 16 ビットを 5 ビットずつ）
+//
+// バンクの 3 桁とパート番号はまだ firmware に任せる（MSB が 0 でない
+// ときの出方がまだ測れていない。6.190 の「まだ埋まっていないもの」）。
+//
+// **演奏画面だと分かるときだけ**書く。見分けは firmware が思っている
+// 画面（6.188 の `fw_ddram`）の、こちらが持っていないマスでする。
+void mu2000::release_voice_fields()
+{
+	if (!m_vf_owned)
+		return;
+	m_vf_owned = false;
+	m_vf_part = -1;
+	for (u32 c = 9; c <= 16; c++)
+		m_lcd.set_owned(c, false);
+	for (u32 c = 14; c <= 16; c++)
+		m_lcd.set_owned(0x40 + c, false);
+	m_lcd.clear_cg_owned();
+}
+
+void mu2000::draw_voice_fields()
+{
+	const u8 *fw = m_lcd.fw_ddram();
+
+	// **演奏画面の印**。帯の字と口の字がそろっていること。
+	// 1 つでも違えば別の画面なので、手を出さない
+	if (fw[19] != 0xc6 || fw[0x40 + 9] != 0x11
+	    || (fw[0x40 + 13] != 0x10 && fw[0x40 + 13] != 0x15)
+	    || fw[0x40 + 17] < 'A' || fw[0x40 + 17] > 'D') {
+		release_voice_fields();
+		return;
+	}
+	if (m_ram.size() <= SEL_PART) {
+		release_voice_fields();
+		return;
+	}
+	const int part = int(m_ram[SEL_PART]);
+	if (part < 0 || part >= 64) {
+		release_voice_fields();
+		return;
+	}
+	const xg::voice_rom vr(m_prog);
+	if (!vr.ok()) {
+		release_voice_fields();
+		return;
+	}
+	const part_prog &p = m_prog_sel[part];
+	const int mode = m_ram.size() > xg::ram::VOICE_MODE ? m_ram[xg::ram::VOICE_MODE] : 1;
+	const int set  = m_ram.size() > xg::ram::VOICE_SET  ? m_ram[xg::ram::VOICE_SET]  : 1;
+	const bool drum = (p.msb == 127 || p.msb == 126);
+	const u32 rec = drum ? 0 : vr.lookup(mode, set, p.msb, p.lsb, p.prog);
+	const std::string nm = vr.screen_name(rec, p.msb, p.prog);
+	u16 ico[16];
+	if (nm.size() != 8 || !vr.icon_of(rec, p.msb, p.prog, ico)) {
+		release_voice_fields();
+		return;
+	}
+	// 番号は 1 から数える 3 桁
+	const int pn = (int(p.prog) & 0x7f) + 1;
+	const u8 dg[3] = { u8('0' + pn / 100), u8('0' + (pn / 10) % 10),
+	                   u8('0' + pn % 10) };
+
+	if (!m_vf_owned || m_vf_part != part) {
+		m_vf_owned = true;
+		m_vf_part = part;
+		for (int i = 0; i < 8; i++)
+			m_vf_name[i] = 0;
+		for (int i = 0; i < 3; i++)
+			m_vf_prog[i] = 0;
+		for (int y = 0; y < 16; y++)
+			m_vf_icon[y] = 0xffff;
+	}
+	// **調べ用**（`SMU2000_VF_DBG=1`）。音色が替わった時刻を出す。
+	// firmware に任せていたときの遅れと見比べるため
+	if (std::getenv("SMU2000_VF_DBG")) {
+		static int last = -1;
+		if (last != int(p.prog)) {
+			last = int(p.prog);
+			std::fprintf(stderr, "VF %.3f part=%d prog=%d %.8s\n",
+			             double(m_ne_clock) / 44100.0, part,
+			             int(p.prog), nm.c_str());
+		}
+	}
+	for (int i = 0; i < 8; i++) {
+		const u8 v = u8(nm[size_t(i)]);
+		m_lcd.set_owned(u32(9 + i), true);
+		if (m_vf_name[i] != v) {
+			m_vf_name[i] = v;
+			m_lcd.poke_ddram(u32(9 + i), v);
+		}
+	}
+	for (int i = 0; i < 3; i++) {
+		m_lcd.set_owned(u32(0x40 + 14 + i), true);
+		if (m_vf_prog[i] != dg[i]) {
+			m_vf_prog[i] = dg[i];
+			m_lcd.poke_ddram(u32(0x40 + 14 + i), dg[i]);
+		}
+	}
+	// **絵は 16 行 × 16 ビットを左から 5 ビットずつ**（6.190）。
+	// 外字 0・1・2 が上半分（行 0-7）、4・5・6 が下半分（行 8-15）。
+	// いちばん右の 1 列（bit0）は出さない
+	for (int y = 0; y < 16; y++) {
+		if (m_vf_icon[y] == ico[y]) {
+			for (int c = 0; c < 3; c++)
+				m_lcd.set_cg_owned(u32((y < 8 ? c : 4 + c) * 8 + (y & 7)), true);
+			continue;
+		}
+		m_vf_icon[y] = ico[y];
+		for (int c = 0; c < 3; c++) {
+			const u32 at = u32((y < 8 ? c : 4 + c) * 8 + (y & 7));
+			m_lcd.set_cg_owned(at, true);
+			m_lcd.poke_cgram(at, u8((ico[y] >> (11 - c * 5)) & 0x1f));
+		}
 	}
 }
 
@@ -2202,6 +2331,24 @@ bool mu2000::native_midi(u8 byte, int port)
 		midi_in(byte, port);
 		m_native_engine = save2;
 		return true;
+	}
+	// **アフタータッチの値もこちらで覚える**（6.191）。
+	// フィルタ側 LFO の深さに乗るので、**鳴っている音に効かせる**
+	// 必要がある。バイトは今までどおり firmware へも流す
+	if (kind == 0xa0 || kind == 0xd0) {
+		const int part4 = m_ndrv.rcv_part(port, n.status & 0x0f);
+		if (kind == 0xd0) {
+			if (part4 >= 0)
+				m_ndrv.chan_press(part4, byte & 0x7f);
+		} else if (n.have == 0) {
+			n.d0 = byte;
+			n.have = 1;
+		} else {
+			n.have = 0;
+			if (part4 >= 0)
+				m_ndrv.poly_at(part4, n.d0 & 0x7f, byte & 0x7f);
+		}
+		return false;
 	}
 	if (kind != 0x80 && kind != 0x90 && kind != 0xb0 && kind != 0xe0)
 		return false;
@@ -2621,6 +2768,7 @@ void mu2000::run_sample(s32 &left, s32 &right)
 				std::fprintf(stderr, "\n");
 			}
 			draw_meter();
+			draw_voice_fields();
 		}
 		if (m_fw_hold) {
 			if (--m_fw_hold == 0) {
@@ -2745,7 +2893,7 @@ namespace {
 
 // 保存の形。中身の並びを変えたら上げる
 constexpr u32 STATE_MAGIC   = 0x554d3253;   // "S2MU"
-constexpr u32 STATE_VERSION = 11;  // 2: MIDI の入口が A/B の 2 口になった / 3: SWP30 のピッチ EG / 4: サンプリングの録音の位置 / 5: SmartMedia の命令の途中 / 6: MEG の印と 2 つ目の idx / 7: USB の口（C・D）の受け取り途中 / 8: 2 つ目の A/D 変換器（AN4 = HOST SELECT） / 9: SWP30 の書き込みの待ち / 10: USB のコマンド（M37640 からの知らせ） / 11: 液晶の「native の持ち物」（6.188）
+constexpr u32 STATE_VERSION = 12;  // 2: MIDI の入口が A/B の 2 口になった / 3: SWP30 のピッチ EG / 4: サンプリングの録音の位置 / 5: SmartMedia の命令の途中 / 6: MEG の印と 2 つ目の idx / 7: USB の口（C・D）の受け取り途中 / 8: 2 つ目の A/D 変換器（AN4 = HOST SELECT） / 9: SWP30 の書き込みの待ち / 10: USB のコマンド（M37640 からの知らせ） / 11: 液晶の「native の持ち物」（6.188） / 12: 外字の「native の持ち物」（6.190）
 constexpr u32 STATE_VERSION_OLDEST = 2;
 
 } // namespace

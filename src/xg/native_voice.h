@@ -715,6 +715,70 @@ constexpr u32 VIB_CNT_TAB = 0x1E63F0;   // カウンタ → 目盛り（＝カ�
 constexpr u32 VIB_REG_TAB = 0x1E6596;   // 目盛り → レジスタ
 constexpr u32 VIB_TICK    = 882;        // 20ms
 
+// **LFO はフィルタの切る高さも揺らす**（6.189）。音程と音量の LFO は
+// チップが持っているが、**フィルタぶんは firmware が自前で勘定している**
+// （ボイスの塊 +76 が 15bit の位相、+78 が歩幅、+106 が深さ、+80 が
+// 切る高さへ足すぶん）。10ms ごとに
+//
+//   足すぶん = 三角(位相) x 深さ / 512      （位相を進めるのは**そのあと**）
+//
+// Violin（byte15 = 2）で実機と 1 ビットも違わないことを確かめた
+constexpr u32 LFO_STEP_TAB = 0x1E6516;  // 速さ 0-63 → 10ms あたりの歩幅
+constexpr u32 LFO_FDEP_TAB = 0x1E62E0;  // byte15 → 深さ
+
+inline u16 lfo_step(const u8 *rom, int rate)
+{ return rd16(rom, LFO_STEP_TAB + u32(rate & 0x3f) * 2); }
+
+// 深さ。**byte15 を索引にして表を引くだけ**（実機 0x129C94）。
+// Violin(2)→4・Viola(1)→2・TubulBel(2)→4 が実機と一致。
+// byte13 ではないことは AltoSax（byte13=3・byte15=0）で確かめた
+// （揺れがまったく無かった）
+// **つまみのぶんが索引に乗る**（6.191。実機 0x129C56）。
+// つまみの合計を 22 で頭打ちしてから
+//
+//   0 → 0、1 → 4、それ以上 → ((n + 1) >> 1) + 4
+//
+// に折りたたみ、**byte15 を下駄にする**。つまみが全部既定なら
+// 索引は byte15 そのものになる
+inline int lfo_fdep_index(const u8 *elem, int extra)
+{
+	int n = extra < 0 ? 0 : (extra > 22 ? 22 : extra);
+	n = n == 0 ? 0 : (n == 1 ? 4 : ((n + 1) >> 1) + 4);
+	const int b15 = int(elem[15] & 0x7f);
+	return n < b15 ? b15 : n;
+}
+
+inline int lfo_fdepth(const u8 *rom, const u8 *elem, int extra = 0)
+{ return int(rom[LFO_FDEP_TAB + u32(lfo_fdep_index(elem, extra) & 0x7f)]); }
+
+// 位相（15bit）→ 波（-0x2000 〜 +0x2000）。実機 0x12A10C。
+// 型 0（byte9 が 0）はのこぎりを半分にしたもの
+inline int lfo_fwave(u32 phase, bool tri)
+{
+	const int p = int(phase & 0x7fff);
+	if (!tri)
+		return (p <= 0x3fff ? p : p - 0x8000) >> 1;
+	if (p <= 0x1fff)
+		return p;
+	if (p <= 0x5fff)
+		return 0x4000 - p;
+	return p - 0x8000;
+}
+
+// 切る高さへ足すぶん。**負のときは絶対値で掛けてから符号を戻す**
+inline int lfo_fcut(int wave, int depth)
+{
+	if (wave >= 0)
+		return int((u32(wave) * u32(depth)) >> 9);
+	return -int((u32(-wave) * u32(depth)) >> 9);
+}
+
+inline u32 lfo_next(u32 phase, u16 step)
+{
+	const u32 p = (phase + step) & 0xffff;
+	return p >= 0x8000 ? p - 0x8000 : p;
+}
+
 inline int vib_ramp_reg(const u8 *rom, int counter)
 {
 	const int c = counter < 0 ? 0 : (counter > 63 ? 63 : counter);
@@ -1413,6 +1477,16 @@ inline int fenv_init(const u8 *rom, const u8 *elem, int vel, int cc_atk = 64,
 //   SoundTrk の鍵 84                切 -10dB   -> 入 **+0.25dB**
 //
 // `SMU2000_CUT_EXACT=0` で前の道に戻せる
+// **フィルタ側の LFO を切る**（`SMU2000_FLFO=0`。6.189）
+inline bool flfo_on()
+{
+	static const bool on = [] {
+		const char *e = std::getenv("SMU2000_FLFO");
+		return !e || (e[0] != '0' || e[1]);
+	}();
+	return on;
+}
+
 inline bool cut_exact()
 {
 	static const bool on = [] {

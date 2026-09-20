@@ -25,7 +25,9 @@ void hd44780_device::reset()
 	m_ir = m_dr = 0;
 	m_busy_until = 0;
 	m_owned[0] = m_owned[1] = 0;
+	m_cg_owned = 0;
 	std::memcpy(m_fw, m_ddram, sizeof(m_fw));
+	std::memcpy(m_cg_fw, m_cgram, sizeof(m_cg_fw));
 	set_busy(410);      // 電源投入直後はしばらく忙しい
 }
 
@@ -43,6 +45,29 @@ void hd44780_device::set_owned(u32 i, bool on)
 		m_ddram[i] = m_fw[i];
 		w &= ~bit;
 	}
+}
+
+void hd44780_device::set_cg_owned(u32 i, bool on)
+{
+	if (i >= 0x40)
+		return;
+	const u64 bit = 1ull << i;
+	if (on) {
+		if (!(m_cg_owned & bit))
+			m_cg_fw[i] = m_cgram[i];
+		m_cg_owned |= bit;
+	} else if (m_cg_owned & bit) {
+		m_cgram[i] = m_cg_fw[i];
+		m_cg_owned &= ~bit;
+	}
+}
+
+void hd44780_device::clear_cg_owned()
+{
+	if (!m_cg_owned)
+		return;
+	for (u32 i = 0; i < 0x40; i++)
+		set_cg_owned(i, false);
 }
 
 void hd44780_device::clear_owned()
@@ -175,8 +200,11 @@ void hd44780_device::data_w(u8 data)
 		m_fw[m_ac] = m_dr;
 		if (!owned(u32(m_ac)))
 			m_ddram[m_ac] = m_dr;
-	} else
-		m_cgram[m_ac] = m_dr;
+	} else {
+		m_cg_fw[m_ac] = m_dr;
+		if (!cg_owned(u32(m_ac)))
+			m_cgram[m_ac] = m_dr;
+	}
 
 	set_busy(10);
 	update_ac(m_direction);
@@ -187,7 +215,7 @@ void hd44780_device::data_w(u8 data)
 u8 hd44780_device::data_r()
 {
 	// firmware が読み返すのは、firmware が書いた値（6.188）
-	u8 data = (m_active_ram == DDRAM) ? m_fw[m_ac] : m_cgram[m_ac];
+	u8 data = (m_active_ram == DDRAM) ? m_fw[m_ac] : m_cg_fw[m_ac];
 
 	if (m_data_len == 4) {
 		if (m_nibble)
@@ -248,6 +276,12 @@ void hd44780_device::state(state_io &s)
 	} else {
 		std::memcpy(m_fw, m_ddram, sizeof(m_fw));
 		m_owned[0] = m_owned[1] = 0;
+	}
+	if (s.version() >= 12) {
+		s.arr(m_cg_fw); s.v(m_cg_owned);
+	} else {
+		std::memcpy(m_cg_fw, m_cgram, sizeof(m_cg_fw));
+		m_cg_owned = 0;
 	}
 	s.v(m_ac); s.v(m_active_ram); s.v(m_direction); s.v(m_disp_shift);
 	s.v(m_num_line); s.v(m_char_size); s.v(m_data_len);

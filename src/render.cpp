@@ -490,6 +490,12 @@ int main(int argc, char **argv)
 				for (int pos = 0; pos < 24; pos++)
 					std::printf(" %02x", dd[line * 0x40 + pos]);
 			std::printf("\n");
+			// 外字（音色の絵）も出す。1 文字 8 バイト × 8 文字
+			const u8 *cg = mu.lcd().cgram();
+			std::printf("CG %.3f", now);
+			for (int k = 0; k < 64; k++)
+				std::printf(" %02x", cg[k]);
+			std::printf("\n");
 		}
 		if (state_at && i == size_t(boot * rate) + state_sample) {
 			const std::vector<u8> st = mu.save_state();
