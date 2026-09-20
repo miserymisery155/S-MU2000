@@ -84,12 +84,13 @@ a = scan(render('fw', False))
 b = scan(render('nv', True))
 print('鍵 %d  NRPN %02x  （実機 %d / native %d / 期待 %d）'
       % (NOTE, MSB, len(a), len(b), len(VALS)))
-print('%-5s %-13s %-13s %-13s %-13s' % ('値', '0x06', '0x07', '0x08', '0x09'))
+REGS = [int(x, 16) for x in (sys.argv[4] if len(sys.argv) > 4 else '06,09,00,11').split(',')]
+print('%-5s %s' % ('値', ' '.join('%-13s' % ('0x%02x' % r) for r in REGS)))
 for i, v in enumerate(VALS):
     if i >= len(a) or i >= len(b):
         break
     c = []
-    for r in (0x06, 0x07, 0x08, 0x09):
+    for r in REGS:
         x, y = a[i].get(r, 0), b[i].get(r, 0)
         c.append('%04x/%04x%s' % (x, y, ' ' if x == y else '*'))
-    print('%-5d %-13s %-13s %-13s %-13s' % (v, c[0], c[1], c[2], c[3]))
+    print('%-5d %s' % (v, ' '.join('%-13s' % z for z in c)))

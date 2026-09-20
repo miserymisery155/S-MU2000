@@ -1204,12 +1204,18 @@ void mu2000::set_native_engine(int mode)
 	// そのスロットを知らないので、離さないと鳴りっぱなしになる
 	if (!mode && m_native_engine)
 		m_ndrv.silence();
+	// **液晶のマスを firmware に返す**（6.188）
+	m_lcd.clear_owned();
 	m_native_engine = mode;
 	m_fw_hold = 0;
 	m_learning = false;
 	m_learn_left = 0;
 	for (u8 &c : m_fw_notes)
 		c = 0;
+	for (u8 &v : m_fw_meter)
+		v = 0;
+	for (u64 &v : m_fw_meter_at)
+		v = 0;
 	for (part_prog &p : m_prog_sel)
 		p = part_prog();
 	for (s8 &m : m_part_mode)
@@ -1842,14 +1848,19 @@ void mu2000::traj_finish_one(int i)
 //   * 点の数は **目盛り / 8 + 1**（鳴っていないパートも 1 点出る）
 void mu2000::draw_meter()
 {
-	const u8 *cur = m_lcd.ddram();
+	// **firmware が思っている画面を見る**（6.188）。ここの 16 マスは
+	// native の持ち物にしてあるので、表示そのものを見ても
+	// こちらが前に置いた字しか無く、画面が替わったのに気づけない
+	const u8 *cur = m_lcd.fw_ddram();
 	// **触ってよいのは次の 2 つだけ**:
 	//   * こちらが前に書いた値がそのまま残っているマス
 	//   * firmware が置いた「鳴っていない」形（下 0x89 / 上 空白）
 	// どれか 1 つでも当てはまらなければ、**1 マスも触らない**。
 	// 別の画面では同じ桁に文字が出ていて、消すと表示が壊れる
-	if (cur[0x40] != 0x89)
+	if (cur[0x40] != 0x89) {
+		m_lcd.clear_owned();
 		return;
+	}
 	// **上と下は別々に見る**。演奏画面には「上の行が棒の続きではなく数字」の
 	// 形もあって（パネルで `play` を押したあとの画面）、まとめて見ると
 	// 下の棒まで描けなくなる
@@ -1861,11 +1872,30 @@ void mu2000::draw_meter()
 		// あって、`0x89`（鳴っていない形）だけを待っていると二度と描けない
 		if (lo != m_meter_cell[c - 1] && (lo < 0x7f || lo > 0xd0))
 			lo_ok = false;
-		if (hi != m_meter_cell[8 + c - 1] && hi != 0x20)
+		// 上の行は**下が満杯のときだけ棒の続き**（6.188）。
+		// 写し取りのあいだは firmware も同じマスへ自分の
+		// 続きを書くので、「空白かこちらの字」だけを待って
+		// いると手放してしまう。といって棒の字なら何でも、と
+		// すると**MUTE の画面**を壊す：あそこは上の行 16 マスを
+		// 別の意味で使っていて、上が `89`（左右 1 点）なのに
+		// 下も `89`（1 点）だった。
+		//
+		// 棒としては**下が 8 点になって初めて上が 1 点以上**に
+		// なるので、その辻つまが合わなければ別の画面だと分かる
+		bool hi_mine = hi == m_meter_cell[8 + c - 1] || hi == 0x20;
+		if (!hi_mine && hi >= 0x7f && hi <= 0xd0
+		    && lo >= 0x7f && lo <= 0xd0) {
+			const int la = (lo - 0x7f) / 9, lb = (lo - 0x7f) % 9;
+			const int ta = (hi - 0x7f) / 9, tb = (hi - 0x7f) % 9;
+			hi_mine = (ta == 0 || la == 8) && (tb == 0 || lb == 8);
+		}
+		if (!hi_mine)
 			hi_ok = false;
 	}
-	if (!lo_ok)
+	if (!lo_ok) {
+		m_lcd.clear_owned();
 		return;
+	}
 	for (int c = 1; c <= 8; c++) {
 		const int l = int(m_meter_smooth[(c - 1) * 2]) / 8 + 1;
 		const int r = int(m_meter_smooth[(c - 1) * 2 + 1]) / 8 + 1;
@@ -1874,12 +1904,19 @@ void mu2000::draw_meter()
 		const int rt = r > 8 ? (r - 8 > 8 ? 8 : r - 8) : 0;
 		const u8 lo = u8(0x7f + lb * 9 + rb);
 		const u8 hi = (lt || rt) ? u8(0x7f + lt * 9 + rt) : u8(0x20);
+		// **そのマスをこちらの持ち物にする**（6.188）。
+		// 写し取りのあいだなど firmware も音を持っているときは、
+		// 向こうも演奏画面の係を回して同じ 16 マスへ自分の棒を
+		// 書く。二人で交互に書くので、画面が 25ms ごとにちらついていた
+		m_lcd.set_owned(u32(0x40 + c), true);
 		m_lcd.poke_ddram(u32(0x40 + c), lo);
 		m_meter_cell[c - 1] = lo;
 		if (hi_ok) {
+			m_lcd.set_owned(u32(c), true);
 			m_lcd.poke_ddram(u32(c), hi);
 			m_meter_cell[8 + c - 1] = hi;
-		}
+		} else
+			m_lcd.set_owned(u32(c), false);
 	}
 }
 
@@ -1960,6 +1997,9 @@ void mu2000::native_sysex(u64 fire)
 		m_nq.push_back({ fire, 6, 0, 0, 0 });
 		return;
 	}
+	// **ドラムのセットアップは SysEx（3n rr pp）では渡さない**（6.180）。
+	// 実機は SysEx で書いても立ち上がりを計算し直さない。
+	// NRPN 16 で書いたときだけ変わる（native_driver の control で見ている）
 	if (hh != 0x08 || mm >= 32)
 		return;
 	// **1 回の SysEx で続けて何バイトも書ける**（ll から順に並ぶ）
@@ -2290,6 +2330,11 @@ bool mu2000::native_midi(u8 byte, int port)
 		m_fw_note_total++;
 	}
 	m_fw_note_until = m_ne_clock + FW_NOTE_RUN;
+	// **液晶のメーター用の目盛り**（6.188）
+	if (part < 16) {
+		m_fw_meter[part] = u8(m_ndrv.part_meter(part, vel));
+		m_fw_meter_at[part] = m_ne_clock;
+	}
 	replay_note(n.status, u8(note), u8(vel), port);
 	return true;
 }
@@ -2540,10 +2585,40 @@ void mu2000::run_sample(s32 &left, s32 &right)
 		if (m_ne_clock >= m_meter_next) {
 			m_meter_next = m_ne_clock + 44100 / 40;
 			m_ndrv.fill_meter(m_meter_lv, 16);
+			// **firmware が鳴らしている音も混ぜる**（6.188）。写し取りの
+			// 1 音目は firmware が持つので native のスロットには無く、
+			// 混ぜないと**音が鳴っているのにメーターだけ落ちる**。
+			//
+			// 実機の演奏画面が読む 0x402DD8 は使えない。native の口では
+			// その係が回らないため、**読み出して消す人がいなくて値が張り付く**
+			//（実測: 音が終わっても 90 b2 8b ce のままだった）。
+			// 消すのはこわい（ここへ書くと音そのものが壊れる。6.148）ので、
+			// **渡した打鍵からこちらで作る**
+			for (int p = 0; p < 16; p++)
+				if (m_fw_notes[p] && m_fw_meter[p] > m_meter_lv[p]
+				    && m_ne_clock - m_fw_meter_at[p] < FW_METER_HOLD)
+					m_meter_lv[p] = m_fw_meter[p];
 			for (int p = 0; p < 16; p++) {
 				const int now = int(m_meter_smooth[p]);
 				const int tgt = int(m_meter_lv[p]);
 				m_meter_smooth[p] = u8(now + (tgt - now) / 2);
+			}
+			// **調べ用**（`SMU2000_METER_DBG=1`）。draw_meter の前の
+			// 液晶の中身と、目盛り（生 / なまし）を出す
+			if (std::getenv("SMU2000_METER_DBG")) {
+				const u8 *dd = m_lcd.ddram();
+				std::fprintf(stderr, "MTR %.3f",
+				             double(m_ne_clock) / 44100.0);
+				for (int c = 0; c <= 8; c++)
+					std::fprintf(stderr, " %02x", dd[0x40 + c]);
+				std::fprintf(stderr, " |");
+				for (int c = 0; c <= 8; c++)
+					std::fprintf(stderr, " %02x", dd[c]);
+				std::fprintf(stderr, " |");
+				for (int p = 0; p < 16; p++)
+					std::fprintf(stderr, " %d/%d", int(m_meter_lv[p]),
+					             int(m_meter_smooth[p]));
+				std::fprintf(stderr, "\n");
 			}
 			draw_meter();
 		}
@@ -2670,7 +2745,7 @@ namespace {
 
 // 保存の形。中身の並びを変えたら上げる
 constexpr u32 STATE_MAGIC   = 0x554d3253;   // "S2MU"
-constexpr u32 STATE_VERSION = 10;  // 2: MIDI の入口が A/B の 2 口になった / 3: SWP30 のピッチ EG / 4: サンプリングの録音の位置 / 5: SmartMedia の命令の途中 / 6: MEG の印と 2 つ目の idx / 7: USB の口（C・D）の受け取り途中 / 8: 2 つ目の A/D 変換器（AN4 = HOST SELECT） / 9: SWP30 の書き込みの待ち / 10: USB のコマンド（M37640 からの知らせ）
+constexpr u32 STATE_VERSION = 11;  // 2: MIDI の入口が A/B の 2 口になった / 3: SWP30 のピッチ EG / 4: サンプリングの録音の位置 / 5: SmartMedia の命令の途中 / 6: MEG の印と 2 つ目の idx / 7: USB の口（C・D）の受け取り途中 / 8: 2 つ目の A/D 変換器（AN4 = HOST SELECT） / 9: SWP30 の書き込みの待ち / 10: USB のコマンド（M37640 からの知らせ） / 11: 液晶の「native の持ち物」（6.188）
 constexpr u32 STATE_VERSION_OLDEST = 2;
 
 } // namespace

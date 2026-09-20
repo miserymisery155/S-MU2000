@@ -619,6 +619,12 @@ private:
 	int  m_learn_note = 60, m_learn_vel = 100, m_learn_part = 0;
 	// firmware が鳴らしている音の数（パートごと）。0 でなければベンドも firmware へ回す
 	u8   m_fw_notes[64] = {};
+	// firmware が鳴らしている音の、液晶のメーター用の目盛り（6.188）。
+	// 打った時刻も覚えておく（m_fw_notes はオールノートオフなどで
+	// 戻らないことがあり、そのままだと棒が立ちっぱなしになる）
+	u8   m_fw_meter[16] = {};
+	u64  m_fw_meter_at[16] = {};
+	static constexpr u64 FW_METER_HOLD = 44100 * 4;
 	u32  m_fw_note_total = 0;
 	// firmware の音のために回すのは、いちばん新しい音から この長さだけ。
 	// フィルタ・LFO の包絡線はそのころには落ち着いている。
