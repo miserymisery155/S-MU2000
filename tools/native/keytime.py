@@ -10,11 +10,14 @@ native の音が実機より早い／遅いと、値がぜんぶ合っていて�
 
 `--pairs` を付けると 1 件ずつ並べる。付けなければずれの分布だけ出す。
 `--usb` は USB の口で鳴らす（プラグインの既定。バイトの速さが DIN と違う）。
+`--warm` は写し取り済みで鳴らす（2 回目。1 回目は写し取りの音を実機が鳴らす
+ので、そちらの遅れが混ざる。doc/native-engine.md の 6.144）。
 試験の MIDI は `build/tests/<名前>.mid`（`tools/make_test_midi.py` が作る）。
 """
 import argparse
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -28,7 +31,7 @@ MASK = {0x1cf: 0, 0x1ce: 1, 0x18f: 2, 0x18e: 3}
 KEYON = 0x20e                       # ここへ 1 を書くと、並べた鍵が鳴り出す
 
 
-def keyons(roms, mid, out, tag, native, secs, usb=False, boot=None):
+def keyons(roms, mid, out, tag, native, secs, usb=False, boot=None, warm=False):
     """1 回鳴らして、(サンプル, [スロット]) の並びを返す"""
     trc = out / ('keytime_%s.txt' % tag)
     cmd = [str(BUILD / 'render'), str(roms), str(mid),
@@ -43,8 +46,25 @@ def keyons(roms, mid, out, tag, native, secs, usb=False, boot=None):
     if native:
         cmd.append('--native-engine')
     env = dict(os.environ)
-    env['SMU2000_NO_VOICECACHE'] = '1'   # 毎回まっさらから
     env['SMU2000_CUT_EXACT'] = '1'
+    if warm:
+        # **写し取り済みで鳴らす**（2 回目以降。実際に曲を鳴らすときの姿）。
+        # 1 回鳴らして写しを貯め、2 回目を測る。利用者の写しを汚さないよう
+        # 置き場は試験の下に切る
+        home = out / 'keytime_home'
+        home.mkdir(parents=True, exist_ok=True)
+        env.pop('SMU2000_NO_VOICECACHE', None)
+        env['LOCALAPPDATA'] = str(home)
+        env['XDG_DATA_HOME'] = str(home)
+        env['HOME'] = str(home)
+        cmd.append('--voicecache')
+        if native:
+            warmup = [c for c in cmd if c != str(trc)]
+            warmup = [c for c in warmup if c != '--trace-swp']
+            subprocess.run(warmup, env=env, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, check=True)
+    else:
+        env['SMU2000_NO_VOICECACHE'] = '1'   # 毎回まっさらから
     subprocess.run(cmd, env=env, stdout=subprocess.DEVNULL,
                    stderr=subprocess.DEVNULL, check=True)
     cur = [0, 0, 0, 0]
@@ -74,14 +94,19 @@ def main():
     ap.add_argument('--usb', action='store_true')
     ap.add_argument('--boot', type=float, default=None,
                     help='ほんとうに起動させる（run_tests.py と同じ 8.0 秒）')
+    ap.add_argument('--warm', action='store_true',
+                    help='写し取り済みで鳴らす（2 回目。実際に曲を鳴らすときの姿）')
     a = ap.parse_args()
 
     mid = BUILD / 'tests' / (a.name + '.mid')
     if not mid.exists():
         sys.exit('%s が無い。先に python tools/make_test_midi.py' % mid)
     out = BUILD / 'tests'
+    if a.warm:
+        shutil.rmtree(out / 'keytime_home' / 'S-MU2000' / 'voicecal',
+                      ignore_errors=True)
     fw = keyons(a.roms, mid, out, 'fw', False, a.secs, a.usb, a.boot)
-    nv = keyons(a.roms, mid, out, 'nv', True, a.secs, a.usb, a.boot)
+    nv = keyons(a.roms, mid, out, 'nv', True, a.secs, a.usb, a.boot, a.warm)
     print('%s  実機 %d 回 / native %d 回' % (a.name, len(fw), len(nv)))
 
     if a.pairs:

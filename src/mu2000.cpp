@@ -2367,6 +2367,17 @@ void mu2000::run_sample(s32 &left, s32 &right)
 		}
 		if (m_learning && m_learn_left && --m_learn_left == 0)
 			native_learn_finish();
+		// **10ms 割り込みの印を見て格子の位相を学ぶ**（6.145）。
+		// 写し取りの `0x00` からしか学べなかったので、写し取り済み
+		// （2 回目以降）だと一度も学べず、滑りが前の道に落ちていた。
+		// firmware は音を鳴らしていなくてもここを裏返すので、いつでも学べる
+		if (m_ram.size() > xg::ram::TICK_MARK) {
+			const u8 tk = m_ram[xg::ram::TICK_MARK];
+			if (tk != m_tick_seen) {
+				m_tick_seen = tk;
+				m_ndrv.set_eg_phase(u32(m_ne_clock));
+			}
+		}
 		m_ne_clock++;
 		if (!m_nq.empty())
 			native_pump();

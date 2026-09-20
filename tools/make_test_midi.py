@@ -874,6 +874,35 @@ def case_edges():
     return [track(seq(ev))], t + 1.5
 
 
+def case_fxchange():
+    """**曲の途中でエフェクトの種類を替える**（リバーブ・コーラス・
+    バリエーション）と、**ドラムのパートにインサーションを掛ける**。
+
+    種類を替えると MEG のプログラムを 1 万件以上書き直すので、firmware を
+    その間じゅう回す必要がある（`m_fw_hold` の 300ms）。native の口で
+    そこを削ると、替えたあとの音が前の種類のまま鳴る。
+    ドラムにインサーションを掛けるのは、旋律のパートと道が違う所"""
+    ev = head()
+    ev += [(1.0, bytes([0xc0, 0x30]))]                # ch1 Strings
+    ev += [(1.05, bytes([0xb0, 0x5b, 100]))]          # CC91 リバーブ送り
+    ev += [(1.06, bytes([0xb0, 0x5d, 80]))]           # CC93 コーラス送り
+    ev += note(0, 60, 100, 1.4, 1.2)                  # 1 音目。ここで写し取る
+    # リバーブを Hall1 から Room1 へ
+    ev += [(2.9, xg([0x02, 0x01, 0x00, 0x02, 0x00]))]
+    ev += note(0, 64, 100, 3.4, 1.2)
+    # コーラスを Celeste へ
+    ev += [(4.9, xg([0x02, 0x01, 0x20, 0x42, 0x08]))]
+    ev += note(0, 67, 100, 5.4, 1.2)
+    # ドラムにインサーション（バリエーションをインサーションにしてパート 10 へ）
+    ev += [(6.9, xg([0x02, 0x01, 0x40, 0x4c, 0x00])),   # DISTORTION
+           (6.95, xg([0x02, 0x01, 0x5a, 0x00])),        # 接続: インサーション
+           (7.0, xg([0x02, 0x01, 0x5b, 0x09]))]         # パート 10（ドラム）
+    ev += [(7.1, bytes([0xb9, 0x5e, 127]))]             # ch10 バリエーション送り
+    for i, k in enumerate((36, 38, 42, 36)):
+        ev += note(9, k, 110, 7.4 + i * 0.3, 0.1)
+    return [track(seq(ev))], 10.0
+
+
 CASES = {
     "piano":   case_piano,
     "chord":   case_chord,
@@ -907,6 +936,7 @@ CASES = {
     "retrig":  case_retrig,
     "pedretrig": case_pedretrig,
     "edges":   case_edges,
+    "fxchange": case_fxchange,
 }
 
 

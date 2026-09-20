@@ -427,6 +427,7 @@ private:
 	}
 	u64  m_rx_at[MIDI_PORTS] = {};                   // その口が次のバイトを受け終える時刻
 	u64  m_rx_at_usb = 0;                            // USB の線（4 口で分け合う）
+	u8   m_tick_seen = 0xff;                         // 10ms の印の前の値（6.145）
 	int  m_rx_usb_port = -1;                         // USB で最後に選んだ口
 	// kind 0=離し 1=押し 2=CC 3=ベンド 4=音色の指定 5=XG のパートの設定（08 pp d0=d1）
 	struct nev { u64 at; u8 kind, part, d0, d1; };

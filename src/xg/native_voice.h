@@ -804,7 +804,7 @@ inline int voice_raw_level(const u8 *rom, u32 rec, const u8 *elem)
 {
 	if (!rom || !rec)
 		return 64;
-	return int(rom[rec + 1]) * int(elem[59]) / 99;
+	return (int(rom[rec + 1]) * int(elem[59]) + 49) / 99;
 }
 
 // 掛ける前の音量の目盛り（鍵の曲線まで入れたもの）。

@@ -267,6 +267,7 @@ SHAPE_MIN = {
     "ins2": 0.95, "progchg": 0.98, "running": 0.95, "pat": 0.95,
     "ccramp": 0.95, "midreset": 0.98, "partmode": 0.95,
     "drumnrpn": 0.95, "retrig": 0.95, "pedretrig": 0.98, "edges": 0.95,
+    "fxchange": 0.95,
     # keylevel は鍵と強さで音量が大きく動く音色ばかりなので、鍵を押す時刻の
     # ばらつき（6.90）が相関に出やすい。**音量のほうは `native の口` が見る**。
     # 音 1 つずつは tools/native/notelevel.py で見られる
@@ -402,47 +403,52 @@ def step_warm(rep, roms, cases):
     写し取りが済めばその音も native が鳴らすので、実際に使うときの値は
     こちらになる。1 回鳴らして写しを貯め、2 回目を比べる"""
     import math
-    name = "dense"
-    if name not in cases:
-        rep.add("2 回目", True, "この回では見ない")
-        return
-    midi, seconds = cases[name]
     home = WORK / "warmhome"
     shutil.rmtree(home / "S-MU2000" / "voicecal", ignore_errors=True)
     home.mkdir(parents=True, exist_ok=True)
     env = {"LOCALAPPDATA": str(home), "XDG_DATA_HOME": str(home),
            "HOME": str(home)}
     extra = ["--native-engine", "--voicecache"]
-    if render(roms, "warm1", midi, seconds, extra=extra, env=env)[0] is None:
-        rep.add("2 回目", False, "1 回目が鳴らせなかった")
-        return
-    if render(roms, "warm2", midi, seconds, extra=extra, env=env)[0] is None:
-        rep.add("2 回目", False, "2 回目が鳴らせなかった")
-        return
-    base = WORK / ("%s.wav" % name)
-    if not base.exists():
-        rep.add("2 回目", True, "比べる相手が無い")
-        return
-    fa, ra, ca, _ = fpmod.load_wav(str(base))
-    fb, _, cb, _ = fpmod.load_wav(str(WORK / "warm2.wav"))
-    n = min(len(fa) // ca, len(fb) // cb)
-    skip = int(round(BOOT_AT * ra))
-    cs = []
-    for s0 in range(skip, n - ra, ra):
-        sa = fa[s0 * ca:(s0 + ra) * ca:ca]
-        sb = fb[s0 * cb:(s0 + ra) * cb:cb]
-        na = sum(float(x) * x for x in sa)
-        nb = sum(float(x) * x for x in sb)
-        if na < 1e4 or nb < 1e4:
+    # dense … 写し取りの音がいちばん効く曲、porta … 10ms 格子の位相を使う曲
+    # （写し取りが無いと位相が学べず、滑りが前の道に落ちていた。6.145）
+    floor = {"dense": 0.70, "porta": 0.95}
+    notes, bad = [], []
+    for name in ("dense", "porta"):
+        if name not in cases:
             continue
-        num = sum(float(x) * float(y) for x, y in zip(sa, sb))
-        cs.append(num / math.sqrt(na * nb))
-    if not cs:
-        rep.add("2 回目", False, "音が無い")
-        return
-    med = sorted(cs)[len(cs) // 2]
-    ok = med >= 0.70
-    rep.add("2 回目", ok, "%s の波形の相関 %.0f%%（1 回目は 57%%）" % (name, 100 * med))
+        midi, seconds = cases[name]
+        if render(roms, "warm1", midi, seconds, extra=extra, env=env)[0] is None:
+            bad.append("%s: 1 回目が鳴らせなかった" % name)
+            continue
+        if render(roms, "warm2", midi, seconds, extra=extra, env=env)[0] is None:
+            bad.append("%s: 2 回目が鳴らせなかった" % name)
+            continue
+        base = WORK / ("%s.wav" % name)
+        if not base.exists():
+            continue
+        fa, ra, ca, _ = fpmod.load_wav(str(base))
+        fb, _, cb, _ = fpmod.load_wav(str(WORK / "warm2.wav"))
+        n = min(len(fa) // ca, len(fb) // cb)
+        skip = int(round(BOOT_AT * ra))
+        cs = []
+        for s0 in range(skip, n - ra, ra):
+            sa = fa[s0 * ca:(s0 + ra) * ca:ca]
+            sb = fb[s0 * cb:(s0 + ra) * cb:cb]
+            na = sum(float(x) * x for x in sa)
+            nb = sum(float(x) * x for x in sb)
+            if na < 1e4 or nb < 1e4:
+                continue
+            num = sum(float(x) * float(y) for x, y in zip(sa, sb))
+            cs.append(num / math.sqrt(na * nb))
+        if not cs:
+            bad.append("%s: 音が無い" % name)
+            continue
+        med = sorted(cs)[len(cs) // 2]
+        notes.append("%s %.0f%%" % (name, 100 * med))
+        if med < floor.get(name, 0.9):
+            bad.append("%s %.0f%%" % (name, 100 * med))
+    rep.add("2 回目", not bad,
+            "、".join(bad or notes) + ("（下限を割った）" if bad else ""))
 
 
 def step_usb(rep, roms, cases):

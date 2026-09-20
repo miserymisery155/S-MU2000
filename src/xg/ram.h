@@ -23,6 +23,11 @@ namespace ram {
 constexpr u32 SYSTEM   = 0x226c1;   // 00 00 00-06
 // 00 00 00-03（マスターチューン）。4 バイトの下 4bit をつないだ 12bit の値で、
 // 0x400 が 0 セント、1 きざみ 0.1 セント（doc/native-engine.md の 6.136）
+// **10ms 割り込みの印**（doc/native-engine.md の 6.145）。firmware は
+// 10ms ごとにここを 0/1 で裏返す（pc=0x12989A）。音を鳴らしていなくても
+// 動くので、写し取りが無いときでも 10ms 格子の位相をここから学べる。
+// 隣の +0x3E941 は 10ms ごとに 1 増える数、0x408008 は 16bit の数
+constexpr u32 TICK_MARK     = 0x3e948;
 constexpr u32 SYS_TUNE      = SYSTEM + 0;
 constexpr u32 SYS_VOLUME    = SYSTEM + 4;   // 00 00 04（マスター音量）
 // **パートの音量の目盛り**（0-128）。実機はここを音量の目盛りに掛ける
