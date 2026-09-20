@@ -1118,6 +1118,26 @@ def case_drumrcv():
     return [track(seq(ev))], 9.5
 
 
+def case_longtone():
+    """**長く伸ばす音**（6.175）。弦・木管・金管は鍵を押してすぐには揺れず、
+    遅れのあと 20ms ごとにビブラートの深さがせり上がる。ここまでの試験は
+    短い音と揺れない音色ばかりで、この軸が丸ごと抜けていた。
+    ビブラートの遅れ・せり上がり・音量側の揺れが壊れるとここで出る。
+
+    * Violin   byte14 = 6（表引きでないと 1 ずれる）
+    * AltoSax  遅れの式が当てはまらない 3 つのうちの 1 つ
+    * Clarinet byte13 = 0（1 歩で止まる所まで行く）
+    * FrHorn   音程ではなく**音量**の揺れ（0x05）
+    """
+    ev = head()
+    t = 1.0
+    for prog in (40, 65, 71, 60):
+        ev += [(t - 0.1, bytes([0xc0, prog]))]
+        ev += note(0, 60, 100, t, 2.5)
+        t += 3.0
+    return [track(seq(ev))], t + 0.3
+
+
 CASES = {
     "piano":   case_piano,
     "chord":   case_chord,
@@ -1154,6 +1174,7 @@ CASES = {
     "fxchange": case_fxchange,
     "dialloop": case_dialloop,
     "panrnd": case_panrnd,
+    "longtone": case_longtone,
     "meter": case_meter,
     "filtcc": case_filtcc,
     "keyrange": case_keyrange,

@@ -42,8 +42,9 @@ constexpr u32 EG_RATE_CC = 0x1E54A4;    // つまみ 64-127 → 目盛り（64 �
 
 inline int eg_rate_cc(const u8 *rom, int base, int cc)
 {
+	// 実機（`0x127288`）はつまみ 64 でも 63 で頭打ちにする
 	if (!rom || cc < 0 || cc == 64)
-		return base;
+		return base > 63 ? 63 : base;
 	const int c = cc > 127 ? 127 : cc;
 	if (c < 64) {
 		const int v = base + (65 - c) / 2;
@@ -71,14 +72,19 @@ inline int eg_rate_cc_add(int base, int cc)
 }
 
 // **立ち上がりのつまみ（CC73）は減衰 1（0x07）も動かす**（6.157）。
-// 遅くする側は何も起きず、速くする側だけ 4 段ごとに 1 目盛り速くなる
+// 実機の `0x1272F4` は遅くする側では何もせず、速くする側だけ
+//
+//   目盛り = min(素, ((127 - つまみ) >> 2) + 2)
+//
+// とする。前に測って合わせた `素 - (つまみ-68)/4` は、
+// 素が 16 のときだけこれと同じになる（6.171）
 inline int eg_dec1_cc(int base, int cc)
 {
-	if (cc <= 68)
+	if (cc <= 64)
 		return base;
-	const int d = ((cc > 127 ? 127 : cc) - 68) / 4;
-	const int r = base - d;
-	return r < 0 ? 0 : (r > 63 ? 63 : r);
+	const int c = cc > 127 ? 127 : cc;
+	const int cap = ((127 - c) >> 2) + 2;
+	return cap < base ? cap : base;
 }
 constexpr u32 DECAY_TAB  = 0x1F4E38;   // 減衰の速さ（128 バイト）
 constexpr u32 VEL_CURVE  = 0x1E5E5E;   // 強さの曲線（128 バイトの行が並ぶ。行 0 はそのまま）
@@ -180,14 +186,23 @@ inline int key_follow(const u8 *rom, const u8 *elem)
 // 支点が 60 でないと、追従が 100 でない音色では鍵 60 でも値がずれる（6.96）
 inline int key_pivot(const u8 *elem) { return elem[20]; }
 
-// 要素を**遅らせて鳴らす**段（byte72）。実測（段 0,1,2,3 → 0,311,752,1634 サンプル）は
-// 441 * 2^(n-1) - 130 でぴったり。MusicBox は 2 つ目の要素を 37ms 遅らせている
+// 要素を**遅らせて鳴らす**段（byte72）。
+//
+//   遅れ = 441 * 2^(n-1) - 82   サンプル
+//
+// **実機の 1 つ目の押鍵から 2 つ目の押鍵まで**を測り直した（6.176）。
+// MusicBox（n=3）が 1682、SynStrings 1/2 と FrenchHorn（n=2）が 800 で、
+// 鍵 48・60・72 のどれでも同じ。前の `- 130` は 48 サンプル短かった。
+//
+// **48 サンプルでも聞こえる**。FrenchHorn は 2 つの要素が 9 目盛りだけ
+// ずれていて、そのうなりで音ができている。片方が 48 サンプルずれると
+// うなりの位相が 0.2 秒ずれて、波形が丸ごと合わなくなる
 inline u32 elem_delay(const u8 *elem)
 {
 	const int n = elem[72] & 0x7f;
 	if (n <= 0)
 		return 0;
-	return u32(441 * (1 << (n < 8 ? n - 1 : 7)) - 130);
+	return u32(441 * (1 << (n < 8 ? n - 1 : 7)) - 82);
 }
 
 // **波形を選ぶときの鍵**。実機は「その要素が実際に出す高さ」で選ぶので、
@@ -626,9 +641,17 @@ inline int peg_level_of(const u8 *elem, int stage)
 	return int(elem[31 + (stage < 0 ? 0 : (stage > 3 ? 3 : stage))]);
 }
 
-inline int peg_rate_idx_of(const u8 *elem, int raw, int note, int vel, int part_rate = 64)
+// **立ち上がりのつまみ（CC73 / 08 pp 1B）も、パートの速さとまったく同じだけ
+// 目盛りを動かす**（6.171）。GrandPno・Strings1・NylonGt を 128 段測って
+//   目盛り = 素 + ((64 - つまみ) >> 2)       （算術シフト。下へ丸める）
+// だった。つまみ 65-68 で -1、69-72 で -2 …… と 4 段ごとに 1 目盛り。
+// 下げる側も同じ式で、NylonGt（素の目盛り 54）は つまみ 48 で 58、
+// つまみ 32 で 62 と、4 段ごとに 1 目盛りずつ遅くなる
+inline int peg_rate_idx_of(const u8 *elem, int raw, int note, int vel, int part_rate = 64,
+                           int cc_atk = 64)
 {
-	int r = raw + (int(s8(u8(64 - part_rate))) >> 2);
+	int r = raw + (int(s8(u8(64 - part_rate))) >> 2)
+	            + (int(s8(u8(64 - cc_atk))) >> 2);
 	if (s8(u8(r)) > 63) r = 63;
 	if (s8(u8(r)) < 0)  r = 0;
 	r += peg_rate_key_adj(elem, note);
@@ -640,23 +663,83 @@ inline int peg_rate_idx_of(const u8 *elem, int raw, int note, int vel, int part_
 	return r;
 }
 
-inline int peg_rate_idx(const u8 *elem, int note, int vel, int part_rate = 64)
+inline int peg_rate_idx(const u8 *elem, int note, int vel, int part_rate = 64,
+                        int cc_atk = 64)
 {
-	return peg_rate_idx_of(elem, int(elem[26]), note, vel, part_rate);
+	return peg_rate_idx_of(elem, int(elem[26]), note, vel, part_rate, cc_atk);
 }
 
 inline int peg_rate_reg(const u8 *rom, const u8 *elem, int note = 60, int vel = 100,
-                        int part_rate = 64)
+                        int part_rate = 64, int cc_atk = 64)
 {
-	return rd16s(rom, PEG_RATE_TAB + u32(peg_rate_idx(elem, note, vel, part_rate)) * 2);
+	return rd16s(rom, PEG_RATE_TAB
+	                  + u32(peg_rate_idx(elem, note, vel, part_rate, cc_atk)) * 2);
 }
 
 // 段 stage の速さのレジスタ
 inline int peg_rate_reg_stage(const u8 *rom, const u8 *elem, int stage, int note, int vel,
-                              int part_rate = 64)
+                              int part_rate = 64, int cc_atk = 64)
 {
-	const int i = peg_rate_idx_of(elem, peg_rate_raw(elem, stage), note, vel, part_rate);
+	const int i = peg_rate_idx_of(elem, peg_rate_raw(elem, stage), note, vel,
+	                              part_rate, cc_atk);
 	return rd16s(rom, PEG_RATE_TAB + u32(i) * 2);
+}
+
+// ---- **遅れて掛かるビブラート**（6.175）
+//
+// 弦・木管・金管は、鍵を押してすぐには揺れない。実機は 20ms ごとに回る
+// 仕事の中で、音ごとのカウンタを「遅れのぶん待ってから、1 歩ずつ」
+// 上げていき、その値を表で引いて `0x0a` の下位に書き直す。
+//
+//   遅れ（20ms の目盛り） = byte12 ? 3 × byte12 / 4 + 3 : 0
+//   止まる所              = byte14
+//   1 歩                  = byte13 ? max(1, byte14 / byte13 - 1) : max(1, byte14)
+//   レジスタ              = 表C[ 表B[カウンタ] ]
+//
+// 実機の `0x127CBC`（遅れの式）・`0x129940`（1 歩進める）・`0x129E04`
+// （表引き）から起こして、GM の揺れを持つ 41 音色で確かめた
+// （遅れ 21/23・止まる所 20/23・1 歩 18/18 が一致。外れるのは
+// AltoSax・Oboe・Piccolo の 3 つだけで、そこはまだ分からない）。
+//
+// **`byte14 × 3` は近道だった**。実機は表引きで、byte14 が 5 以上だと
+// 1 ずれる（6 のとき 18 ではなく 17）。Violin がそれ
+constexpr u32 VIB_CAP_TAB = 0x1E6370;   // パートの深さ → 頭打ち
+constexpr u32 VIB_CNT_TAB = 0x1E63F0;   // カウンタ → 目盛り（＝カウンタ × 2）
+constexpr u32 VIB_REG_TAB = 0x1E6596;   // 目盛り → レジスタ
+constexpr u32 VIB_TICK    = 882;        // 20ms
+
+inline int vib_ramp_reg(const u8 *rom, int counter)
+{
+	const int c = counter < 0 ? 0 : (counter > 63 ? 63 : counter);
+	return int(rom[VIB_REG_TAB + u32(rom[VIB_CNT_TAB + u32(c)])]);
+}
+
+inline int vib_delay_ticks(const u8 *elem)
+{
+	return elem[12] ? (3 * int(elem[12])) / 4 + 3 : 0;
+}
+
+inline int vib_ramp_target(const u8 *elem) { return int(elem[14]); }
+
+inline int vib_ramp_step(const u8 *elem)
+{
+	const int t = int(elem[14]);
+	if (!elem[13])
+		return t > 1 ? t : 1;
+	const int v = t / int(elem[13]) - 1;
+	return v > 1 ? v : 1;
+}
+
+// **音量側の揺れ**（`0x05` の下位）も同じ遅れで待つ。
+// GM で遅れを持つ音色は byte16 がどれも 1（深さ 2）なので、
+// せり上がるのか一っ飛びなのかは分からない。測れた範囲では
+// 遅れが明けた瞬間に 0 から byte16 × 2 へ一つ飛ぶ
+inline int vib_amp_depth(const u8 *elem) { return (int(elem[16]) * 2) & 0x7f; }
+
+// その音がせり上がりを持つか（持たないものは押した瞬間の値のまま）
+inline bool vib_ramps(const u8 *elem)
+{
+	return elem[9] < 2 && (elem[14] || elem[16]) && (elem[12] || elem[13]);
 }
 
 // `SMU2000_NO_PEG` を立てると音程の包絡線をやめる（比べるための逃げ道）
@@ -1012,27 +1095,60 @@ inline int reso_level(const u8 *elem, int vel, int part_res = 64)
 // 上位のビット 15 が「離せ」の印で、残りが離しの速さ（swp30.cpp の release_glo_w）。
 // 速さは減衰と同じ表を **byte76** で引き、鍵の補正も同じだけ乗る
 // （実機が離すときに書く値と、GrandPno の鍵 60 で一致する: 0xBE1E）
-// **離しのつまみ（CC72 / 08 pp 1C）**（6.170）。`tools/native/reltab.py` で
-// 128 段測った。**下げる側（64 未満）は音色によらない足し算**で、
-// 2 段ごとに 1 目盛り遅くなる:
+// **離しのつまみ（CC72 / 08 pp 1C）**（6.170）。実機の `0x127384`。
+// 下げる側（64 未満）は
 //
-//   目盛り = 素の目盛り + (65 - つまみ) / 2
+//   素が 55 より大きければ**動かない**
+//   そうでなければ min(55, 素 + (65 - つまみ) / 2)
 //
-// 上げる側（64 より大きい）は音色ごとに変わり方が違うので、まだ入れていない
-// （Strings1 は つまみ 90 から、GrandPno は 86 から動きはじめる）
-inline int rel_rate_cc(int base, int cc)
+// `tools/native/reltab.py` で Strings1 と GrandPno を 128 段測った値と
+// 合う（どちらも素が 55 以下なので、頭打ちは見えていない）。
+//
+// **上げる側（64 より大きい）**は別の表（`0x1E54E4`）を
+//
+//   min(素, 表[(つまみ - 64) + ボイスの塊 +112])
+//
+// で引く。音色ごとに動きはじめる所が違うのは **素の目盛りが
+// 違うから**：Strings1 は byte76 = 29 で つまみ 90、GrandPno は 31 で 86。
+// どちらも +112 = 3 で説明がつく
+constexpr u32 REL_RATE_CC = 0x1E54E4;   // 離しのつまみ（上げる側）の表
+constexpr int REL_RATE_OFF = 3;         // ボイスの塊 +112（測った値）
+
+// **立ち上がりの表の引き方**（実機の `0x1272DE`）。
+// 目盛りを 2 倍する前に **0 は 4 に直す**。
+//
+// そのあと実機は **126 を 255 に読み替えている**が、
+// それを入れると `0x06` が 0x7800 になって実機（0x7700）と違った
+// （keylevel・retrig・dense で 57 本）。255 は表の索引ではなく、
+// 呼ぶ側が別に見ている印らしいのでここでは 126 のままにする
+inline int attack_idx(int rate)
 {
-	if (cc < 0 || cc >= 64)
+	const int r = (rate <= 0 ? 4 : rate) * 2;
+	return r > 126 ? 126 : r;
+}
+
+inline int rel_rate_cc(const u8 *rom, int base, int cc)
+{
+	if (cc < 0 || cc == 64)
 		return base;
-	const int v = base + (65 - cc) / 2;
-	return v > 63 ? 63 : v;
+	const int c = cc > 127 ? 127 : cc;
+	if (c < 64) {
+		if (base > 55)
+			return base;            // 素が速ければ下げる側は効かない
+		const int v = base + (65 - c) / 2;
+		return v > 55 ? 55 : v;
+	}
+	if (!rom)
+		return base;
+	const int t = int(rom[REL_RATE_CC + u32(c - 64 + REL_RATE_OFF)]);
+	return t < base ? t : base;
 }
 
 inline u16 release_reg(const u8 *rom, const u8 *elem, int note, int att,
                        int cc_rel = 64)
 {
 	const int r = rom[DECAY_TAB + rate_scale(
-	                  rel_rate_cc(int(elem[76]), cc_rel), rate_key_corr(elem, note))];
+	                  rel_rate_cc(rom, int(elem[76]), cc_rel), rate_key_corr(elem, note))];
 	return u16(((0x80 | (r & 0x7f)) << 8) | (att & 0xff));
 }
 
@@ -1164,14 +1280,64 @@ inline const voice_cal *match_cal(const std::vector<voice_cal> &cals, u32 want, 
 // 始まる**。そうでなければ byte54（既定は 64 ＝ ずれ 0）から始めて、
 // byte50 の速さで段 0 の行き先へ登る。
 // GrandPno（byte50=63）は 0x400、Flute（byte50=62）は 0 で実機と一致した
-inline int fenv_start_level(const u8 *elem)
+// **立ち上がりのつまみはフィルタの包絡線の速さにも効く**（6.171）。
+// 実機の `0x128A32` をそのまま起こしたもの。つまみ → 目盛りの表が
+// `0x1E5CD8` に 128 バイトある。
+//
+//   つまみ 64        素の目盛りのまま
+//   つまみ 65-127    min(素, 表[つまみ])      表[64]=63 … 表[127]=0
+//   つまみ 0-63      max(素, 表[つまみ])      表[63]=18 … 表[0]=63
+//
+// **下げる側は、段 0 の行き先（byte55）が初めの高さ（byte54）より下がる
+// 音色では効かない**（実機は `CMP/HS` で振り分けて、つまみを 64 に戻す）。
+// 10ms ごとの `0x00` の伸びを増分の表（0x1E5C58）で引き戻して、
+// Strings1（素 63）・Reed Organ（素 40）・Bird Tweet（素 5）の 3 つで
+// 表と 1 つ残らず一致した（`tools/native/fenvrate.py`）
+constexpr u32 FENV_ATK_CC = 0x1E5CD8;   // つまみ → 立ち上がりの目盛り（128 バイト）
+
+inline int fenv_atk_rate(const u8 *rom, const u8 *elem, int cc_atk = 64)
 {
-	return elem[50] >= 63 ? elem[55] : elem[54];
+	const int base = int(elem[50]);
+	if (!rom)
+		return base;
+	int cc = cc_atk & 0x7f;
+	if (cc < 64 && int(elem[55]) < int(elem[54]))
+		cc = 64;                        // 下がる包絡線には効かない
+	if (cc == 64)
+		return base;
+	const int t = int(rom[FENV_ATK_CC + u32(cc)]);
+	return cc > 64 ? (t < base ? t : base) : (t > base ? t : base);
 }
 
-inline int fenv_init(const u8 *rom, const u8 *elem, int vel)
+// **すぐ段 0 の行き先まで行くか**。実機は目盛りが 63 以上なら増分に
+// 0x8000（＝すぐ次の段）を入れる。**鍵の補正を足したあともう一度見る**
+// ので、つまみで 63 を割っていても鍵の補正で戻ることがある
+inline bool fenv_atk_instant(const u8 *rom, const u8 *elem, int cc_atk = 64,
+                             int note = 60)
 {
-	return fenv_target(rom, elem, fenv_start_level(elem), vel);
+	const int r = fenv_atk_rate(rom, elem, cc_atk);
+	if (r >= 63)
+		return true;
+	int k = r + fenv_key_adj(elem, note);
+	if (k < 0)
+		k = 0;
+	return k >= 63;
+}
+
+// **初めの高さ**。すぐ行き先まで行くなら段 0 の行き先（byte55）、
+// そうでなければ byte54 から登る。つまみで 63 を割ると、ここが切り替わる
+inline int fenv_start_level(const u8 *elem, bool instant)
+{
+	return instant ? elem[55] : elem[54];
+}
+
+inline int fenv_init(const u8 *rom, const u8 *elem, int vel, int cc_atk = 64,
+                     int note = 60)
+{
+	return fenv_target(rom, elem,
+	                   fenv_start_level(elem,
+	                                    fenv_atk_instant(rom, elem, cc_atk, note)),
+	                   vel);
 }
 
 // **鍵を押した瞬間の `0x00`**（実機の `0x12AC98`）。
@@ -1223,9 +1389,10 @@ inline u16 cutoff_of(const u8 *rom, const u8 *elem, int note, int vel, int facc,
 }
 
 inline u16 cutoff_keyon(const u8 *rom, const u8 *elem, int note, int vel,
-                        bool cap = true)
+                        bool cap = true, int cc_atk = 64)
 {
-	return cutoff_of(rom, elem, note, vel, fenv_init(rom, elem, vel), cap);
+	return cutoff_of(rom, elem, note, vel,
+	                 fenv_init(rom, elem, vel, cc_atk, note), cap);
 }
 
 // 共振が浅ければ頭打ちを掛ける（つまみを効かせたあとに使う）
@@ -1369,9 +1536,25 @@ inline u16 drum_pitch_reg(const u8 *rom, const u8 *rec, int cents)
 
 // ドラムの 1 打のレジスタを、記録だけから組む（写し取りを使わない）。
 // 4 打 × 全鍵 58 個で実機と一致したものだけを入れてある
+// **ドラムの「音量」（セットアップの 02、NRPN 16）は
+// `0x09` ではなく、**立ち上がりの目盛り**を動かす**（6.180）。
+//
+//   目盛り = clamp(rec[13] + 音量 - 64, 0, 127)
+//   0x06    = ATTACK_TAB[目盛り] << 8 | (目盛り >= 126 ? 0x00 : 0x7e)
+//
+// 既定の 64 でちょうど rec[13] そのものになる。
+// Standard Kit の鍵 36（rec[13] = 122）・鍵 38・42（127）を
+// 音量 0-127 の全段で確かめた（`tools/native/drumlvl.py`）。
+// `0x07`・`0x08`・`0x09` は音量で動かない
+inline int drum_atk_idx(const u8 *rec, int level)
+{
+	const int v = int(rec[13] & 0x7f) + (level < 0 ? 64 : level) - 64;
+	return v < 0 ? 0 : (v > 127 ? 127 : v);
+}
+
 inline slot_regs drum_note(const u8 *rom, const u8 *rec, int att,
                            const defaults &d = defaults(),
-                           int coarse = 64, int fine = 64)
+                           int coarse = 64, int fine = 64, int level = 64)
 {
 	slot_regs r;
 	if (!rom || !rec)
@@ -1389,8 +1572,11 @@ inline slot_regs drum_note(const u8 *rom, const u8 *rec, int att,
 	r.set(0x04, u16((rec[12] >> 2) << 11));
 	r.set(0x05, d.lfo_amp);
 	// **速さの表は 2 倍しない**（旋律は rate_scale で 2 倍する）
-	r.set(0x06, u16(u16(rom[ATTACK_TAB + u32(rec[13] & 0x7f)]) << 8
-	                | (rec[13] >= 0x7f ? 0x00 : 0x7e)));
+	{
+		const int ai = drum_atk_idx(rec, level);
+		r.set(0x06, u16(u16(rom[ATTACK_TAB + u32(ai)]) << 8
+		                | (ai >= 126 ? 0x00 : 0x7e)));
+	}
 	r.set(0x07, u16(u16(rom[DECAY_TAB + u32(rec[14] & 0x7f)]) << 8 | 0x04));
 	r.set(0x08, u16(u16(rom[DECAY_TAB + u32(rec[15] & 0x7f)]) << 8
 	                | u16(((0x7f - int(rec[10])) * 2) & 0xff)));
@@ -1487,9 +1673,16 @@ inline slot_regs build_note(const u8 *rom, const u8 *elem, int note, int att,
                             const voice_cal *cal = nullptr,
                             const defaults &d = defaults(), int cents_extra = 0,
                             int vel = 100, int cc_atk = 64, int cc_dec = 64,
-                            int cc_vrate = 64, int cc_vdep = 64, int wnote = -1)
+                            int cc_vrate = 64, int cc_vdep = 64, int wnote = -1,
+                            int knote = -1)
 {
 	slot_regs r;
+	// **移調・ノートシフト・粗調は「鍵の曲線」には効かない**（6.172）。
+	// 波形と音程はずらした鍵、切る高さ・減衰の速さ・音程の包絡線は
+	// **押した鍵そのもの**で引く。GrandPno を -24 半音、SquareLd を
+	// -3 半音、粗調（RPN 2）・ノートシフト（08 pp 08）・
+	// マスター移調（00 00 06）の 3 通りで確かめた。どれも同じ
+	const int kn = knote < 0 ? note : knote;
 	// **CC84 で滑り出す音は、波形を「滑り出す鍵」で選ぶ**（6.168）
 	const u8 *we = wave_entry(rom, wave_set(elem),
 	                          wave_note(rom, elem, wnote < 0 ? note : wnote));
@@ -1507,7 +1700,7 @@ inline slot_regs build_note(const u8 *rom, const u8 *elem, int note, int att,
 	// 鍵 5 通り × 強さ 3 通りで実機と完全に一致）。**既定で入**（6.116）。
 	// `SMU2000_CUT_EXACT=0` で写し取り前提の前の道に戻せる
 	r.set(0x00, cut_exact()
-	            ? cutoff_keyon(rom, elem, note, vel)
+	            ? cutoff_keyon(rom, elem, kn, vel, true, cc_atk)
 	            : u16(0x1000 | (rd16(rom, CUTOFF_TAB + u32(elem[37]) * 2) & 0x7ff)));
 	// **鍵を押した瞬間の 0x01 は 0xFFFF**（実機は毎回そう書いて、最初の
 	// 包絡線の目で本当の値に置き換える）。14 音色を実機と突き合わせて
@@ -1542,14 +1735,16 @@ inline slot_regs build_note(const u8 *rom, const u8 *elem, int note, int att,
 	// 止まっている音色（遅れ byte12・byte13 があるもの、byte9 が 2）は
 	// つまみを回しても動かない。**素の深さが 0 でも、つまみでは動く**
 	// （SquareLd は素が 0 で、つまみ 96 のとき実機は 0xa0）
+	// **遅れを持つ音色は 0 から始めて、20ms ごとにせり上げる**（6.175）。
+	// byte9 が 2 以上の音色はそもそも揺れない
 	const bool vgate = (elem[12] || elem[13] || elem[9] >= 2);
-	const int plfo0 = vgate ? 0 : ((elem[14] * 3) & 0x7f);
+	const int plfo0 = vgate ? 0 : (vib_ramp_reg(rom, elem[14]) & 0x7f);
 	const int lrate = vib_rate(int(elem[11] & 0x3f), cc_vrate);
 	const int plfo  = vgate ? 0 : vib_depth(plfo0, cc_vdep);
 	r.set(0x0a, u16(((((elem[9] ? 0x40 : 0) | (lrate & 0x3f)) << 8))
 	                | u16(plfo & 0xff)));
 	// 音程の包絡線。速さが 127（即到達）のときだけ初めの高さは byte31 を使う
-	const int prate = peg_rate_reg(rom, elem, note, vel);
+	const int prate = peg_rate_reg(rom, elem, kn, vel, 64, cc_atk);
 	r.set(0x0b, u16(prate << 8));
 	r.set(0x10, peg_reg(rom, peg_cents(elem, prate == 127 ? elem[31] : elem[30], vel), elem));
 
@@ -1560,10 +1755,10 @@ inline slot_regs build_note(const u8 *rom, const u8 *elem, int note, int att,
 	//   目盛り = clamp(記録の値 + 補正, 1, 63) * 2
 	// で、その目盛りで ROM の表を引いたものがレジスタの上位バイトになる。
 	// 深さは byte70、折れ点の鍵は byte71（鍵 36・60・84 で確かめた）。
-	const int corr = rate_key_corr(elem, note);
+	const int corr = rate_key_corr(elem, kn);
 	// **立ち上がりのつまみ（CC73）で目盛りが動く**（6.157）
 	const int arate = eg_rate_cc(rom, int(elem[73]), cc_atk);
-	const u8 atk = rom[ATTACK_TAB + std::min(0x7f, arate * 2)];
+	const u8 atk = rom[ATTACK_TAB + u32(attack_idx(arate))];
 	// 写し取りがあれば、そのときのずれを表の目盛りに足す（上の dec_adj を見よ）
 	const int a1 = cal && cal->have ? cal->dec_adj[0] : 0;
 	const int a2 = cal && cal->have ? cal->dec_adj[1] : 0;

@@ -268,6 +268,8 @@ SHAPE_MIN = {
     "ccramp": 0.95, "midreset": 0.98, "partmode": 0.95,
     "drumnrpn": 0.95, "retrig": 0.95, "pedretrig": 0.98, "edges": 0.95,
     "fxchange": 0.95, "dialloop": 0.95, "panrnd": 0.95,
+    # 長く伸ばす音（遅れて掛かるビブラート。6.175）
+    "longtone": 0.95,
     # meter は 15 パートを同時に鳴らすので dense と同じ事情で形が落ちる
     # （狙いは液晶のほうなので、音は緩めに見る）
     "meter": 0.90, "filtcc": 0.95, "keyrange": 0.95, "rcvch": 0.95, "althh": 0.95, "drumrcv": 0.95,

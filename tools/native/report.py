@@ -61,6 +61,10 @@ def render(roms, midi, seconds, tag, native):
     return (wav, trc) if r.returncode == 0 and wav.exists() else (None, None)
 
 
+LAG = 3          # 窓ごとに合わせる幅（サンプル）
+WHERE = 0        # 0 でなければ、悪い窓をこの数だけ出す
+
+
 def resid(wa, wb):
     a, sr, ch = rd(wa)
     b, _, _ = rd(wb)
@@ -77,13 +81,14 @@ def resid(wa, wb):
     # そこまで真似るのは筋が悪い
     step = int(0.2 * sr) * ch
     num = den = 0.0
-    for s0 in range(0, len(x) - step - 3 * ch, step):
+    worst = []
+    for s0 in range(LAG * ch, len(x) - step - LAG * ch, step):
         xa = x[s0:s0 + step]
         r1 = rms(xa)
         if r1 < 5.0:
             continue
         bv = None
-        for lag in range(-3, 4):
+        for lag in range(-LAG, LAG + 1):
             ya = y[s0 + lag * ch: s0 + lag * ch + step]
             if len(ya) != len(xa):
                 continue
@@ -93,7 +98,13 @@ def resid(wa, wb):
         if bv is not None:
             num += bv * bv * len(xa)
             den += r1 * r1 * len(xa)
+            worst.append((bv * bv * len(xa), s0 / float(ch) / sr + BOOT,
+                          100.0 * bv / r1))
     aligned = math.sqrt(num / den) if den > 0 else 0.0
+    if WHERE:
+        worst.sort(reverse=True)
+        print("   悪い窓: " + "  ".join(
+            "%.1f秒 %.0f%%" % (t, pc) for _, t, pc in worst[:WHERE]))
     return 100.0 * d / r0, 100.0 * aligned
 
 
@@ -136,7 +147,13 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("names", nargs="*")
     ap.add_argument("--roms")
+    ap.add_argument("--lag", type=int, default=3,
+                    help="窓ごとに合わせる幅（サンプル）")
+    ap.add_argument("--where", type=int, default=0,
+                    help="悪い窓を N つ出す")
     a = ap.parse_args()
+    global LAG, WHERE
+    LAG, WHERE = a.lag, a.where
 
     roms = regdiff.find_roms(a.roms)
     if not roms:
