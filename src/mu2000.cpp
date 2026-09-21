@@ -1948,7 +1948,7 @@ void mu2000::release_voice_fields()
 	m_vf_part = -1;
 	for (u32 c = 9; c <= 16; c++)
 		m_lcd.set_owned(c, false);
-	for (u32 c = 14; c <= 16; c++)
+	for (u32 c = 10; c <= 16; c++)
 		m_lcd.set_owned(0x40 + c, false);
 	m_lcd.clear_cg_owned();
 }
@@ -1995,6 +1995,18 @@ void mu2000::draw_voice_fields()
 	const u8 dg[3] = { u8('0' + pn / 100), u8('0' + (pn / 10) % 10),
 	                   u8('0' + pn % 10) };
 
+	// **バンクの 3 桁**（6.202）。MSB 64 は「SFX」、ドラム（126・127）は
+	// MSB、それ以外は **LSB** の 3 桁（MSB 1-32 でも LSB のまま）
+	u8 bk[3];
+	if (p.msb == 64) {
+		bk[0] = 'S'; bk[1] = 'F'; bk[2] = 'X';
+	} else {
+		const int bn = p.msb >= 126 ? int(p.msb) : int(p.lsb);
+		bk[0] = u8('0' + bn / 100);
+		bk[1] = u8('0' + (bn / 10) % 10);
+		bk[2] = u8('0' + bn % 10);
+	}
+
 	if (!m_vf_owned || m_vf_part != part) {
 		m_vf_owned = true;
 		m_vf_part = part;
@@ -2002,6 +2014,8 @@ void mu2000::draw_voice_fields()
 			m_vf_name[i] = 0;
 		for (int i = 0; i < 3; i++)
 			m_vf_prog[i] = 0;
+		for (int i = 0; i < 3; i++)
+			m_vf_bank[i] = 0;
 		for (int y = 0; y < 16; y++)
 			m_vf_icon[y] = 0xffff;
 	}
@@ -2029,6 +2043,13 @@ void mu2000::draw_voice_fields()
 		if (m_vf_prog[i] != dg[i]) {
 			m_vf_prog[i] = dg[i];
 			m_lcd.poke_ddram(u32(0x40 + 14 + i), dg[i]);
+		}
+	}
+	for (int i = 0; i < 3; i++) {
+		m_lcd.set_owned(u32(0x40 + 10 + i), true);
+		if (m_vf_bank[i] != bk[i]) {
+			m_vf_bank[i] = bk[i];
+			m_lcd.poke_ddram(u32(0x40 + 10 + i), bk[i]);
 		}
 	}
 	// **絵は 16 行 × 16 ビットを左から 5 ビットずつ**（6.190）。
@@ -2075,6 +2096,16 @@ void mu2000::sync_prog()
 		sel.msb = msb; sel.lsb = lsb; sel.prog = prog;
 		native_select_voice(p);
 	}
+}
+
+bool mu2000::voice_lsb_ok(int msb, int lsb) const
+{
+	if (!m_prog)
+		return true;
+	const xg::voice_rom vr(m_prog);
+	const int mode = m_ram.size() > xg::ram::VOICE_MODE ? m_ram[xg::ram::VOICE_MODE] : 1;
+	const int set  = m_ram.size() > xg::ram::VOICE_SET  ? m_ram[xg::ram::VOICE_SET]  : 1;
+	return vr.lsb_ok(mode, set, msb, lsb);
 }
 
 void mu2000::native_select_voice(int part)
@@ -2170,9 +2201,17 @@ void mu2000::native_pump()
 		// 送りの値が 7 音ぶん違っていた（doc/native-engine.md の 6.53）
 		case 4:
 			if (e.part >= 0 && e.part < 64) {
-				if (e.d0 == 0) m_prog_sel[e.part].msb = e.d1;
-				else if (e.d0 == 1) m_prog_sel[e.part].lsb = e.d1;
-				else m_prog_sel[e.part].prog = e.d1;
+				if (e.d0 == 0) {
+					m_prog_sel[e.part].msb = e.d1;
+				} else if (e.d0 == 1) {
+					// **受け付けない LSB は無視**（6.202）。実機は前の
+					// バンクのまま鳴らすのに、こちらは LSB 0 の音色へ
+					// 落ちていた（`banklsb` の 7 打目）
+					if (voice_lsb_ok(m_prog_sel[e.part].msb, e.d1))
+						m_prog_sel[e.part].lsb = e.d1;
+				} else {
+					m_prog_sel[e.part].prog = e.d1;
+				}
 				native_select_voice(e.part);
 			}
 			break;

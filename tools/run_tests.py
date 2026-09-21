@@ -271,6 +271,9 @@ SHAPE_LOW = {
     # 割り当てを外したあとにつまみを動かすと、**すでに鳴っている音に
     # 掛からない**（測値 50%。doc/native-engine.md の 6.193）
     "assign":  0.65,
+    "bendasn": 0.65,
+    "progrel": 0.65,
+    "banklsb": 0.65,
     # 写し取りの音（実機が鳴らす 1 音目）だけ、実機の側が混み具合で
     # 遅れる（6.90・6.122）。測値 62%
     "dense":   0.55,
@@ -288,6 +291,9 @@ SHAPE_MIN = {
     "dense":   0.55, "port_b": 0.98, "bend":  0.98, "lofi":    0.98,
     "egcc":    0.98, "porta":  0.95, "at":    0.95, "sxparam": 0.95,
     "assign":  0.95,
+    "bendasn": 0.95,
+    "progrel": 0.95,
+    "banklsb": 0.95,
     "pedals":  0.95, "partsx": 0.95, "rpn": 0.95, "mono": 0.95,
     # 一晩で足した軸（6.125-6.139）。どれも中央 98-100% 出ている
     "ctlreset": 0.95, "ports": 0.95, "scale": 0.95, "kits": 0.95,
@@ -580,7 +586,7 @@ def step_meter(rep, roms):
 def step_screen(rep, roms):
     """**演奏画面の音色まわり**（doc/native-engine.md の 6.190）。firmware の道と
     native の口で同じ曲を鳴らして、**音色名（行 0 の 9-16）・プログラムの 3 桁
-    （行 1 の 14-16）・楽器の絵（外字 0-2 と 4-6）**を 0.1 秒ごとに突き合わせる。
+    （行 1 の 14-16）・**バンクの 3 桁**（行 1 の 10-12。6.202）・楽器の絵（外字 0-2 と 4-6）**を 0.1 秒ごとに突き合わせる。
     native はこれを自分で描くので、1 マスでも違えば読み違えている"""
     exe = tool("render")
     mid = WORK / "progchg.mid"
@@ -611,7 +617,8 @@ def step_screen(rep, roms):
     ICON = list(range(0, 24)) + list(range(32, 56))
 
     def fields(v):
-        return (v["d"][9:17], v["d"][24 + 14:24 + 17], [v["c"][i] for i in ICON])
+        return (v["d"][9:17], v["d"][24 + 14:24 + 17],
+                v["d"][24 + 10:24 + 13], [v["c"][i] for i in ICON])
 
     # **native が先を行くのは許す**。native は MIDI を受けた 25ms 後に描き、
     # firmware は 100ms につき 5ms しか回らないので最大 100ms 遅れる。

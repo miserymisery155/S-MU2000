@@ -65,6 +65,29 @@ public:
 	// バンクとプログラムから音色の記録を引く。firmware の 0x134AA8 と同じ手順。
 	// mode は RAM の 0x4226BC、set は 0x4226DE（xg::ram::VOICE_MODE / VOICE_SET）。
 	// 引けなければ 0（ドラム、MSB 16 の特別な組など）
+	// **その LSB を実機が受け付けるか**（6.202）。組の表で
+	// **LSB 0 と同じ組**になる LSB（0 以外）は丸ごと無視され、
+	// 前のバンクのままになる（番号はそのまま効く）
+	bool lsb_ok(int mode, int set, int msb, int lsb) const
+	{
+		if (!m_ok || mode != 1)
+			return true;
+		msb &= 0x7f; lsb &= 0x7f;
+		if (lsb == 0)
+			return true;
+		const u8 kind = byte(GROUP_XG + u32(msb));
+		u32 tab;
+		if (kind == 0)
+			tab = set == 0 ? GROUP_LSB0 : GROUP_LSB1;
+		else if (kind == 77)
+			tab = GROUP_LSB77;
+		else if (kind == 0xc9)
+			tab = set == 0 ? GROUP_LSBC9_0 : GROUP_LSBC9_1;
+		else
+			return true;              // LSB を見ない組
+		return byte(tab + u32(lsb)) != byte(tab);
+	}
+
 	u32 lookup(int mode, int set, int msb, int lsb, int prog) const
 	{
 		if (!m_ok)

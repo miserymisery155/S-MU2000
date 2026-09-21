@@ -597,6 +597,7 @@ private:
 	bool m_vf_owned = false;        // いま持っているか
 	u8  m_vf_name[8] = {};          // 前に置いた名前
 	u8  m_vf_prog[3] = {};          // 前に置いた番号
+	u8  m_vf_bank[3] = {};          // 前に置いたバンク（6.202）
 	u16 m_vf_icon[16] = {};         // 前に置いた絵
 	int m_vf_part = -1;
 	// **パートの種類**（XG の 08 pp 07。0 が旋律、2-5 がドラム 1-4）。
@@ -620,6 +621,8 @@ private:
 		return m_ram.size() > off && m_ram[off] != 0;
 	}
 	void native_select_voice(int part);
+	// そのバンク LSB を実機が受け付けるか（6.202）
+	bool voice_lsb_ok(int msb, int lsb) const;
 	// 受け取り終えた XG の SysEx を、native の側にも効かせる
 	void native_sysex(u64 fire);
 

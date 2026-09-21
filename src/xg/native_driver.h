@@ -472,7 +472,8 @@ public:
 			// **離しの最中もフィルタを動かす**。実機は離しのあいだも
 			// 0x00・0x01・0x04 を書き続ける（doc/native-engine.md の 6.57）
 			if (!s.on) {
-				if (!s.rel || clock - s.rel_at > REL_FOLLOW)
+				// **鳴り終わった声には書かない**（6.201）
+				if (!rel_follow(s, clock))
 					continue;
 				// **離しの最中も包絡線を式で動かす**
 				if (fenv_on() && s.elem) {
@@ -519,7 +520,14 @@ public:
 						s.cut = v;
 						v = cutoff_reg(v, *s.cal, s.part, s.elem, s.keynote,
 						                   s.lcut + assign_cut(s.part, s.keynote));
-					} else if (re[s.rpos].reg == 0x04) {
+					} else if (re[s.rpos].reg == 0x05) {
+					// **LFO の音量の割り当てを乗せる**（6.199）。
+					// 録画はつまみが既定のときの値なので、
+					// そのまま流すと割り当てが消える
+					v = u16((v & 0xff00)
+					      | u16(nv::amod_reg(assign_amod(s.part, s.keynote),
+					                        int(v & 0x7f) / 2)));
+				} else if (re[s.rpos].reg == 0x04) {
 						v = reso_reg(v, *s.cal, s.part);
 					}
 					m_poke(u32(i) * 64 + re[s.rpos].reg, v);
@@ -595,7 +603,9 @@ public:
 					s.vnext += nv::VIB_TICK;
 				}
 				if (mova)
-					m_poke(u32(i) * 64 + 0x05, u16(s.ahi | u16(s.vamp)));
+					m_poke(u32(i) * 64 + 0x05,
+					       u16(0xaa00 | u16(nv::amod_reg(
+					           assign_amod(s.part, s.keynote), s.vamp / 2))));
 				if (movp) {
 					const int d = nv::vib_ramp_reg(m_rom, s.vcnt) & 0x7f;
 					m_poke(u32(i) * 64 + 0x0a,
@@ -650,6 +660,13 @@ public:
 					s.cut = v;
 					v = cutoff_reg(v, *s.cal, s.part, s.elem, s.keynote,
 						                   s.lcut + assign_cut(s.part, s.keynote));
+				} else if (fe[s.tpos].reg == 0x05) {
+					// **LFO の音量の割り当てを乗せる**（6.199）。
+					// 録画はつまみが既定のときの値なので、
+					// そのまま流すと割り当てが消える
+					v = u16((v & 0xff00)
+					      | u16(nv::amod_reg(assign_amod(s.part, s.keynote),
+					                        int(v & 0x7f) / 2)));
 				} else if (fe[s.tpos].reg == 0x04) {
 					v = reso_reg(v, *s.cal, s.part);
 				}
@@ -758,23 +775,33 @@ public:
 			set_assign(part, addr <= 0x28 ? u32(addr) : u32(addr) - 7, dd);
 	}
 
-	// **こちらが見ている割り当てのバイト**（6.195）。
-	// 音程（組の 1 つ目）と LFO のフィルタ変調（5 つ目）だけ
-	static constexpr u32 ASN_OFF[12] = {
-		0x1d, 0x21,      // モジュレーション
-		0x23, 0x27,      // ベンド
-		0x46, 0x4a,      // チャンネルアフタータッチ
-		0x4c, 0x50,      // PAT
-		0x53, 0x57,      // AC1
-		0x5a, 0x5e,      // AC2
+	// **こちらが見ている割り当てのバイト**（6.203）。つまみ 6 つ×
+	// 行き先 6 つ（音程・切る高さ・音量・LFO の音程・フィルタ・音量）の 36 を全部
+	static constexpr u32 ASN_BASE[6] = {
+		0x1d,            // モジュレーション
+		0x23,            // ベンド
+		0x46,            // チャンネルアフタータッチ
+		0x4c,            // PAT
+		0x53,            // AC1
+		0x5a,            // AC2
 	};
+	static constexpr int ASN_N = 36;
+
+	static int asn_index(u32 off)
+	{
+		for (int b = 0; b < 6; b++)
+			if (off >= ASN_BASE[b] && off < ASN_BASE[b] + 6)
+				return b * 6 + int(off - ASN_BASE[b]);
+		return -1;
+	}
 
 	int asn_byte(int part, u32 off) const
 	{
-		if (part >= 0 && part < PARTS)
-			for (int k = 0; k < 12; k++)
-				if (ASN_OFF[k] == off && ((m_asn_have[part] >> k) & 1))
-					return int(m_asn[part][k]);
+		if (part >= 0 && part < PARTS) {
+			const int k = asn_index(off);
+			if (k >= 0 && ((m_asn_have[part] >> k) & 1))
+				return int(m_asn[part][size_t(k)]);
+		}
 		return (m_ram && part >= 0 && part < PARTS)
 		     ? int(m_ram[ram::part_base(part) + off]) : 64;
 	}
@@ -783,16 +810,16 @@ public:
 	{
 		if (part < 0 || part >= PARTS)
 			return;
-		for (int k = 0; k < 12; k++) {
-			if (ASN_OFF[k] != off)
-				continue;
-			m_asn[part][k] = u8(v & 0x7f);
-			m_asn_have[part] |= u16(1u << k);
-			refresh_lfo_depth(part);
-			refresh_assign_pitch(part);
-			refresh_assign_amp(part);
+		const int k = asn_index(off);
+		if (k < 0)
 			return;
-		}
+		m_asn[part][size_t(k)] = u8(v & 0x7f);
+		m_asn_have[part] |= u64(1) << k;
+		refresh_lfo_depth(part);
+		refresh_assign_pitch(part);
+		refresh_assign_amp(part);
+		refresh_assign_amod(part);
+		refresh_pmod(part);
 	}
 
 	// そのパートの「こちらが覚えているつまみ」を捨てて、ワーク RAM から
@@ -971,7 +998,7 @@ public:
 	// **つまみの割り当て「音量」の合計**（6.195）。
 	// 実機（0x12A700）はベンド・モジュレーション・アフタータッチ・
 	// AC1・AC2 を同じ形で足している（PAT はこの組に無い）
-	int assign_amp(int part) const
+	int assign_amp(int part, int note = -1) const
 	{
 		if (!m_ram || !m_rom || part < 0 || part >= PARTS)
 			return 0;
@@ -983,6 +1010,18 @@ public:
 		sum += nv::amp_assign(m_rom, asn_byte(part, 0x48), c.chpress);
 		sum += nv::amp_assign(m_rom, asn_byte(part, 0x55), c.ac1);
 		sum += nv::amp_assign(m_rom, asn_byte(part, 0x5c), c.ac2);
+		// **ベンドは中央からの離れを 64 で割った値**（6.200。実機 0x12A6F6）。
+		// 値の符号は呼ぶ側、深さの符号は表の側が持つ
+		const int bv = (c.bend - 0x2000) >> 6;
+		if (bv) {
+			const int q = nv::amp_assign(m_rom, asn_byte(part, 0x25),
+			                             bv < 0 ? -bv : bv);
+			sum += bv < 0 ? -q : q;
+		}
+		// **PAT だけは鍵ごと**（実機 0x12A4D4。鍵は 36-97 だけ）
+		if (note >= 36 && note < 98)
+			sum += nv::amp_assign(m_rom, asn_byte(part, 0x4e),
+			                      int(m_pat[size_t(part)][size_t(note)]));
 		return sum;
 	}
 
@@ -1031,7 +1070,8 @@ public:
 			if (g_calc > 0)
 				g = g * g_ram / g_calc;
 		}
-		g += assign_amp(part);          // つまみの割り当て（6.195）
+		// **つまみの割り当てはここでは足さない**（6.200）。実機は音量を
+		// 掛けたあとの目盛りの索引の側に足す（volume_att_from の `add`）
 		return g < 0 ? 0 : (g > 128 ? 128 : g);
 	}
 
@@ -1141,10 +1181,11 @@ public:
 		if (!m_ram || part < 0 || part >= PARTS)
 			return false;                  // 分からないときは任せる側に倒す
 		const u8 *b = m_ram + ram::part_base(part) + off;
-		// **こちらで鳴らせるのは 0・1・2・3・4**（6.191-6.198）。
-		// 残りは LFO の音量（5）だけで、そこだけはまだ任せる
+		// **6 つ組は全部こちらで鳴らせる**（6.191-6.199）。
+		// 音程・切る高さ・音量・LFO の音程・LFO のフィルタ・LFO の音量
 		if (mine)
-			return !b[5];
+			return true;
+		(void)b;
 		return b[0] == 64 && b[1] == 64 && b[2] == 64 && !b[3] && !b[4] && !b[5];
 	}
 
@@ -1156,19 +1197,21 @@ public:
 		if (!m_ram || part < 0 || part >= PARTS)
 			return false;
 		const u8 *b = m_ram + ram::part_base(part) + MW_BLOCK;
-		// 音程・切る高さ・音量・LFO の音程・LFO のフィルタは
-		// こちらで鳴らせるので、**LFO の音量だけ**を見る（6.198）
-		return !b[5];
+		// **6 つ組は全部こちらで鳴らせる**（6.199）
+		(void)b;
+		return true;
 	}
 
 	// ベンドは +0x23 が幅（RPN で普通に動く。こちらも読んでいる）なので、
 	// 音程以外の 5 つだけを見る
 	bool bend_idle(int part) const
 	{
-		if (!m_ram || part < 0 || part >= PARTS)
-			return false;
-		const u8 *b = m_ram + ram::part_base(part) + PB_BLOCK;
-		return b[1] == 64 && b[2] == 64 && !b[3] && !b[4] && !b[5];
+		// **ベンドの 6 つ組も全部こちらで鳴らせる**（6.201）。
+		// 音程は `pitch_of`、切る高さは `assign_cut`、音量は
+		// `assign_amp`、LFO の 3 つは `assign_pmod` / `lfo_fdep_extra` /
+		// `assign_amod` が見ている
+		(void)part;
+		return true;
 	}
 
 	// アフタータッチ（触れた強さ）。**割り当てが既定なら音に何も起きない**
@@ -1200,6 +1243,7 @@ public:
 			refresh_lfo_depth(part);
 			refresh_assign_pitch(part);
 			refresh_assign_amp(part);
+			refresh_assign_amod(part);
 			const u32 bit = k ? 28u : 29u;
 			if (value && !assign_idle(part, blk[k], true))
 				m_cc[part].unknown |= 1u << bit;
@@ -1239,6 +1283,12 @@ public:
 				p.unknown |= 1u << 27;
 			else
 				p.unknown &= ~(1u << 27);
+			// **割り当てのぶんを鳴っている音に効かせる**（6.199）。
+			// 0x0a は apply_cc が書き直すので、残りをここで
+			refresh_lfo_depth(part);
+			refresh_assign_pitch(part);
+			refresh_assign_amp(part);
+			refresh_assign_amod(part);
 			break;
 		case 0x5b: p.rev = value; break;
 		case 0x5d: p.cho = value; break;
@@ -1354,6 +1404,7 @@ public:
 		// 受けた瞬間ではなく、つぎの 10ms 割り込みでレジスタを書き直す
 		// （実測で `0x11` の書き込みがいつも位相 304 に乗る）。こちらは
 		// その場で書いていたので、大きく曲げる曲で 5ms ぶん先走っていた
+		bend_assign(part);          // 割り当てはその場で（6.201）
 		if (m_eg_have && bend_grid()) {
 			const u64 due = eg_after(m_clock);
 			m_bend_due[part] = due;
@@ -1388,6 +1439,23 @@ public:
 	const part_cc &cc_of(int part) const { return m_cc[part]; }
 
 private:
+	// **離した音を追ってよいか**（6.201）。
+	// 実機は声が鳴り終わった時点でスロットを空け、以後は
+	// 何も書かない。こちらだけが書き続けると、鳴り続けている
+	// 尾にベンドや LFO が掛かって実機と全く違う音になる
+	bool rel_follow(const slot_use &s, u64 now = ~u64(0)) const
+	{
+		if (s.on)
+			return true;
+		if (now == ~u64(0))
+			now = m_clock;
+		if (!s.rel || now - s.rel_at > REL_FOLLOW)
+			return false;
+		if (!m_slot_peek)
+			return true;
+		return m_slot_peek(int(&s - m_slot.data()));
+	}
+
 	// いま鳴っているスロットに、つまみの動きを反映する
 	void apply_cc(int part)
 	{
@@ -1404,7 +1472,7 @@ private:
 			if (!s.on) {
 				// **ドラムには離しの段が無い**（要素を持たない）ので、
 				// 追わずにそのまま鳴らしきらせる（6.139）
-				if (!s.rel || !s.elem || m_clock - s.rel_at > REL_FOLLOW)
+				if (!s.elem || !rel_follow(s))
 					continue;
 				m_poke(u32(i) * 64 + 9, release_of(s, part, s.keynote));
 				continue;
@@ -1692,10 +1760,51 @@ private:
 	{
 		for (int i = 0; i < SLOTS; i++) {
 			slot_use &s = m_slot[i];
-			if (!s.on || s.part != part || !s.elem || !s.wave)
+			if (s.part != part || !s.elem || !s.wave)
+				continue;
+			// **離している音も曲げる**（6.201）。戻す時刻と
+			// 離す時刻が重なると、曲がったまま鳴り続けていた
+			if (!rel_follow(s))
 				continue;
 			m_poke(u32(i) * 64 + 0x11, pitch_of(s));
 		}
+	}
+
+	// **ベンドの割り当て（音程以外）はその場で**（6.201）。
+	// 実機は音程だけを 10ms の格子に乗せて、こちらはすぐに書く。
+	// 切る高さはフィルタの 10ms の刻みが毎回 `assign_cut` を乗せるのでここには無い
+	void bend_assign(int part)
+	{
+		if (bend_asn_plain(part))
+			return;
+		refresh_lfo_depth(part);
+		refresh_assign_amp(part);
+		refresh_assign_amod(part);
+		refresh_pmod(part);
+	}
+
+	// つまみが動いたら、鳴っている音の**LFO の音程の深さ**を書き直す（6.201）。
+	// CC は `apply_cc` がやっているので、ここはベンド専用
+	void refresh_pmod(int part)
+	{
+		for (int i = 0; i < SLOTS; i++) {
+			slot_use &s = m_slot[i];
+			if (s.part != part || !s.cal || !s.lfo)
+				continue;
+			if (!rel_follow(s))
+				continue;
+			m_poke(u32(i) * 64 + 0x0a,
+			       lfo_reg(s.lfo, *s.cal, part, s.keynote));
+		}
+	}
+
+	// ベンドの割り当て（音程以外の 5 つ）が全部既定か
+	bool bend_asn_plain(int part) const
+	{
+		if (!m_ram || part < 0 || part >= PARTS)
+			return true;
+		const u8 *b = m_ram + ram::part_base(part) + PB_BLOCK;
+		return b[1] == 64 && b[2] == 64 && !b[3] && !b[4] && !b[5];
 	}
 
 	// モノのパートで、いま鳴っている別の鍵を離す
@@ -1732,7 +1841,8 @@ private:
 			const slot_use &s = m_slot[i];
 			if (s.part != part || s.keynote == except)
 				continue;
-			if (!s.on && !s.rel)
+			// 離してから長い音は追わない（実機も書かない。6.199）
+			if (!rel_follow(s))
 				continue;
 			if (s.alt_kill)
 				continue;
@@ -1811,13 +1921,15 @@ private:
 	{
 		const part_cc &p = m_cc[part];
 		const nv::voice_cal *c = s.cal;
-		if (!m_rom || (p.vol < 0 && p.expr < 0 && !assign_amp(part)))
+		const int asn = assign_amp(part, s.keynote);
+		if (!m_rom || (p.vol < 0 && p.expr < 0 && !asn))
 			return nv::clamp_att(s.att);
 		const int vol  = p.vol  >= 0 ? p.vol  : (c ? c->cal_vol  : 100);
 		const int expr = p.expr >= 0 ? p.expr : (c ? c->cal_expr : 127);
 		if (s.lvl0 > 0)
 			return nv::clamp_att(nv::volume_att_from(m_rom, s.lvl0, s.arest,
-			                                         vol_gain_of(part, vol, expr)));
+			                                         vol_gain_of(part, vol, expr),
+			                                         asn));
 		// **ドラムには目盛りが無い**（要素を持たず、写し取った減衰をそのまま
 		// 使う道）。そこは今までどおり、減衰の差ぶんで動かす
 		int a = s.att;
@@ -1887,7 +1999,9 @@ private:
 	// **つまみの割り当て「LFO の音程」の合計**（6.198）。
 	// 実機（0x12A034）はベンド・モジュレーション・AT・AC1・AC2 を
 	// `値 × 深さ / 128` で足し、そこに**鍵ごとの PAT**を加える
-	int assign_pmod(int part, int note, int mod_now) const
+	// `bend_now` に 0x2000 を渡すと、ベンドを中央に置いたときの合計を返す
+	//（6.201。`lfo_reg` の「素の値」用）
+	int assign_pmod(int part, int note, int mod_now, int bend_now = -1) const
 	{
 		if (!m_ram || part < 0 || part >= PARTS)
 			return 0;
@@ -1903,7 +2017,7 @@ private:
 			            int(m_pat[size_t(part)][size_t(note)]));
 		const int pb = asn_byte(part, 0x26);
 		if (pb) {
-			int v = c.bend;
+			int v = bend_now < 0 ? c.bend : bend_now;
 			if (v < 0)
 				v += 63;
 			v = (v >> 6) - 128;
@@ -1913,6 +2027,56 @@ private:
 		return sum;
 	}
 
+	// **つまみの割り当て「LFO の音量」の合計**（6.199）。
+	// どのつまみも `値 × 深さ / 1024`。PAT だけは鍵ごと
+	int assign_amod(int part, int note) const
+	{
+		if (!m_ram || part < 0 || part >= PARTS)
+			return 0;
+		const u8 *b = m_ram + ram::part_base(part);
+		const part_cc &c = m_cc[part];
+		auto term = [](int d, int v) { return (d && v) ? (d * v) / 1024 : 0; };
+		int sum = 0;
+		sum += term(asn_byte(part, 0x22),
+		            c.mod >= 0 ? c.mod : int(b[ram::PART_MOD]));
+		sum += term(asn_byte(part, 0x4b), c.chpress);
+		sum += term(asn_byte(part, 0x58), c.ac1);
+		sum += term(asn_byte(part, 0x5f), c.ac2);
+		if (note >= 36 && note < 98)
+			sum += term(asn_byte(part, 0x51),
+			            int(m_pat[size_t(part)][size_t(note)]));
+		// **ベンドだけ分母が 256**（6.201。実機 0x129F40）。中央からの
+		// 離れを 256 で割った ±32 を、符号を捨てて深さと掛ける
+		const int pb = s8(u8(asn_byte(part, 0x28)));
+		if (pb) {
+			int v = c.bend - 0x2000;
+			if (v < 0)
+				v += 0xff;
+			v >>= 8;
+			if (v < 0)
+				v = -v;
+			sum += (pb * v) / 256;
+		}
+		return sum;
+	}
+
+	// つまみが動いたら、鳴っている音の**LFO の音量**を書き直す（6.199）
+	void refresh_assign_amod(int part)
+	{
+		for (int i = 0; i < SLOTS; i++) {
+			slot_use &s = m_slot[i];
+			if (s.part != part || !s.elem)
+				continue;
+			// 離してから長い音は追わない（実機も書かない。6.199）
+			if (!rel_follow(s))
+				continue;
+			const int base = s.lrun ? (s.vamp / 2) : 0;
+			m_poke(u32(i) * 64 + 0x05,
+			       u16(0xaa00 | u16(nv::amod_reg(assign_amod(part, s.keynote),
+			                                     base))));
+		}
+	}
+
 	// LFO のレジスタ。下位が深さで、つまみのぶんを足す（6.198）。
 	// 写し取ったときの値との**差**で動かすのはこれまでどおり。
 	// 割り当てが既定（深さ 10）なら、前の 10 段の表と同じ値になる
@@ -1920,7 +2084,7 @@ private:
 	{
 		const int now = m_cc[part].mod;
 		const int sum = assign_pmod(part, note, now < 0 ? c.cal_mod : now);
-		const int was = assign_pmod(part, note, c.cal_mod);
+		const int was = assign_pmod(part, note, c.cal_mod, 0x2000);
 		if (sum == was || !m_rom)
 			return base;
 		const int d = nv::pmod_reg(m_rom, sum) - nv::pmod_reg(m_rom, was);
@@ -1984,7 +2148,7 @@ public:
 				continue;
 			if (s.on)
 				m_poke(u32(i) * 64 + 9, u16(note_att(s, part)));
-			else if (s.rel && m_clock - s.rel_at <= REL_FOLLOW)
+			else if (rel_follow(s))
 				m_poke(u32(i) * 64 + 9, release_of(s, part, s.keynote));
 		}
 	}
@@ -1996,7 +2160,10 @@ public:
 			slot_use &s = m_slot[i];
 			if (s.part != part || !s.elem || !s.wave)
 				continue;
-			if (!s.on && !s.rel)
+			// **離した音も追う**（6.200）。押している音だけにすると
+			// 割り当てを戻すところの残差が 16.9% → 47.9% に悪くなった。
+			// 実機も離しの最中は音程を見直しているらしい
+			if (!rel_follow(s))
 				continue;
 			s.pdirty = true;
 			m_traj = true;
@@ -2012,7 +2179,8 @@ public:
 		for (slot_use &s : m_slot) {
 			if (s.part != part || !s.elem || !s.lstep)
 				continue;
-			if (!s.on && !s.rel)
+			// 離してから長い音は追わない（実機も書かない。6.199）
+			if (!rel_follow(s))
 				continue;
 			s.lfull = nv::lfo_fdepth(m_rom, s.elem,
 			                         lfo_fdep_extra(part, s.note));
@@ -2031,6 +2199,7 @@ public:
 		refresh_lfo_depth(part);
 		refresh_assign_pitch(part);
 		refresh_assign_amp(part);
+		refresh_assign_amod(part);
 		// **調べ用**（`SMU2000_PAT_DBG=1`）。索引に乗るぶんと深さを出す
 		if (std::getenv("SMU2000_PAT_DBG"))
 			std::fprintf(stderr, "PAT part=%d note=%d v=%d extra=%d depth=%02x\n",
@@ -2047,6 +2216,7 @@ public:
 		refresh_lfo_depth(part);
 		refresh_assign_pitch(part);
 		refresh_assign_amp(part);
+		refresh_assign_amod(part);
 	}
 
 	// **そのパートをその強さで鳴らしたときの目盛り**（6.188）。
@@ -2483,7 +2653,8 @@ public:
 			                m_cc[part].vol  >= 0 ? m_cc[part].vol
 			                                     : (c ? c->cal_vol : 100),
 			                m_cc[part].expr >= 0 ? m_cc[part].expr
-			                                     : (c ? c->cal_expr : 127))));
+			                                     : (c ? c->cal_expr : 127)),
+			    assign_amp(part, note)));
 			const part_cc &pc = m_cc[part];
 			// **ポルタメント**（6.41）。前の鍵（CC84 があればその鍵）の音程で
 			// 鳴らし始めて、10ms ごとに寄せていく。残りのずれはセント × 256 で持つ。
@@ -3193,9 +3364,9 @@ private:
 	// **鍵ごとのアフタータッチの値**（6.191）。実機はパートの塊の
 	// +0x82 から 62 鍵分を持っている。こちらは 128 鍵分持っておく
 	std::array<std::array<u8, 128>, PARTS> m_pat{};
-	// 割り当ての控え（6.195）。ASN_OFF の並び
-	std::array<std::array<u8, 12>, PARTS> m_asn{};
-	std::array<u16, PARTS> m_asn_have{};
+	// 割り当ての控え（6.195）。ASN_BASE の並び・36 本
+	std::array<std::array<u8, ASN_N>, PARTS> m_asn{};
+	std::array<u64, PARTS> m_asn_have{};
 	// **ドラムのセットアップを触った印**（6.180）。組 × 鍵 ごとに
 	// 項目 0-7 のビット。実機は触られた項目だけ計算し直すので、
 	// 値だけ見ても既定のままなのか書き直されたのか分からない
