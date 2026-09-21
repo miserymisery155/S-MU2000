@@ -53,6 +53,14 @@ bool hint_bar();
 // 説明を出す。帯があれば帯へ、無ければ直前の部品のツールチップへ（printf の書式）
 void hint(const char *fmt, ...);
 const std::string &hint_text();
+// 絵の中に入り切らず出さなかった点の字。帯のある窓では帯に並べて出す
+void hidden_value(const char *text);
+const std::string &hidden_values();
+
+// マウスで動かしている値の送信。押している間は 60 ms に 1 回、行き先ごとに最新の値だけ送り、
+// 離したらすぐ送る（毎コマ送ると直列が詰まって反応が遅れる）。窓の持ち主は毎コマ描いた後に drag_flush を呼ぶ
+void drag_send(bridge &br, std::vector<u8> bytes);
+void drag_flush(bridge &br);
 
 // 今のコマの RAM の写し。窓が描く前に置き、絵（音色の中身を読むもの）が読む
 void set_current_ram(const xg_snapshot *ram);
@@ -134,6 +142,9 @@ void set_overview_zoom(float zoom);
 // ---- パートの音色の窓の表示の大きさ（0.4〜1.5、既定 0.6）。editor.ini に覚えておく
 float &shapes_zoom();
 void set_shapes_zoom(float zoom);
+// 音色の窓の区画（番号）ごとに、絵で触るか（false）つまみで触るか（true）。editor.ini に覚えておく
+bool shapes_knobs(int panel);
+void set_shapes_knobs(int panel, bool knobs);
 
 // ---- マスターの窓の表示の大きさ（0.4〜1.5、既定 0.8）。editor.ini に覚えておく
 float &master_zoom();
@@ -156,6 +167,8 @@ void set_audition_note(int note);
 // %LOCALAPPDATA%\S-MU2000\editor.ini に覚えておく（窓どうしで共通）
 bool &help_on();
 int help_lang();                        // 0 が日本語、1 が English
+// 言語を選ぶ。editor.ini に lang= があれば、次に読んだときにそちらが勝つ
+void set_help_lang(int lang);
 // 直前の部品にカーソルが載っていれば、説明を出す。name は列の見出しかパラメータのキー
 void help_tip(const char *name);
 // 「説明を出す」のチェックボックスと、言語の選択

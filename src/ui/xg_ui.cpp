@@ -7,6 +7,7 @@
 #include "fx_icons.h"
 
 #include "imgui.h"
+#include "imgui_internal.h"   // SetKeyOwner（棒が矢印キーをもらう）
 
 #include <algorithm>
 #include <cstdarg>
@@ -81,12 +82,24 @@ const xg_snapshot *g_current_ram = nullptr;
 namespace {
 bool g_hint_bar = false;
 std::string g_hint;
+std::string g_hidden;
 }
 
-void begin_hint_bar() { g_hint_bar = true; g_hint.clear(); }
+void begin_hint_bar() { g_hint_bar = true; g_hint.clear(); g_hidden.clear(); }
 void end_hint_bar() { g_hint_bar = false; }
 bool hint_bar() { return g_hint_bar; }
 const std::string &hint_text() { return g_hint; }
+
+void hidden_value(const char *text)
+{
+	if (!g_hint_bar)
+		return;
+	if (!g_hidden.empty())
+		g_hidden += "   ";
+	for (const char *c = text; *c; c++)
+		g_hidden += *c == '\n' ? ' ' : *c;       // 2 行の字も 1 行に
+}
+const std::string &hidden_values() { return g_hidden; }
 
 void hint(const char *fmt, ...)
 {
@@ -99,6 +112,55 @@ void hint(const char *fmt, ...)
 		g_hint = buf;
 	else
 		ImGui::SetItemTooltip("%s", buf);
+}
+
+// ---- マウスで動かしている間の送信の間引き
+namespace {
+struct drag_msg { std::string key; std::vector<u8> bytes; };
+std::vector<drag_msg> g_drag;                       // 送っていない分（番地ごとに最新だけ）
+std::chrono::steady_clock::time_point g_drag_sent;
+constexpr auto DRAG_EVERY = std::chrono::milliseconds(60);   // 画面は 30 コマ／秒。2 コマに 1 回くらい
+
+// 同じ行き先かを見分ける印。パラメータチェンジは番地まで、CC は番号まで
+std::string drag_key(const std::vector<u8> &b)
+{
+	size_t n = b.size();
+	if (!b.empty() && b[0] == 0xf0)
+		n = std::min<size_t>(n, 7);             // F0 43 1n 4C 上 中 下
+	else if (!b.empty() && (b[0] & 0xf0) == 0xb0)
+		n = std::min<size_t>(n, 2);             // Bn 番号
+	return std::string(b.begin(), b.begin() + std::ptrdiff_t(n));
+}
+
+void drag_send_now(bridge &br)
+{
+	for (drag_msg &d : g_drag)
+		br.send(std::move(d.bytes));
+	g_drag.clear();
+	g_drag_sent = std::chrono::steady_clock::now();
+}
+} // namespace
+
+void drag_send(bridge &br, std::vector<u8> bytes)
+{
+	if (bytes.empty())
+		return;
+	const std::string key = drag_key(bytes);
+	auto it = std::find_if(g_drag.begin(), g_drag.end(), [&](const drag_msg &d) { return d.key == key; });
+	if (it != g_drag.end())
+		it->bytes = std::move(bytes);
+	else
+		g_drag.push_back({ key, std::move(bytes) });
+	drag_flush(br);
+}
+
+void drag_flush(bridge &br)
+{
+	if (g_drag.empty())
+		return;
+	// ボタンを離したらすぐ。押している間は間を空けて
+	if (!ImGui::IsMouseDown(ImGuiMouseButton_Left) || std::chrono::steady_clock::now() - g_drag_sent >= DRAG_EVERY)
+		drag_send_now(br);
 }
 
 void set_current_ram(const xg_snapshot *ram) { g_current_ram = ram; }
@@ -310,9 +372,23 @@ bool param_slider(const char *key, int part, xg::model &m, bridge &br, const cha
 		text += c;
 	}
 	int nv = v;
-	const bool changed = ImGui::SliderInt(label ? label : p.label, &nv, p.min, p.max, text.c_str()) && nv != v;
+	ImGui::SliderInt(label ? label : p.label, &nv, p.min, p.max, text.c_str());
+	// ← → で 1 つずつ（Shift で 10）。カーソルが載っている棒か、ほかに載っていなければ最後に触った棒
+	const bool typing = ImGui::GetIO().WantTextInput;
+	if (!typing && (ImGui::IsItemHovered() || (ImGui::IsItemFocused() && !ImGui::IsAnyItemHovered()))) {
+		// キーはこの棒がもらう（ImGui のキーボード移動で、隣の部品へ移らないように）
+		const ImGuiID id = ImGui::GetItemID();
+		ImGui::SetKeyOwner(ImGuiKey_LeftArrow, id);
+		ImGui::SetKeyOwner(ImGuiKey_RightArrow, id);
+		const int step = ImGui::GetIO().KeyShift ? 10 : 1;
+		if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow, ImGuiInputFlags_Repeat, id))
+			nv = std::max(p.min, nv - step);
+		if (ImGui::IsKeyPressed(ImGuiKey_RightArrow, ImGuiInputFlags_Repeat, id))
+			nv = std::min(p.max, nv + step);
+	}
+	const bool changed = nv != v;
 	if (changed)
-		br.send(m.set(p, part, nv));
+		drag_send(br, m.set(p, part, nv));      // ドラッグ中は間引く。キーや数の打ち込みはすぐ送られる
 	help_tip(key);
 	ImGui::PopID();
 	return changed;
@@ -972,6 +1048,7 @@ int   g_lang = 0;
 float g_zoom = 0.625f;                 // 一覧の表示の大きさ
 float g_shapes_zoom = 0.6f;            // パートの音色の窓の表示の大きさ
 float g_master_zoom = 0.8f;            // マスターの窓の表示の大きさ
+unsigned g_shapes_knobs = 0;           // 音色の窓の区画ごとに「つまみで触る」か（ビットごと）
 int   g_audition_note = -1;            // 試聴で鳴らす鍵（-1 は決まっていない）
 bool  g_loaded = false;
 
@@ -999,6 +1076,8 @@ void load_settings()
 			g_zoom = std::clamp(float(std::atof(line + 14)), 0.5f, 1.5f);
 		else if (!std::strncmp(line, "shapes_zoom=", 12))
 			g_shapes_zoom = std::clamp(float(std::atof(line + 12)), 0.4f, 1.5f);
+		else if (!std::strncmp(line, "shapes_knobs=", 13))
+			g_shapes_knobs = unsigned(std::strtoul(line + 13, nullptr, 10));
 		else if (!std::strncmp(line, "audition_note=", 14))
 			g_audition_note = std::clamp(std::atoi(line + 14), -1, 127);
 		else if (!std::strncmp(line, "master_zoom=", 12))
@@ -1018,8 +1097,9 @@ void save_settings()
 		return;
 	smu2000::ensure_dir(path.substr(0, path.find_last_of("\\/")));
 	if (FILE *f = std::fopen(path.c_str(), "wb")) {
-		std::fprintf(f, "help=%d\nlang=%s\noverview_zoom=%.3f\nshapes_zoom=%.3f\nmaster_zoom=%.3f\naudition_note=%d\n",
-		             g_help ? 1 : 0, LANGS[g_lang].code, g_zoom, g_shapes_zoom, g_master_zoom, g_audition_note);
+		std::fprintf(f, "help=%d\nlang=%s\noverview_zoom=%.3f\nshapes_zoom=%.3f\nmaster_zoom=%.3f\naudition_note=%d\nshapes_knobs=%u\n",
+		             g_help ? 1 : 0, LANGS[g_lang].code, g_zoom, g_shapes_zoom, g_master_zoom, g_audition_note,
+		             g_shapes_knobs);
 		std::fclose(f);
 	}
 }
@@ -1083,6 +1163,12 @@ int help_lang()
 	return g_lang;
 }
 
+void set_help_lang(int lang)
+{
+	if (lang >= 0 && lang < NLANG)
+		g_lang = lang;
+}
+
 float &overview_zoom()
 {
 	ensure_loaded();
@@ -1103,6 +1189,22 @@ float &shapes_zoom()
 {
 	ensure_loaded();
 	return g_shapes_zoom;
+}
+
+bool shapes_knobs(int panel)
+{
+	ensure_loaded();
+	return (g_shapes_knobs >> panel) & 1;
+}
+
+void set_shapes_knobs(int panel, bool knobs)
+{
+	ensure_loaded();
+	const unsigned v = knobs ? g_shapes_knobs | (1u << panel) : g_shapes_knobs & ~(1u << panel);
+	if (v != g_shapes_knobs) {
+		g_shapes_knobs = v;
+		save_settings();
+	}
 }
 
 void set_shapes_zoom(float zoom)

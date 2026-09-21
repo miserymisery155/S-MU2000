@@ -701,6 +701,7 @@ void pc_window::frame(xg::model &m, const xg_snapshot &ram, bridge &br)
 	ImGui_ImplMetal_NewFrame(pass);
 	ImGui::NewFrame();
 	m_view->draw(m, ram, br);
+	xgui::drag_flush(br);          // マウスで動かしている値の、間引いた送信
 	ImGui::Render();
 
 	id<MTLCommandBuffer> buf = [h->queue commandBuffer];

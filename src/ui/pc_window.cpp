@@ -246,6 +246,7 @@ void pc_window::frame(xg::model &m, const xg_snapshot &ram, bridge &br)
 	ImGui_ImplWin32_NewFrame();
 	ImGui::NewFrame();
 	m_view->draw(m, ram, br);
+	xgui::drag_flush(br);          // マウスで動かしている値の、間引いた送信
 	ImGui::Render();
 
 	const float clear[4] = { 0.10f, 0.10f, 0.11f, 1.0f };
