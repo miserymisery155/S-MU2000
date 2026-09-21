@@ -9,6 +9,7 @@
 #include "imgui_internal.h"
 #include "xg/fx_types.h"
 #include "xg/ram.h"
+#include "voice_shape.h"
 
 #include <algorithm>
 #include <cmath>
@@ -118,6 +119,85 @@ void draw_keys(ImDrawList *dl, ImVec2 pos, float w, float h, F color)
 
 // 小さなマスの説明に足す一言。一覧の小さな絵は見るだけで、触るのは大きな窓で
 constexpr const char *BIG_HINT = "\nダブルクリックで大きな窓に出して触る";
+
+// ---- 絵の点と字（パートの音色の窓の VIB・FILTER・EG・ピッチ EG）
+//
+// 触れる点は黄の芯に赤の縁、触れない点（形の折れ目）は紺。線は、つまみで長さが変わる区間を橙、
+// 変わらない区間を青にする。大きな窓では、触れる点のそばに「名前 : 値 (音色の元の値と合わせた実際の量)」
+// を出す。実際の量は音色の中身から出す（ui/voice_shape.h。鍵 60・強さ 100。実機と突き合わせた式）
+constexpr ImU32 TOUCH_FILL = IM_COL32(255, 225, 40, 255), TOUCH_RING = IM_COL32(225, 30, 25, 255);
+constexpr ImU32 FIXED_POINT = IM_COL32(40, 85, 130, 255);
+constexpr ImU32 SEG_KNOB = IM_COL32(240, 125, 50, 255), SEG_FIXED = IM_COL32(50, 125, 180, 255);
+
+static void touch_point(ImDrawList *dl, ImVec2 p, float r, bool grabbed)
+{
+	const float rr = grabbed ? r * 1.4f : r;
+	dl->AddCircleFilled(p, rr * 1.35f, TOUCH_RING, 20);
+	dl->AddCircleFilled(p, rr, TOUCH_FILL, 20);
+}
+
+static void fixed_point(ImDrawList *dl, ImVec2 p, float r)
+{
+	dl->AddCircleFilled(p, r * 1.1f, FIXED_POINT, 20);
+}
+
+// 点のそばの字。上に置けなければ下に。枠（a-b）からはみ出さないよう寄せる
+// 点のそばの文字。avoid に既に描いた文字の枠を渡すと、重ならないところまで上（下）へずらす。
+// 描いた枠を avoid に足す
+struct label_box { ImVec2 lo, hi; };
+static void point_label(ImDrawList *dl, ImVec2 p, const char *text, bool above, ImVec2 a, ImVec2 b,
+                        std::vector<label_box> *avoid = nullptr)
+{
+	const float fs = ImGui::GetFontSize();
+	const ImVec2 ts = ImGui::CalcTextSize(text);
+	float y = above ? p.y - fs * 0.7f - ts.y : p.y + fs * 0.7f;
+	if (y < a.y) y = p.y + fs * 0.7f;
+	if (y + ts.y > b.y) y = p.y - fs * 0.7f - ts.y;
+	const float x = std::clamp(p.x - ts.x * 0.5f, a.x + 2.0f, std::max(a.x + 2.0f, b.x - ts.x - 2.0f));
+	if (avoid) {
+		const bool up = y < p.y;
+		for (bool moved = true; moved;) {
+			moved = false;
+			for (const label_box &o : *avoid)
+				if (x - 2 < o.hi.x && x + ts.x + 2 > o.lo.x && y - 1 < o.hi.y && y + ts.y + 1 > o.lo.y) {
+					y = up ? o.lo.y - ts.y - 2 : o.hi.y + 2;
+					moved = true;
+				}
+		}
+		avoid->push_back({ ImVec2(x - 2, y - 1), ImVec2(x + ts.x + 2, y + ts.y + 1) });
+	}
+	dl->AddRectFilled(ImVec2(x - 2, y - 1), ImVec2(x + ts.x + 2, y + ts.y + 1), IM_COL32(0, 0, 0, 150), 3.0f);
+	dl->AddText(ImVec2(x, y), IM_COL32(245, 245, 235, 255), text);
+}
+
+// 今のパートの音色の中身。パートの塊（写し）に、層の値（触った直後の値）を重ねて渡す
+struct voice_ctx {
+	const u8 *rom = nullptr;
+	u32 rec = 0;
+	u8 blk[XG_PART_COPY] = {};
+};
+
+static bool voice_of(int part, voice_ctx &v)
+{
+	const xg::voice_rom *vr = voices();
+	const xg_snapshot *ram = current_ram();
+	v.rom = vr ? vr->data() : nullptr;
+	v.rec = (v.rom && ram) ? vr->voice_record(ram->parts[part]) : 0;
+	if (!v.rec)
+		return false;
+	std::memcpy(v.blk, ram->parts[part], sizeof(v.blk));
+	return true;
+}
+
+// 鳴る要素のうち最初のもの（無ければ 0 番）
+template <typename Line>
+static const Line &lead_line(const std::vector<Line> &lines)
+{
+	for (const Line &l : lines)
+		if (l.active)
+			return l;
+	return lines.front();
+}
 
 struct overview::column {
 	const char *title;
@@ -340,9 +420,9 @@ void overview::cell(const column &c, int part, xg::model &m, const xg_snapshot &
 	if (hovered && !active) {
 		const char *what = master ? p->label : c.title;
 		if (dim)
-			ImGui::SetItemTooltip("%s  %s\nバリエーションの接続が INSERTION なので、この値は使われない", what, text.c_str());
+			hint("%s  %s\nバリエーションの接続が INSERTION なので、この値は使われない", what, text.c_str());
 		else
-			ImGui::SetItemTooltip(editable ? "%s  %s\n左右か上下にドラッグ・ホイール・ダブルクリックで打つ"
+			hint(editable ? "%s  %s\n左右か上下にドラッグ・ホイール・ダブルクリックで打つ"
 			                               : "%s  %s\n演奏の値（表示だけ）", what, text.c_str());
 	}
 	ImGui::PopID();
@@ -606,20 +686,48 @@ void overview::peg_cell(int part, xg::model &m, bridge &br, float w, float h, bo
 		dl->AddLine(ImVec2(x0, mid), ImVec2(x1, mid), guide);                       // 本来の音程
 		for (float y = top; y < bottom; y += fs * 0.5f)                             // 鍵盤を離したところ
 			dl->AddLine(ImVec2(xs, y), ImVec2(xs, std::min(bottom, y + fs * 0.25f)), guide);
-		const ImU32 line = col(ImGuiCol_SliderGrabActive);
 		const ImVec2 pts[] = { { x0, yi }, { xa, mid }, { xs, mid }, { xr, yl }, { x1, yl } };
-		dl->AddPolyline(pts, 5, line, 0, std::max(1.5f, fs * 0.1f));
+		// アタック・リリースの区間が橙、押している間と離し終えた後が青
+		const float th = std::max(1.5f, fs * 0.1f);
+		for (int i = 0; i < 4; i++)
+			dl->AddLine(pts[i], pts[i + 1], (i == 0 || i == 2) ? SEG_KNOB : SEG_FIXED, th);
 		const float r = std::max(2.5f, fs * 0.22f);
+		fixed_point(dl, pts[2], r);
 		const ImVec2 handles[] = { pts[0], pts[1], pts[3] };
 		for (int i = 0; i < 3; i++)
-			dl->AddCircleFilled(handles[i], i == grab ? r * 1.4f : r, i == grab ? col(ImGuiCol_Text) : line);
+			touch_point(dl, handles[i], r, i == grab);
+		// 字（大きな窓だけ）。音程と時間は音色の元の値と合わせた実際のもの
+		voice_ctx v;
+		if (!compact && voice_of(part, v)) {
+			v.blk[0x62] = u8(vi); v.blk[0x63] = u8(va); v.blk[0x64] = u8(vl); v.blk[0x65] = u8(vr);
+			const std::vector<shape::peg_line> ls = shape::peg_lines(v.rom, v.rec, v.blk, 0.0f);
+			if (!ls.empty()) {
+				const shape::peg_line &L = lead_line(ls);
+				// 行き着くまで: 押してから、離す前の最後の点まで
+				float atk_ms = 0;
+				for (const shape::pt &p : L.pts)
+					if (p.ms <= L.keyoff_ms)
+						atk_ms = p.ms;
+				const float rel_ms = L.pts.back().ms - L.keyoff_ms;
+				char s[80];
+				const ImVec2 a(pos.x, pos.y), b(pos.x + w, pos.y + h);
+				std::snprintf(s, sizeof(s), "Init : %s (%+.0f cent)", xg::format(pi, vi).c_str(), L.pts.front().cents);
+				std::vector<label_box> boxes;
+				point_label(dl, pts[0], s, yi > mid, a, b, &boxes);
+				std::snprintf(s, sizeof(s), "Attack : %s (%.0f ms)", xg::format(pa, va).c_str(), atk_ms);
+				point_label(dl, pts[1], s, true, a, b, &boxes);
+				std::snprintf(s, sizeof(s), "Release : %s / %s (%.0f ms, %+.0f cent)", xg::format(pr, vr).c_str(),
+				              xg::format(pl, vl).c_str(), rel_ms, L.pts.back().cents);
+				point_label(dl, pts[3], s, true, a, b, &boxes);     // 離しは点の上に
+			}
+		}
 	} else {
 		const ImVec2 ts = ImGui::CalcTextSize("--");
 		dl->AddText(ImVec2(pos.x + (w - ts.x) * 0.5f, pos.y + (h - ts.y) * 0.5f), col(ImGuiCol_TextDisabled), "--");
 	}
 
 	if ((hovered || active) && known)
-		ImGui::SetItemTooltip("Init %s   Attack %s   Rel Lvl %s   Rel Time %s%s",
+		hint("Init %s   Attack %s   Rel Lvl %s   Rel Time %s%s",
 		                      xg::format(pi, vi).c_str(), xg::format(pa, va).c_str(),
 		                      xg::format(pl, vl).c_str(), xg::format(pr, vr).c_str(),
 		                      compact ? BIG_HINT : "\n左の点: 縦で出だしの音程\n真ん中の点: 横でアタックの時間\n"
@@ -695,24 +803,59 @@ void overview::eg_cell(int part, xg::model &m, bridge &br, float w, float h, boo
 	// 描く
 	dl->AddRectFilled(pos, ImVec2(pos.x + w, pos.y + h), col(hovered || active ? ImGuiCol_FrameBgHovered : ImGuiCol_FrameBg), 3.0f);
 	if (known) {
-		const ImU32 line = col(ImGuiCol_SliderGrabActive);
 		const ImVec2 pts[] = { { x0, bottom }, { xa, top }, { xd, sustain_y }, { xs, sustain_y }, { xr, bottom } };
-		// 面を薄く塗ってから線
+		// 面を薄く塗ってから線。立ち上がり・ディケイ・リリースの区間が橙、伸ばしている間が青
 		dl->PathClear();
 		for (const ImVec2 &p : pts) dl->PathLineTo(p);
 		dl->PathFillConcave(col(ImGuiCol_SliderGrab, 0.25f));
-		dl->AddPolyline(pts, 5, line, 0, std::max(1.5f, fs * 0.1f));
+		const float th = std::max(1.5f, fs * 0.1f);
+		for (int i = 0; i < 4; i++)
+			dl->AddLine(pts[i], pts[i + 1], i == 2 ? SEG_FIXED : SEG_KNOB, th);
 		const float r = std::max(2.5f, fs * 0.22f);
+		fixed_point(dl, pts[0], r);
+		fixed_point(dl, pts[3], r);
 		const ImVec2 handles[] = { pts[1], pts[2], pts[4] };
 		for (int i = 0; i < 3; i++)
-			dl->AddCircleFilled(handles[i], i == grab ? r * 1.4f : r, i == grab ? col(ImGuiCol_Text) : line);
+			touch_point(dl, handles[i], r, i == grab);
+		// 字（大きな窓だけ）。時間は音色の元の値と合わせた実際のもの
+		voice_ctx v;
+		if (!compact && voice_of(part, v)) {
+			v.blk[0x1a] = u8(va); v.blk[0x1b] = u8(vd); v.blk[0x1c] = u8(vr);
+			const std::vector<shape::amp_line> ls = shape::amp_lines(v.rom, v.rec, v.blk, 300.0f);
+			if (!ls.empty()) {
+				size_t li = 0;
+				while (li + 1 < ls.size() && !ls[li].active)
+					li++;
+				const shape::amp_line &L = ls[li];
+				// ディケイ: 立ち上がりの後、伸ばしている音量に落ち着くまで（離さずに回す。2 秒で打ち切り）
+				const shape::amp_line held = shape::amp_run(v.rom, xg::nv::element(v.rom, v.rec, int(li)), v.blk, -1.0f, 2000.0f);
+				const float dec_end = held.pts.back().ms;
+				float rel_ms = 0;
+				for (const shape::pt &p : L.pts)
+					if (p.ms > L.keyoff_ms) {
+						rel_ms = p.ms - L.keyoff_ms;
+						if (p.cents <= -60.0f)
+							break;
+					}
+				const float dec_ms = std::max(0.0f, dec_end - L.attack_ms);
+				char s[64];
+				const ImVec2 a(pos.x, pos.y), b(pos.x + w, pos.y + h);
+				std::snprintf(s, sizeof(s), "Attack : %s (%.0f ms)", xg::format(pa, va).c_str(), L.attack_ms);
+				point_label(dl, pts[1], s, false, a, b);
+				std::snprintf(s, sizeof(s), dec_end >= 1990.0f ? "Decay : %s (2000+ ms)" : "Decay : %s (%.0f ms)",
+				              xg::format(pd, vd).c_str(), dec_ms);
+				point_label(dl, pts[2], s, false, a, b);
+				std::snprintf(s, sizeof(s), "Release : %s (%.0f ms)", xg::format(pr, vr).c_str(), rel_ms);
+				point_label(dl, pts[4], s, true, a, b);
+			}
+		}
 	} else {
 		const ImVec2 ts = ImGui::CalcTextSize("--");
 		dl->AddText(ImVec2(pos.x + (w - ts.x) * 0.5f, pos.y + (h - ts.y) * 0.5f), col(ImGuiCol_TextDisabled), "--");
 	}
 
 	if ((hovered || active) && known)
-		ImGui::SetItemTooltip("Attack %s   Decay %s   Release %s%s",
+		hint("Attack %s   Decay %s   Release %s%s",
 		                      xg::format(pa, va).c_str(), xg::format(pd, vd).c_str(), xg::format(pr, vr).c_str(),
 		                      compact ? BIG_HINT : "\n点を横につまんで動かす（右へ長く、左へ短く）");
 	ImGui::PopID();
@@ -826,9 +969,49 @@ void overview::filter_cell(int part, xg::model &m, bridge &br, float w, float h,
 		dl->AddPolyline(pts.data(), int(pts.size()), line, 0, std::max(1.5f, fs * 0.1f));
 		const float r = std::max(2.5f, fs * 0.22f);
 		const bool hold_c = active && grab == 0, hold_h = active && grab == 1;
-		dl->AddCircleFilled(ImVec2(xc, yq), hold_c ? r * 1.4f : r, hold_c ? col(ImGuiCol_Text) : line);
+		touch_point(dl, ImVec2(xc, yq), r, hold_c);
 		if (known_h)
-			dl->AddCircleFilled(ImVec2(xh, yh), hold_h ? r * 1.4f : r, hold_h ? col(ImGuiCol_Text) : line);
+			touch_point(dl, ImVec2(xh, yh), r, hold_h);
+		// 字（大きな窓だけ）。周波数は、音色の元の値と合わせたフィルタをチップの式で通して
+		// 出した特性の、いちばん大きい所から 3 dB 下がる所（山があれば山の頂）
+		voice_ctx v;
+		if (!compact && voice_of(part, v)) {
+			v.blk[0x18] = u8(vc); v.blk[0x19] = u8(vq);
+			if (known_h)
+				v.blk[xg::ram::PART_HPF_RAM] = u8(vh);
+			const std::vector<shape::filter_line> ls = shape::filter_lines(v.rom, v.rec, v.blk);
+			if (!ls.empty()) {
+				const shape::filter_line &L = lead_line(ls);
+				float peak = -1e9f, peak_hz = 20.0f;
+				for (const shape::pt &p : L.pts)
+					if (p.cents > peak) { peak = p.cents; peak_hz = p.ms; }
+				float lpf_hz = 0;
+				for (size_t i = L.pts.size(); i-- > 0;)
+					if (L.pts[i].cents >= peak - 3.0f) { lpf_hz = L.pts[i].ms; break; }
+				if (peak > 3.0f)
+					lpf_hz = peak_hz;
+				float hpf_hz = 0;
+				for (const shape::pt &p : L.pts)
+					if (p.cents >= peak - 3.0f) { hpf_hz = p.ms; break; }
+				auto hz_text = [](float f) {
+					char t[24];
+					if (f >= 19000.0f) std::snprintf(t, sizeof(t), "20 kHz 以上");
+					else if (f >= 1000.0f) std::snprintf(t, sizeof(t), "%.1f kHz", f / 1000.0f);
+					else std::snprintf(t, sizeof(t), "%.0f Hz", f);
+					return std::string(t);
+				};
+				char s[96];
+				const ImVec2 a(pos.x, pos.y), b(pos.x + w, pos.y + h);
+				std::snprintf(s, sizeof(s), "Cutoff : %s (%s)  Reso : %s", xg::format(pc, vc).c_str(),
+				              hz_text(lpf_hz).c_str(), xg::format(pq, vq).c_str());
+				point_label(dl, ImVec2(xc, yq), s, true, a, b);
+				if (known_h) {
+					std::snprintf(s, sizeof(s), L.hpf ? "HPF : %s (%s)" : "HPF : %s (掛かっていない)",
+					              xg::format(ph, vh).c_str(), hz_text(hpf_hz).c_str());
+					point_label(dl, ImVec2(xh, yh), s, false, a, b);
+				}
+			}
+		}
 		dl->PopClipRect();
 	} else {
 		const ImVec2 ts = ImGui::CalcTextSize("--");
@@ -836,7 +1019,7 @@ void overview::filter_cell(int part, xg::model &m, bridge &br, float w, float h,
 	}
 
 	if ((hovered || active) && known)
-		ImGui::SetItemTooltip("Cutoff %s   Resonance %s   HPF %s%s",
+		hint("Cutoff %s   Resonance %s   HPF %s%s",
 		                      xg::format(pc, vc).c_str(), xg::format(pq, vq).c_str(),
 		                      known_h ? xg::format(ph, vh).c_str() : "--",
 		                      compact ? BIG_HINT : "\n右の点: 横でカットオフ（右へ明るく）、縦でレゾナンス（上へ強く）\n"
@@ -987,7 +1170,7 @@ int eq_plot(const char *id, eq_band *bands, int n, xg::model &m, bridge &br, flo
 				text += buf;
 			}
 		}
-		ImGui::SetItemTooltip("%s%s%s", text.c_str(), *tip == '\n' ? "" : "\n", tip);
+		hint("%s%s%s", text.c_str(), *tip == '\n' ? "" : "\n", tip);
 	}
 	ImGui::PopID();
 	return grab;
@@ -1111,15 +1294,32 @@ void overview::vib_cell(int part, xg::model &m, bridge &br, float w, float h, bo
 		dl->PushClipRect(pos, ImVec2(pos.x + w, pos.y + h), true);
 		dl->AddPolyline(pts.data(), int(pts.size()), line, 0, std::max(1.5f, fs * 0.1f));
 		const float r = std::max(2.5f, fs * 0.2f);
-		dl->AddCircleFilled(ImVec2(xd, mid), grab == 0 ? r * 1.4f : r, grab == 0 ? col(ImGuiCol_Text) : line);
-		dl->AddCircleFilled(crest, grab == 1 ? r * 1.4f : r, grab == 1 ? col(ImGuiCol_Text) : line);
+		fixed_point(dl, ImVec2(x0, mid), r);
+		touch_point(dl, ImVec2(xd, mid), r, grab == 0);
+		touch_point(dl, crest, r, grab == 1);
+		// 字（大きな窓だけ）。速さ・深さ・遅れは音色の元の値と合わせた実際のもの（チップの LFO を回して出す）
+		voice_ctx v;
+		if (!compact && voice_of(part, v)) {
+			v.blk[0x15] = u8(vr); v.blk[0x16] = u8(vd); v.blk[0x17] = u8(vl);
+			const std::vector<shape::vib_line> ls = shape::vib_lines(v.rom, v.rec, v.blk, 1500.0f);
+			if (!ls.empty()) {
+				const shape::vib_line &L = lead_line(ls);
+				char s[96];
+				const ImVec2 a(pos.x, pos.y), b(pos.x + w, pos.y + h);
+				std::snprintf(s, sizeof(s), "Rate : %s (%.2f Hz)  Depth : %s (±%.0f cent)", xg::format(pr, vr).c_str(),
+				              L.hz, xg::format(pd, vd).c_str(), L.depth_cents);
+				point_label(dl, crest, s, true, a, b);
+				std::snprintf(s, sizeof(s), "Delay : %s (%.0f ms)", xg::format(pl, vl).c_str(), L.delay_ms);
+				point_label(dl, ImVec2(xd, mid), s, false, a, b);
+			}
+		}
 		dl->PopClipRect();
 	} else {
 		const ImVec2 ts = ImGui::CalcTextSize("--");
 		dl->AddText(ImVec2(pos.x + (w - ts.x) * 0.5f, pos.y + (h - ts.y) * 0.5f), col(ImGuiCol_TextDisabled), "--");
 	}
 	if ((hovered || active) && known)
-		ImGui::SetItemTooltip("Rate %s   Depth %s   Delay %s%s",
+		hint("Rate %s   Depth %s   Delay %s%s",
 		                      xg::format(pr, vr).c_str(), xg::format(pd, vd).c_str(), xg::format(pl, vl).c_str(),
 		                      compact ? BIG_HINT : "\n波の山の点: 横で速さ、縦で深さ\n平らな所の終わりの点: 横で掛かり始めるまでの時間");
 	ImGui::PopID();

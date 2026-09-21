@@ -9,6 +9,7 @@
 #include "imgui.h"
 
 #include <algorithm>
+#include <cstdarg>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -72,6 +73,36 @@ void set_voice_rom(std::shared_ptr<const std::vector<u8>> rom)
 }
 
 const xg::voice_rom *voices() { return g_voices.get(); }
+
+namespace {
+const xg_snapshot *g_current_ram = nullptr;
+}
+
+namespace {
+bool g_hint_bar = false;
+std::string g_hint;
+}
+
+void begin_hint_bar() { g_hint_bar = true; g_hint.clear(); }
+void end_hint_bar() { g_hint_bar = false; }
+bool hint_bar() { return g_hint_bar; }
+const std::string &hint_text() { return g_hint; }
+
+void hint(const char *fmt, ...)
+{
+	char buf[1024];
+	va_list ap;
+	va_start(ap, fmt);
+	std::vsnprintf(buf, sizeof(buf), fmt, ap);
+	va_end(ap);
+	if (g_hint_bar)
+		g_hint = buf;
+	else
+		ImGui::SetItemTooltip("%s", buf);
+}
+
+void set_current_ram(const xg_snapshot *ram) { g_current_ram = ram; }
+const xg_snapshot *current_ram() { return g_current_ram; }
 
 bool fx_type_menu(const std::vector<xg::fx_type> &types, int current, int &chosen)
 {
@@ -1126,8 +1157,12 @@ void help_tip(const char *name)
 {
 	if (!help_on() || !ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort))
 		return;
-	if (const char *t = find_help(name))
-		ImGui::SetTooltip("%s", t);
+	if (const char *t = find_help(name)) {
+		if (g_hint_bar)
+			g_hint = t;                   // 説明の帯のある窓では帯へ
+		else
+			ImGui::SetTooltip("%s", t);
+	}
 }
 
 void help_checkbox()

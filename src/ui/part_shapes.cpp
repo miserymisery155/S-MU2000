@@ -48,6 +48,8 @@ void panel(const char *id, const char *title, float w, float h, int part, xg::mo
 
 void part_shapes::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 {
+	set_current_ram(&ram);            // 絵が音色の中身を読むため（ピッチ EG など）
+	begin_hint_bar();                 // 絵や名前の説明は、マウスのそばでなく下の帯に出す
 	const ImGuiViewport *vp = ImGui::GetMainViewport();
 	ImGui::SetNextWindowPos(vp->WorkPos);
 	ImGui::SetNextWindowSize(vp->WorkSize);
@@ -126,19 +128,24 @@ void part_shapes::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 	const ImVec2 avail = ImGui::GetContentRegionAvail();
 	// 音色を選ぶ面は、左に分類・右に音色とバンク違いの 2 列（xgui::program_pane）
 	const float pane_w = std::min(fs * 26.0f, avail.x * 0.5f);
+	// 下の説明の帯（3 行ぶん）を残す
+	const float bar_h = ImGui::GetTextLineHeightWithSpacing() * 3.0f + st.WindowPadding.y * 2.0f;
+	const float body_h = std::max(fs * 8.0f, avail.y - bar_h - st.ItemSpacing.y);
 
-	if (ImGui::BeginChild("voicepane", ImVec2(pane_w, 0)))
+	if (ImGui::BeginChild("voicepane", ImVec2(pane_w, body_h)))
 		program_pane(part, m, &ram, br);
 	ImGui::EndChild();
 	ImGui::SameLine();
 
 	ImGui::BeginGroup();
+	const float top_y = ImGui::GetCursorScreenPos().y;
 	if (ImGui::BeginTabBar("right")) {
 		if (ImGui::BeginTabItem("形")) {
 			// 3 × 2。上に VIB・FILTER・EG、下にピッチ EG・EQ・ポルタメント（絵は無く棒だけ）
 			const ImVec2 room = ImGui::GetContentRegionAvail();
+			const float room_h = body_h - (ImGui::GetCursorScreenPos().y - top_y);
 			const float w = (room.x - st.ItemSpacing.x * 2.0f) / 3.0f;
-			const float h = (room.y - st.ItemSpacing.y) * 0.5f;
+			const float h = (room_h - st.ItemSpacing.y) * 0.5f;
 			panel("vib", "ビブラート（VIB）", w, h, part, m, br, { "part.vib_rate", "part.vib_depth", "part.vib_delay" },
 			      [](int p, xg::model &mm, bridge &b, float pw, float ph) { overview::vib_cell(p, mm, b, pw, ph, false); });
 			ImGui::SameLine();
@@ -161,7 +168,7 @@ void part_shapes::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 		}
 		if (ImGui::BeginTabItem("すべて")) {
 			// エディタのパートの面と同じ組（xgui::PART_GROUPS）を、幅に合わせた列数で並べる
-			if (ImGui::BeginChild("all", ImVec2(0, 0))) {
+			if (ImGui::BeginChild("all", ImVec2(0, body_h - (ImGui::GetCursorScreenPos().y - top_y)))) {
 				const int columns = std::clamp(int(ImGui::GetContentRegionAvail().x / (fs * 16.0f)), 1, 3);
 				if (ImGui::BeginTable("groups", columns, ImGuiTableFlags_SizingStretchSame)) {
 					int n = 0;
@@ -188,6 +195,17 @@ void part_shapes::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 		ImGui::EndTabBar();
 	}
 	ImGui::EndGroup();
+
+	// ---- 説明の帯。カーソルを載せた絵・値・名前の説明（無ければ使い方のひとこと）
+	if (ImGui::BeginChild("hint", ImVec2(0, 0), ImGuiChildFlags_Borders)) {
+		const std::string &t = hint_text();
+		if (t.empty())
+			ImGui::TextDisabled("絵の点や値、名前にカーソルを載せると、ここに説明が出る");
+		else
+			ImGui::TextWrapped("%s", t.c_str());
+	}
+	ImGui::EndChild();
+	end_hint_bar();
 
 	ImGui::PopFont();
 	ImGui::End();
