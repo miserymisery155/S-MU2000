@@ -420,6 +420,14 @@ private:
 		                   ? u32(std::atoi(std::getenv("SMU2000_OFF_PROC"))) : 2 * 64;
 		return v;
 	}
+	// 重い SysEx（エフェクトの種類など）のあと、firmware を全速で回す長さ
+	static u32 fx_hold()
+	{
+		static const u32 v = std::getenv("SMU2000_FX_HOLD")
+			? u32(44100 * std::atoi(std::getenv("SMU2000_FX_HOLD")) / 1000)
+			: u32(44100 * 3 / 10);
+		return v;
+	}
 	static u32 native_proc64()
 	{
 		static const u32 v = std::getenv("SMU2000_NATIVE_PROC")

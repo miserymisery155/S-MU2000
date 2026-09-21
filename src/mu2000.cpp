@@ -2337,8 +2337,12 @@ bool mu2000::native_midi(u8 byte, int port)
 					heavy = true;               // インサーションの種類
 			}
 			if (heavy) {
-				// 実測の 212ms に余裕を見て 300ms（前は 500ms だった）
-				m_fw_hold = std::max(m_fw_hold, u32(44100 * 3 / 10));
+				// 実測の 212ms に余裕を見て 300ms（前は 500ms だった）。
+				// **ここを弄ると全体の時間がずれる**（6.211）。
+				// 400ms にすると fxchange と drums は良くなるが、
+				// bend・pegcc・meter が悪くなる。当たり外れなので動かさない。
+				// `SMU2000_FX_HOLD`（ミリ秒）で振れる
+				m_fw_hold = std::max(m_fw_hold, fx_hold());
 				m_fw_why = 1;
 			}
 			// ここでは**止めない**。F7 まで受け取って、パートの設定なら

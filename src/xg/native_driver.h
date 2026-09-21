@@ -1187,6 +1187,10 @@ public:
 		           int(b[ram::PART_EQ_LFREQ]), int(b[ram::PART_EQ_HFREQ]));
 	}
 	int part_bri(int part) const  { return m_ram ? int(m_ram[ram::part_base(part) + 0x18]) : 64; }
+	// パートの塊の 1 バイト（無ければ 64）
+	int part_ram(int part, u32 off) const { return m_ram ? int(m_ram[ram::part_base(part) + off]) : 64; }
+	// パートの HPF（0A pp 20。64 が音色のまま）
+	int part_hpf(int part) const  { return m_ram ? int(m_ram[ram::part_base(part) + ram::PART_HPF_RAM]) : 64; }
 	int part_res(int part) const  { return m_ram ? int(m_ram[ram::part_base(part) + 0x19]) : 64; }
 
 	// ---- つまみの割り当て（doc/native-engine.md の 6.43）
@@ -1764,7 +1768,11 @@ private:
 		int v = int(base & 0xfff);
 		if (now >= 0 && now != 64)
 			v += nv::bright_shift(now);
-		v = v < 0 ? 0 : (v > 0xfff ? 0xfff : v);
+		// **頭は 0x7ff**（6.212）。実機は0x800 の下騄を履いたまま
+		// 0xfff で止めるので、こちらでは0x7ff で止めるのと同じ。
+		// 0xfff で止めていたので、明るさを上げて共振も深いと（`cutoff_cap` が
+		// 通らない）`0xa3f` のような 12 ビットの値を書いて、音が丸ごと壊れていた
+		v = v < 0 ? 0 : (v > 0x7ff ? 0x7ff : v);
 		// **LFO の揺れはここ**（6.189）。実機（0x127E82）も
 		// 鍵の追従を足して頭打ちしたあと、頭打ちの前に足す。
 		//
@@ -2798,7 +2806,7 @@ public:
 			                                  + assign_cents(part, note),
 			                                  pvel, pc.atk, pc.dec,
 			                                  pc.vrate, pc.vdep, wnote, note,
-			                                  pc.soft);
+			                                  pc.soft, part_ram(part, 0x62), part_ram(part, 0x63));
 			if (c->synth)
 				apply_part_eq(sr, part);
 			// 音程の包絡線の行き先（byte31）。初めの高さと同じなら書かない
@@ -2899,6 +2907,10 @@ public:
 				             ? u16(u16(sr.v[0x04] & 0x07ff) |
 				                   u16(u16(nv::reso_level(el, pvel, res_knob(part))) << 11))
 				             : reso_reg(sr.v[0x04], *c, part));
+				// **フィルタの第 2 段（ハイパス）はパートの HPF（0A pp 20）を足して式で出す**。
+				// 写し取った値のままだと、パートの HPF を動かしても音が変わらなかった
+				if (el)
+					sr.set(0x02, nv::filter2_reg(el[82], part_hpf(part)));
 				if (c->synth) {
 					sr.set(0x33, exact_send(su, part, false, su.base33));
 					sr.set(0x34, exact_send(su, part, true, su.base34));
@@ -3224,6 +3236,15 @@ public:
 					                                      su.rnd_drop, su.base34)
 					                           : c.reg[i])))));
 
+			// **フィルタの第 2 段（ハイパス）は打つたびに式で書く**。実機は打つたびに
+			// 記録の byte20 × 16 にパートの HPF（0A pp 20）を足して書く（旋律と同じ式）。
+			// 写し取りにはこのレジスタが入らないので、書かないと前にそのスロットで
+			// 鳴った音の値が残り、パートの HPF を動かしても打の音が変わらなかった
+			if (const u8 *rec2 = drec ? drec
+			                          : m_ram ? nv::drum_record(m_rom, int(m_ram[ram::part_base(part) + nv::PART_KIT]), note)
+			                                  : nullptr)
+				m_poke(u32(slot) * 64 + 0x02, nv::filter2_reg(rec2[20], part_hpf(part)));
+
 			su.drum_rel = c.has(9) ? u16(c.reg[9]) : u16(att);
 			if (busy() > m_peak)
 				m_peak = busy();
@@ -3397,8 +3418,14 @@ private:
 		const int rate = nv::peg_rate_reg_raw(m_rom, e, raw, s.keynote, s.pvel,
 		                                      64, rel < 0 ? 64 : rel);
 		m_poke(u32(i) * 64 + 0x0b, u16(rate << 8));
+		// **行き先は byte34 にパートの +0x64 を足す**（6.212）。
+		// XG の `08 pp 6B`。見ていなかったので、そこを動かした曲で
+		// 離したあとの音程が丸ごと違っていた
+		int lv = int(e[34]) + (int(b[0x64]) - 64);
+		if (lv < 0) lv = 0;
+		if (lv > 127) lv = 127;
 		m_poke(u32(i) * 64 + 0x10,
-		       nv::peg_reg(m_rom, nv::peg_cents(e, int(e[34]), s.pvel), e));
+		       nv::peg_reg(m_rom, nv::peg_cents(e, lv, s.pvel), e));
 	}
 
 	void peg_advance(int i)
