@@ -1267,6 +1267,11 @@ void help_tip(const char *name)
 	}
 }
 
+const char *help_for(const char *name)
+{
+	return help_on() ? find_help(name) : nullptr;
+}
+
 void help_checkbox()
 {
 	ensure_loaded();

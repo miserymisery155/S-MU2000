@@ -287,7 +287,7 @@ static const char *master_key(const char *title)
 
 
 void overview::cell(const column &c, int part, xg::model &m, const xg_snapshot &ram, bridge &br,
-                    float w, float h)
+                    float w, float h, cell_text *value_out)
 {
 	ImGuiIO &io = ImGui::GetIO();
 	const float fs = ImGui::GetFontSize();
@@ -444,7 +444,8 @@ void overview::cell(const column &c, int part, xg::model &m, const xg_snapshot &
 	const float pad = fs * 0.2f;
 	const float bar_h = std::max(3.0f, fs * 0.45f);
 	const ImVec2 b0(pos.x + pad, pos.y + pad);
-	const ImVec2 b1(pos.x + w - pad, b0.y + bar_h);
+	// 数を外（見出しの行）に出すときは、棒が高さいっぱいを使う
+	const ImVec2 b1(pos.x + w - pad, value_out ? pos.y + h - pad : b0.y + bar_h);
 	dl->AddRectFilled(b0, b1, col(ImGuiCol_FrameBg));
 	if (known && hi > lo) {
 		const float frac = std::clamp(float(nv - lo) / float(hi - lo), 0.0f, 1.0f);
@@ -462,9 +463,15 @@ void overview::cell(const column &c, int part, xg::model &m, const xg_snapshot &
 	}
 	if (hovered)
 		dl->AddRect(ImVec2(pos.x + 1, pos.y + 1), ImVec2(pos.x + w - 1, pos.y + h - 1), col(ImGuiCol_Border));
-	const ImVec2 ts = ImGui::CalcTextSize(text.c_str());
-	dl->AddText(ImVec2(pos.x + w - pad - ts.x, b1.y + (pos.y + h - b1.y - ts.y) * 0.5f),
-	            known && !dim ? col(ImGuiCol_Text) : col(ImGuiCol_TextDisabled), text.c_str());
+	if (value_out) {
+		value_out->text = text;
+		value_out->bright = known && !dim;
+		value_out->hovered = hovered;
+	} else {
+		const ImVec2 ts = ImGui::CalcTextSize(text.c_str());
+		dl->AddText(ImVec2(pos.x + w - pad - ts.x, b1.y + (pos.y + h - b1.y - ts.y) * 0.5f),
+		            known && !dim ? col(ImGuiCol_Text) : col(ImGuiCol_TextDisabled), text.c_str());
+	}
 
 	if (hovered && !active) {
 		const char *what = master ? p->label : c.title;
@@ -1936,6 +1943,17 @@ void overview::master_pane(xg::model &m, const xg_snapshot &ram, bridge &br)
 
 // パートの音色の窓の上のペイン。1 行目に掛かっているエフェクト（名前付き）、
 // 2 行目に VOL〜HOLD と VAR〜REV の棒（一覧と同じく触れる）と、このパートの鍵盤
+float overview::part_strip_height()
+{
+	// part_strip と同じ積み方: 1 行目（フレームの高さ）、見出しと数の行、棒、鍵盤
+	const float fs = ImGui::GetFontSize();
+	const ImGuiStyle &st = ImGui::GetStyle();
+	ImGui::PushFont(nullptr, fs * LABEL_SCALE);
+	const float label_h = ImGui::GetTextLineHeight() + fs * 0.1f;
+	ImGui::PopFont();
+	return ImGui::GetFrameHeight() + st.ItemSpacing.y + label_h + fs * METER_H + st.ItemSpacing.y + fs * 2.3f;
+}
+
 void overview::part_strip(int part, xg::model &m, const xg_snapshot &ram, bridge &br)
 {
 	m_wheel_taken = false;
@@ -1978,17 +1996,38 @@ void overview::part_strip(int part, xg::model &m, const xg_snapshot &ram, bridge
 	help_tip("VARIATION");
 	variation_label(part, m, br, var_x + ImGui::CalcTextSize("バリエーション ").x, top.y + st.FramePadding.y, right);
 
-	// ---- 2 行目: 見出しと棒
-	const float label_h = ImGui::GetTextLineHeight() + fs * 0.15f;
+	// ---- 2 行目: 見出しと数（小さめの字で同じ行に）、その下に棒。
+	// 見出しと数が重なるほど狭ければ見出しを出さない（カーソルを載せると下の帯に名前と説明）
+	ImGui::PushFont(nullptr, fs * LABEL_SCALE);
+	const float label_h = ImGui::GetTextLineHeight() + fs * 0.1f;
+	ImGui::PopFont();
+	const float meter_h = fs * METER_H;
 	const ImVec2 origin(top.x, top.y + line_h + st.ItemSpacing.y);
+	ImDrawList *sdl = ImGui::GetWindowDrawList();
 	float x = origin.x;
 	auto one = [&](const char *title) {
 		const float w = unit - fs * 0.25f;
-		ImGui::SetCursorScreenPos(ImVec2(x, origin.y));
-		ImGui::TextDisabled("%s", title);
-		help_tip(title);
+		const float pad = fs * 0.2f;
+		cell_text ct;
 		ImGui::SetCursorScreenPos(ImVec2(x, origin.y + label_h));
-		cell(column_of(title), part, m, ram, br, w, h);
+		cell(column_of(title), part, m, ram, br, w, meter_h, &ct);
+		ImGui::PushFont(nullptr, fs * LABEL_SCALE);
+		const ImVec2 vs = ImGui::CalcTextSize(ct.text.c_str());
+		const ImVec2 ts = ImGui::CalcTextSize(title);
+		const bool room = ts.x + fs * 0.4f + vs.x <= w - pad * 2.0f;
+		if (room)
+			sdl->AddText(ImVec2(x + pad, origin.y), col(ImGuiCol_TextDisabled), title);
+		sdl->AddText(ImVec2(x + w - pad - vs.x, origin.y), ct.bright ? col(ImGuiCol_Text) : col(ImGuiCol_TextDisabled),
+		             ct.text.c_str());
+		ImGui::PopFont();
+		// 見出しの行か棒にカーソルが載ったら、名前と今の値と説明を下の帯へ
+		const bool over = ct.hovered || ImGui::IsMouseHoveringRect(ImVec2(x, origin.y), ImVec2(x + w, origin.y + label_h));
+		if (over && ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows)) {
+			if (const char *help = help_for(title))
+				hint("%s  %s\n%s", title, ct.text.c_str(), help);
+			else if (!ct.hovered)
+				hint("%s  %s", title, ct.text.c_str());
+		}
 		x += unit;
 	};
 	for (const char *t : LEFT)
@@ -1998,7 +2037,7 @@ void overview::part_strip(int part, xg::model &m, const xg_snapshot &ram, bridge
 		one(t);
 
 	// ---- 3 行目: 鍵盤。受信チャンネルから見張りの口×チャンネル（一覧でミュートしていても、この窓は受信チャンネルのまま）
-	const float keys_y = origin.y + label_h + h + st.ItemSpacing.y;
+	const float keys_y = origin.y + label_h + meter_h + st.ItemSpacing.y;
 	int rcv = 127;
 	m.get(P("part.rcv_channel"), part, rcv);
 	const int slot = rcv >= 0 && rcv < PARTS ? rcv : -1;

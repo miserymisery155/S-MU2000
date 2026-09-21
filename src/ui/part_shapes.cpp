@@ -173,8 +173,7 @@ void part_shapes::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 	const ImGuiStyle &st = ImGui::GetStyle();
 	{
 		// インサーションの行、見出しと棒の行、鍵盤の行
-		const float strip_h = ImGui::GetFrameHeight() + ImGui::GetTextLineHeight() + fs * 0.15f + fs * 2.3f * 2.0f +
-		                      st.ItemSpacing.y * 2.0f + st.WindowPadding.y * 2.0f + fs * 0.2f;
+		const float strip_h = overview::part_strip_height() + st.WindowPadding.y * 2.0f + fs * 0.2f;
 		if (ImGui::BeginChild("strip", ImVec2(0, strip_h), ImGuiChildFlags_Borders, ImGuiWindowFlags_NoScrollbar))
 			m_strip.part_strip(part, m, ram, br);
 		ImGui::EndChild();
@@ -183,7 +182,7 @@ void part_shapes::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 	// ---- 左に音色を選ぶ面、右はタブ: 「形」は 4 つの区画（2 × 2）、「すべて」はパートのパラメータ全部
 	const ImVec2 avail = ImGui::GetContentRegionAvail();
 	// 音色を選ぶ面は、左に分類・右に音色とバンク違いの 2 列（xgui::program_pane）
-	const float pane_w = std::min(fs * 26.0f, avail.x * 0.5f);
+	const float pane_w = std::min(fs * 15.6f, avail.x * 0.3f);     // 前の 6 割
 	// 下の説明の帯（4 行ぶん。入り切らなかった字の行と、説明の 3 行）を残す
 	const float bar_h = ImGui::GetTextLineHeightWithSpacing() * 4.0f + st.WindowPadding.y * 2.0f;
 	const float body_h = std::max(fs * 8.0f, avail.y - bar_h - st.ItemSpacing.y);

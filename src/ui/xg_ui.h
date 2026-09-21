@@ -171,6 +171,8 @@ int help_lang();                        // 0 が日本語、1 が English
 void set_help_lang(int lang);
 // 直前の部品にカーソルが載っていれば、説明を出す。name は列の見出しかパラメータのキー
 void help_tip(const char *name);
+// 説明の文そのもの（説明を消していれば、または無ければ nullptr）
+const char *help_for(const char *name);
 // 「説明を出す」のチェックボックスと、言語の選択
 void help_checkbox();
 // 表の見出しの行を、説明つきで出す（ImGui::TableHeadersRow の代わり）

@@ -280,6 +280,10 @@ bool pc_window::route_event(const SDL_Event &ev)
 			return true;
 		}
 		ImGui::SetCurrentContext(w->m_imgui);
+		// Text only while a text box is active. A held key (playing notes from the keyboard)
+		// repeats text, and ImGui trickles text against mouse moves, so a drag lags behind
+		if (ev.type == SDL_EVENT_TEXT_INPUT && !ImGui::GetIO().WantTextInput)
+			return true;
 		ImGui_ImplSDL3_ProcessEvent(&ev);
 		return true;
 	}

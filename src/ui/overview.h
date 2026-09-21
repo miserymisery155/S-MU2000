@@ -57,6 +57,10 @@ public:
 	// パートの音色の窓の上のペイン: 掛かっているエフェクト（種類の名前まで）、VOL〜HOLD と VAR〜REV の棒
 	// （一覧と同じく触れる）、このパートの鍵盤。窓を閉じたら strip_hidden で鳴らしている鍵を離す
 	void part_strip(int part, xg::model &m, const xg_snapshot &ram, bridge &br);
+	// part_strip の高さ（今の字の大きさで。枠の余白は入らない）
+	static float part_strip_height();
+	static constexpr float LABEL_SCALE = 0.75f;   // 帯の見出しと数の字の大きさ（本文に対して）
+	static constexpr float METER_H = 0.9f;        // 帯の棒の高さ（字の大きさに対して）
 	void strip_hidden(bridge &br)
 	{
 		release_keys(br);
@@ -103,7 +107,10 @@ private:
 	                    bridge &br, float h);
 	void insertion_cell(int slot_index, xg::model &m, bridge &br, float h);
 	// 棒 1 つ。XG のパラメータなら触れる。part が -1 ならマスターの行
-	void cell(const column &c, int part, xg::model &m, const xg_snapshot &ram, bridge &br, float w, float h);
+	// value_out を渡すと数を描かずに返す（棒が高さいっぱいになる。パートの帯は数を見出しの行に出す）
+	struct cell_text { std::string text; bool bright = true; bool hovered = false; };
+	void cell(const column &c, int part, xg::model &m, const xg_snapshot &ram, bridge &br, float w, float h,
+	          cell_text *value_out = nullptr);
 
 	int    m_part = 0;
 	float  m_level[XG_PARTS] = {};          // VEL メーターの今の高さ（0-1）
