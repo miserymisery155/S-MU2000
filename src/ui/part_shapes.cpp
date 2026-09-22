@@ -337,6 +337,27 @@ int scope_fx_of(int slot)
 	return slot <= 4 ? mu2000::SCOPE_INS1 + (slot - 1) : slot == 5 ? mu2000::SCOPE_REV : slot == 6 ? mu2000::SCOPE_CHO : mu2000::SCOPE_VAR;
 }
 
+// ワウ（AUTO WAH・TOUCH WAH・WAH+DT+DLY）の CutoffFreq（0-127）→ Hz。
+// 番地の表が見つからないので、エミュで**鳴らして測った**（2026-09-23）: インサーションにワウを掛け、
+// 雑音（Seashore）を鳴らして入口と出口のスペクトラムの比を取り、山の頂を放物線で読む（LFO と Sensitivity は 0、
+// Resonance 12.0、Dry/Wet は全部 wet）。値 4 ごと。AUTO WAH（4E）と TOUCH WAH（52）は同じ値だった。
+// 山の形は 2 次（1 オクターブ離れて Q=2 で -9.6 dB。理屈どおり）で、Resonance の表の字がそのまま Q
+constexpr float WAH_HZ[33] = {
+	  52.7f,   59.1f,   82.2f,   96.4f,  124.7f,  150.0f,  184.6f,  221.6f,
+	 268.5f,  328.7f,  405.5f,  488.9f,  582.9f,  688.3f,  800.0f,  943.6f,
+	1096.6f, 1279.5f, 1437.8f, 1677.9f, 1949.8f, 2234.8f, 2502.9f, 2820.7f,
+	3209.8f, 3545.5f, 4014.7f, 4490.5f, 5027.8f, 5594.1f, 6204.3f, 6977.0f,
+	7850.0f,   // 127 の先は 124 までの伸びから延ばした
+};
+
+inline float wah_hz(int cut)
+{
+	const float x = std::clamp(float(cut), 0.0f, 128.0f) / 4.0f;
+	const int i = std::min(31, int(x));
+	const float t = std::clamp(x - float(i), 0.0f, 1.0f);
+	return WAH_HZ[i] * std::pow(WAH_HZ[i + 1] / WAH_HZ[i], t);   // 対数で間を取る
+}
+
 // ---- エフェクトの EQ・フィルタの特性（目安）を、スペクトラムと同じ周波数の目盛りで重ねる
 //
 // パラメータは LCD の名前で見分ける（設定の窓の EQ の絵 fx_editor::eq_graph と同じ読み方）:
@@ -345,10 +366,12 @@ int scope_fx_of(int slot)
 //   高域の棚   EQHighFreq / High Freq と EQHighGain / High Gain
 //   LPF・HPF   LPF Cutoff・DryLPFFreq・HPF Cutoff（Thru は掛けない）。LPF Reso があれば共振の山つきの 2 次
 //   クロスオーバー CrsoverFrq（縦の点線と周波数だけ）
+//   ワウ       CutoffFreq と Resonance（山は 2 次、Q は Resonance の字。周波数は測った表 WAH_HZ）
 // 周波数は表の字（"5.6k" など）から読む。形は eq_curve.h と同じく見た目の目安で、MEG の実際の式ではない
-// （LPF・HPF は 6 dB/oct とみる）。ワウの CutoffFreq（0-127 と Hz の対応が分からない）、DYNA FLT
-// （切る周波数が音で動く）、LO-FI の FltrType（音色の型）は描かない。focus は下の段でカーソルが
-// 載っている・つまんでいるパラメータ（その印を大きく）
+// （LPF・HPF は 6 dB/oct とみる）。ワウは AUTO WAH の LFO・TOUCH WAH の触れぶんで**動く**ので、
+// 描くのは止まっているときの位置（つまみの値）。DYNA FLT（切る周波数が音で動き、止まった値が無い）と
+// LO-FI の FltrType（音色の型）は描かない。focus は下の段でカーソルが載っている・つまんでいるパラメータ
+// （その印を大きく）
 void fx_response_overlay(int slot, const xg::fx_def &def, xg::model &m, ImVec2 a, ImVec2 b, const xg::fx_param *focus)
 {
 	auto find = [&](std::initializer_list<const char *> names) {
@@ -419,7 +442,25 @@ void fx_response_overlay(int slot, const xg::fx_def &def, xg::model &m, ImVec2 a
 	const bool has_hpf = hpf_i >= 0 && hz_of(hpf_i, hpf);
 	const bool has_xo = xo_i >= 0 && hz_of(xo_i, xo);
 	const bool has_reso = reso_i >= 0 && number_of(reso_i, reso);
-	if (bands.empty() && !has_lpf && !has_hpf && !has_xo)
+	// ワウ（切る周波数は測った表、Q は Resonance の字）。AUTO WAH は LFO で**上へ**振れるので、その先まで帯で出す
+	// （振れる先の値 = 値 + (127 - 値) x LFO Depth / 127。エミュで測って合わせた。2026-09-23）
+	const int wah_i = find({ "CutoffFreq" }), wq_i = find({ "Resonance" }), wd_i = find({ "LFO Depth" });
+	float wah = 0, wq = 1.0f, wah_top = 0;
+	bool has_wah = false;
+	if (wah_i >= 0 && wq_i >= 0) {
+		int v = 0;
+		if (value(wah_i, v)) {
+			wah = wah_hz(v);
+			has_wah = true;
+			float q = 0;
+			if (number_of(wq_i, q))
+				wq = std::max(0.5f, q);
+			int d = 0;
+			if (wd_i >= 0 && value(wd_i, d) && d > 0)
+				wah_top = wah_hz(int(std::lround(v + (127.0f - float(v)) * float(d) / 127.0f)));
+		}
+	}
+	if (bands.empty() && !has_lpf && !has_hpf && !has_xo && !has_wah)
 		return;
 
 	const float fs = ImGui::GetFontSize();
@@ -442,6 +483,11 @@ void fx_response_overlay(int slot, const xg::fx_def &def, xg::model &m, ImVec2 a
 		if (has_hpf) {
 			const float r = hpf / f;
 			db += 10.0f * std::log10(1.0f / (1.0f + r * r));
+		}
+		if (has_wah) {
+			const float r = f / wah;
+			const float x = wq * (r - 1.0f / r);
+			db += 20.0f * std::log10(wq / std::sqrt(1.0f + x * x));   // 2 次の山（頂は Q ぶん）
 		}
 		return db;
 	};
@@ -498,6 +544,23 @@ void fx_response_overlay(int slot, const xg::fx_def &def, xg::model &m, ImVec2 a
 		vline(hpf, "HPF", hpf_i);
 	if (has_xo)
 		vline(xo, "X-over", xo_i);
+	if (has_wah && wah_top > wah * 1.02f) {
+		// LFO で振れる先までの帯
+		const bool lit = is_focus(wd_i);
+		const float xa = x_hz(wah), xb = x_hz(wah_top);
+		dl->AddRectFilled(ImVec2(xa, top), ImVec2(xb, bottom), IM_COL32(255, 200, 90, lit ? 45 : 25));
+		for (float y = top; y < bottom; y += fs * 0.4f)
+			dl->AddLine(ImVec2(xb, y), ImVec2(xb, std::min(bottom, y + fs * 0.2f)), IM_COL32(255, 200, 90, lit ? 200 : 120), 1.0f);
+		tag(ImVec2((xa + xb) * 0.5f, top + fs * 0.1f), "LFO → " + khz(wah_top), IM_COL32(255, 200, 90, 220), lit);
+	}
+	if (has_wah) {
+		const bool lit = is_focus(wah_i) || is_focus(wq_i);
+		const ImVec2 c(x_hz(wah), y_db(total_db(wah)));
+		const float r = std::max(3.0f, fs * 0.24f) * (lit ? 1.5f : 1.0f);
+		dl->AddCircleFilled(c, r, lc);
+		dl->AddCircle(c, r, IM_COL32(40, 30, 10, 255), 0, 1.5f);
+		tag(c, "Wah " + khz(wah), lc, lit);
+	}
 	// 目盛りと断り（右上）
 	{
 		const char *t = "EQ・フィルタ（目安）  ±18 dB";
