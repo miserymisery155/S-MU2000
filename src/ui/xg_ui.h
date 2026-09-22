@@ -178,6 +178,8 @@ void set_help_lang(int lang);
 void help_tip(const char *name);
 // 説明の文そのもの（説明を消していれば、または無ければ nullptr）
 const char *help_for(const char *name);
+// XG の仕様書のパラメータ名と番地（"MW LFO PMOD DEPTH（08 pp 20）"）。パートの項目だけ。無ければ空
+std::string official_name(const char *key);
 // 「説明を出す」のチェックボックスと、言語の選択
 void help_checkbox();
 // 表の見出しの行を、説明つきで出す（ImGui::TableHeadersRow の代わり）

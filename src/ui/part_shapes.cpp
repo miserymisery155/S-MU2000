@@ -70,7 +70,7 @@ bool title_toggle(const char *title, const char *id, bool knobs, bool &toggle_ho
 // 1 つの区画。見出しと、大きな絵か値の棒（右上の切り替えで選ぶ。index が負なら絵は無く棒だけ）
 template <typename Draw>
 void panel(const char *id, const char *title, float w, float h, int part, xg::model &m, bridge &br,
-           std::initializer_list<const char *> keys, int index, Draw draw, bool keys_too = false)
+           std::initializer_list<const char *> keys, int index, Draw draw, const char *about = nullptr)
 {
 	const float fs = ImGui::GetFontSize();
 	// 見出しを枠の上端に寄せる（上下の余白を詰める）
@@ -89,7 +89,7 @@ void panel(const char *id, const char *title, float w, float h, int part, xg::mo
 	else if (title_toggle(title, "##mode", knobs, toggle_hovered))
 		set_shapes_knobs(index, !knobs);
 	ImGui::PopFont();
-	begin_values();                           // 絵の点の字（実際の時間など）を集める
+	const std::string before = hint_text();
 	if (!knobs) {
 		// 絵だけ。区画の残りを全部使う
 		const ImVec2 avail = ImGui::GetContentRegionAvail();
@@ -100,32 +100,167 @@ void panel(const char *id, const char *title, float w, float h, int part, xg::mo
 			param_slider(k, part, m, br);
 		ImGui::PopItemWidth();
 	}
-	const std::vector<std::string> values = end_values();
-	// 区画にカーソルが載ったら、下の帯に区画の名前と、中の項目の名前と値を 1 行ずつ。
-	// 絵に点の字があればそれ（実際の時間などつき）、無ければ（EQ・つまみ・ポルタメント）XG の値
-	if (!toggle_hovered && ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows | ImGuiHoveredFlags_AllowWhenBlockedByActiveItem)) {
-		// 2 行目に項目を 1 行で並べる
-		std::string text = std::string(title) + "\n";
-		const char *sep = "";
-		for (const std::string &v : values) {
-			text += sep + v;
-			sep = "    ";
-		}
-		// 点の字が無ければ項目を全部。keys_too なら、点の字に出ていない項目も後ろに
-		if (values.empty() || keys_too)
-			for (const char *k : keys) {
-				const char *label = P(k).label;
-				bool shown = false;
-				for (const std::string &v : values)
-					shown = shown || v.find(label) != std::string::npos;
-				if (!shown) {
-					text += sep + param_line(k, part, m);
-					sep = "    ";
+	// カーソルの下の部品が説明を出さなかったら、区画そのものの説明を
+	if (about && !toggle_hovered && hint_text() == before &&
+	    ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows | ImGuiHoveredFlags_AllowWhenBlockedByActiveItem))
+		hint("%s\n%s", title, about);
+	ImGui::EndChild();
+}
+
+// ---- モジュレーションのマトリクス。操作子 6 つ（行）× 行き先 6 つ（列）の深さ
+//
+// 行き先の 3 つ（音程・切る高さ・音量）は「動かす」量で 64 が 0（±）、残りの 3 つは LFO の揺れの深さ（0-127）。
+// マスの色は、± の量なら + が青・− が赤、深さなら橙で、濃さが量。既定から外れたマスは枠を明るく。
+// マスを上下にドラッグ（2 ドットで 1）、マウスホイール（1 目で 1、Ctrl で 10）、ダブルクリックで既定に戻す
+void mod_matrix(int part, xg::model &m, bridge &br, float w, float h)
+{
+	struct src { const char *key, *name, *about; };
+	static const src SRCS[6] = {
+		{ "mw",   "モジュレーション",   "モジュレーションホイール（CC1）" },
+		{ "bend", "ピッチベンド",       "ピッチベンド（中央から離した量。向きは問わない）" },
+		{ "cat",  "チャンネル AT",      "チャンネルアフタータッチ（鍵盤を押し込む強さ。チャンネルに 1 つ）" },
+		{ "pat",  "ポリ AT",            "ポリアフタータッチ（鍵ごとの押し込む強さ）" },
+		{ "ac1",  "AC1",                "AC1（AC1 CC No で選んだコントロールチェンジ）" },
+		{ "ac2",  "AC2",                "AC2（AC2 CC No で選んだコントロールチェンジ）" },
+	};
+	struct dst { const char *key, *name, *sub; };
+	static const dst DSTS[6] = {
+		{ "pitch",    "音程",     "Pitch" },
+		{ "filter",   "音色",     "Filter" },
+		{ "amp",      "音量",     "Amp" },
+		{ "lfo_pmod", "LFO 音程", "ビブラート" },
+		{ "lfo_fmod", "LFO 音色", "ワウ" },
+		{ "lfo_amod", "LFO 音量", "トレモロ" },
+	};
+	ImGuiIO &io = ImGui::GetIO();
+	const float fs = ImGui::GetFontSize();
+	ImDrawList *dl = ImGui::GetWindowDrawList();
+	const ImVec2 org = ImGui::GetCursorScreenPos();
+	const float head_w = std::min(fs * 8.0f, w * 0.26f);
+	const float head_h = ImGui::GetTextLineHeight() * 2.2f;
+	const float gap = std::max(2.0f, fs * 0.15f);
+	const float cw = (w - head_w) / 6.0f, ch = std::max(fs * 1.6f, (h - head_h) / 6.0f);
+	ImGuiStorage *st = ImGui::GetStateStorage();
+
+	// 列の見出し（2 行: 行き先と、揺れなら何になるか）。動かすのと揺らすのの間に線
+	for (int c = 0; c < 6; c++) {
+		const float x = org.x + head_w + cw * float(c);
+		const ImVec2 a = ImGui::CalcTextSize(DSTS[c].name), b = ImGui::CalcTextSize(DSTS[c].sub);
+		dl->AddText(ImVec2(x + (cw - a.x) * 0.5f, org.y), ImGui::GetColorU32(ImGuiCol_Text), DSTS[c].name);
+		dl->AddText(ImVec2(x + (cw - b.x) * 0.5f, org.y + ImGui::GetTextLineHeight()), ImGui::GetColorU32(ImGuiCol_TextDisabled), DSTS[c].sub);
+	}
+	{
+		const float x = org.x + head_w + cw * 3.0f - gap * 0.5f;
+		dl->AddLine(ImVec2(x, org.y), ImVec2(x, org.y + head_h + ch * 6.0f), ImGui::GetColorU32(ImGuiCol_Separator), 1.0f);
+	}
+
+	for (int r = 0; r < 6; r++) {
+		const float y = org.y + head_h + ch * float(r);
+		// 行の見出し。AC1・AC2 は CC の番号もここで（マウスホイールで変える）
+		ImGui::SetCursorScreenPos(ImVec2(org.x, y));
+		ImGui::PushID(r);
+		ImGui::InvisibleButton("##row", ImVec2(head_w - gap, ch - gap));
+		const bool row_hover = ImGui::IsItemHovered();
+		dl->AddRectFilled(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), ImGui::GetColorU32(row_hover ? ImGuiCol_HeaderHovered : ImGuiCol_Header, 0.35f), 3.0f);
+		std::string label = SRCS[r].name;
+		if (r >= 4) {
+			const std::string cck = std::string("part.") + SRCS[r].key + "_cc";
+			const xg::param &cp = P(cck.c_str());
+			int ccv = 0;
+			if (m.get(cp, part, ccv)) {
+				char b[32];
+				std::snprintf(b, sizeof(b), "  CC%d", ccv);
+				label += b;
+				if (row_hover) {
+					ImGui::SetItemKeyOwner(ImGuiKey_MouseWheelY);
+					if (io.MouseWheel != 0.0f) {
+						const int nv = std::clamp(ccv + (io.MouseWheel > 0 ? 1 : -1) * (io.KeyCtrl ? 10 : 1), cp.min, cp.max);
+						if (nv != ccv)
+							br.send(m.set(cp, part, nv));
+					}
 				}
 			}
-		hint("%s", text.c_str());
+		}
+		const ImVec2 ls = ImGui::CalcTextSize(label.c_str());
+		dl->AddText(ImVec2(org.x + fs * 0.3f, y + (ch - gap - ls.y) * 0.5f), ImGui::GetColorU32(ImGuiCol_Text), label.c_str());
+		if (row_hover) {
+			if (r >= 4)
+				hint("%s\n%s。この行の 6 つのマスが、この操作子で動かす量。見出しの上でマウスホイールを回すと CC の番号が変わる",
+				     official_name((std::string("part.") + SRCS[r].key + "_cc").c_str()).c_str(), SRCS[r].about);
+			else
+				hint("%s\nこの行の 6 つのマスが、この操作子で動かす量", SRCS[r].about);
+		}
+
+		for (int c = 0; c < 6; c++) {
+			const std::string key = std::string("part.") + SRCS[r].key + "_" + DSTS[c].key;
+			const xg::param &p = P(key.c_str());
+			int v = p.def;
+			const bool known = m.get(p, part, v);
+			const float x = org.x + head_w + cw * float(c);
+			ImGui::SetCursorScreenPos(ImVec2(x, y));
+			ImGui::PushID(c);
+			ImGui::InvisibleButton("##cell", ImVec2(cw - gap, ch - gap));
+			const ImGuiID id = ImGui::GetItemID();
+			const bool hov = ImGui::IsItemHovered(), act = ImGui::IsItemActive();
+			if (known) {
+				int nv = v;
+				if (ImGui::IsItemActivated()) {
+					st->SetInt(id, v);
+					st->SetFloat(id + 1, io.MousePos.y);
+				}
+				if (act && !ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+					nv = st->GetInt(id, v) + int((st->GetFloat(id + 1, io.MousePos.y) - io.MousePos.y) / 2.0f);
+				if (hov) {
+					ImGui::SetItemKeyOwner(ImGuiKey_MouseWheelY);
+					if (io.MouseWheel != 0.0f)
+						nv = v + (io.MouseWheel > 0 ? 1 : -1) * (io.KeyCtrl ? 10 : 1);
+					if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+						nv = p.def;
+				}
+				nv = std::clamp(nv, p.min, p.max);
+				if (nv != v) {
+					drag_send(br, m.set(p, part, nv));
+					v = nv;
+				}
+			}
+			// 描く
+			const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
+			const bool bip = p.how == xg::view::center;
+			float t = 0.0f;
+			ImU32 fill;
+			if (bip) {
+				const float span = float(v >= p.center ? p.max - p.center : p.center - p.min);
+				t = span > 0 ? float(v - p.center) / span : 0.0f;
+				fill = t >= 0 ? IM_COL32(70, 140, 235, int(40 + 190 * t)) : IM_COL32(230, 80, 70, int(40 - 190 * t));
+			} else {
+				t = float(v - p.min) / float(std::max(1, p.max - p.min));
+				fill = IM_COL32(235, 160, 50, int(30 + 200 * t));
+			}
+			dl->AddRectFilled(a, b, ImGui::GetColorU32(ImGuiCol_FrameBg), 3.0f);
+			if ((bip && v != p.center) || (!bip && v != p.min))
+				dl->AddRectFilled(a, b, fill, 3.0f);
+			const bool changed = known && v != p.def;
+			dl->AddRect(a, b, changed ? IM_COL32(250, 230, 150, 255)
+			                          : ImGui::GetColorU32(hov || act ? ImGuiCol_Border : ImGuiCol_BorderShadow), 3.0f,
+			            0, changed ? 1.5f : 1.0f);
+			const std::string text = known ? xg::format(p, v) : std::string("--");
+			const ImVec2 ts = ImGui::CalcTextSize(text.c_str());
+			dl->AddText(ImVec2((a.x + b.x - ts.x) * 0.5f, (a.y + b.y - ts.y) * 0.5f),
+			            ImGui::GetColorU32(known && ((bip && v != p.center) || (!bip && v != p.min)) ? ImGuiCol_Text : ImGuiCol_TextDisabled),
+			            text.c_str());
+			if (hov || act) {
+				const char *help = help_for(key.c_str());
+				const std::string to = c >= 3 ? std::string(DSTS[c].name) + "（" + DSTS[c].sub + "）" : std::string(DSTS[c].name);
+				hint("%s  %s\n%s → %s。%s（上下にドラッグ・マウスホイール・ダブルクリックで既定の %s）",
+				     official_name(key.c_str()).c_str(), text.c_str(), SRCS[r].name, to.c_str(), help ? help : "",
+				     xg::format(p, p.def).c_str());
+			}
+			ImGui::PopID();
+		}
+		ImGui::PopID();
 	}
-	ImGui::EndChild();
+	ImGui::SetCursorScreenPos(ImVec2(org.x, org.y + head_h + ch * 6.0f));
+	ImGui::Dummy(ImVec2(w, 0));
 }
 
 } // namespace
@@ -150,6 +285,7 @@ void part_shapes::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 
 	const float fs = ImGui::GetFontSize();
 	int part = shape_window_part();
+	int scope = -1;                   // パートの音を拾うか（形のタブのフィルタが絵のときだけ）
 
 	// ---- パートを選ぶ。音色の名前も出す
 	ImGui::SetNextItemWidth(fs * 5);
@@ -212,12 +348,12 @@ void part_shapes::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 	const ImVec2 avail = ImGui::GetContentRegionAvail();
 	// 音色を選ぶ面は、左に分類・右に音色とバンク違いの 2 列（xgui::program_pane）
 	const float pane_w = std::min(fs * 15.6f, avail.x * 0.3f);     // 前の 6 割
-	// 下の説明の帯（4 行ぶん。入り切らなかった字の行と、説明の 3 行）を残す
-	// 帯は小さめの字で 3 行（区画の名前と、中の項目を 1 行に並べたもの。折り返しても 3 行まで）
+	// 下の説明の帯（小さめの字で 3 行）。「説明を出す」を切っていれば帯ごと出さず、その高さを絵に回す
+	const bool show_bar = help_on();
 	ImGui::PushFont(nullptr, fs * BAR_SCALE);
-	const float bar_h = ImGui::GetTextLineHeightWithSpacing() * 3.0f + st.WindowPadding.y * 2.0f;
+	const float bar_h = show_bar ? ImGui::GetTextLineHeightWithSpacing() * 3.0f + st.WindowPadding.y * 2.0f + st.ItemSpacing.y : 0.0f;
 	ImGui::PopFont();
-	const float body_h = std::max(fs * 8.0f, avail.y - bar_h - st.ItemSpacing.y);
+	const float body_h = std::max(fs * 8.0f, avail.y - bar_h);
 
 	if (ImGui::BeginChild("voicepane", ImVec2(pane_w, body_h)))
 	{
@@ -232,31 +368,53 @@ void part_shapes::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 	const float top_y = ImGui::GetCursorScreenPos().y;
 	if (ImGui::BeginTabBar("right")) {
 		if (ImGui::BeginTabItem("形")) {
-			// 3 × 2。上に VIB・モジュレーション・FILTER（揺れの 2 つを隣に）、下に EG・ピッチ EG・EQ。
+			if (!shapes_knobs(1))
+				scope = part;
+			// 3 列。左に VIB（上）とモジュレーション（下）。中央と右は上下 2 段がつながった区画（メゾネット）で、
+			// 中央がフィルタと EQ、右が EG とピッチ EG（どちらも上の段が絵、下の段がフェーダー）。
 			// ポルタメントは「すべて」のタブにある
 			const ImVec2 room = ImGui::GetContentRegionAvail();
 			const float room_h = body_h - (ImGui::GetCursorScreenPos().y - top_y);
 			const float w = (room.x - st.ItemSpacing.x * 2.0f) / 3.0f;
 			const float h = (room_h - st.ItemSpacing.y) * 0.5f;
+			ImGui::BeginGroup();
 			panel("vib", "ビブラート（VIB）", w, h, part, m, br, { "part.vib_rate", "part.vib_depth", "part.vib_delay" }, 0,
-			      [](int p, xg::model &mm, bridge &b, float pw, float ph) { overview::vib_cell(p, mm, b, pw, ph, false); });
-			ImGui::SameLine();
+			      [](int p, xg::model &mm, bridge &b, float pw, float ph) { overview::vib_cell(p, mm, b, pw, ph, false); },
+			      "音色の揺れ（ビブラート）。絵は実際の揺れで、右のフェーダーで速さ（Rate）・深さ（Depth）・"
+			      "掛かり始めるまでの時間（Delay）を変える");
 			panel("mod", "モジュレーション（MW）", w, h, part, m, br,
 			      { "part.mw_lfo_pmod", "part.mw_pitch", "part.mw_filter", "part.mw_amp", "part.mw_lfo_fmod", "part.mw_lfo_amod" }, 5,
-			      [](int p, xg::model &mm, bridge &b, float pw, float ph) { overview::mod_cell(p, mm, b, pw, ph, false); }, true);
+			      [](int p, xg::model &mm, bridge &b, float pw, float ph) { overview::mod_cell(p, mm, b, pw, ph, false); },
+			      "モジュレーションホイールを上げたときに足すビブラート。横がホイールの位置、縦が揺れの深さ。"
+			      "左のホイールが CC1、右のホイールが MW LFO PM。音色自身の揺れ（背景の帯）とは足さず、深いほうが効く");
+			ImGui::EndGroup();
 			ImGui::SameLine();
-			panel("filter", "フィルタ（FILTER）", w, h, part, m, br, { "part.cutoff", "part.resonance", "part.hpf_cutoff" }, 1,
-			      [](int p, xg::model &mm, bridge &b, float pw, float ph) { overview::filter_cell(p, mm, b, pw, ph, false); });
-			panel("eg", "音量の形（EG）", w, h, part, m, br, { "part.attack", "part.decay", "part.release" }, 2,
-			      [](int p, xg::model &mm, bridge &b, float pw, float ph) { overview::eg_cell(p, mm, b, pw, ph, false); });
+			const float tall = h * 2.0f + st.ItemSpacing.y;
+			panel("filter", "フィルタと EQ（FILTER・EQ）", w, tall, part, m, br,
+			      { "part.cutoff", "part.resonance", "part.hpf_cutoff",
+			        "part.eq_bass_gain", "part.eq_bass_freq", "part.eq_treble_gain", "part.eq_treble_freq" }, 1,
+			      [](int p, xg::model &mm, bridge &b, float pw, float ph) { overview::filter_cell(p, mm, b, pw, ph, false); },
+			      "音の明るさ。横は実際の周波数で、緑がこのパートの今の音のスペクトラム。太線がフィルタとパートの EQ を"
+			      "合わせた実際の特性（細線がフィルタだけ、点線が EQ だけ）。どちらも声ごとに掛かり、EQ はフィルタのすぐ後ろ"
+			      "（インサーションより前）。下のフェーダーで Cutoff・Resonance・HPF と、EQ の低音・高音のゲインと周波数を変える");
 			ImGui::SameLine();
-			panel("peg", "音程の形（ピッチ EG）", w, h, part, m, br,
-			      { "part.peg_init_level", "part.peg_attack_time", "part.peg_rel_level", "part.peg_rel_time" }, 3,
-			      [](int p, xg::model &mm, bridge &b, float pw, float ph) { overview::peg_cell(p, mm, b, pw, ph, false); });
-			ImGui::SameLine();
-			panel("eq", "パートの EQ", w, h, part, m, br,
-			      { "part.eq_bass_gain", "part.eq_bass_freq", "part.eq_treble_gain", "part.eq_treble_freq" }, 4,
-			      [](int p, xg::model &mm, bridge &b, float pw, float ph) { overview::eq_cell(p, mm, b, pw, ph, false); });
+			panel("env", "EG とピッチ EG（EG・PEG）", w, tall, part, m, br,
+			      { "part.attack", "part.decay", "part.release",
+			        "part.peg_init_level", "part.peg_attack_time", "part.peg_rel_level", "part.peg_rel_time" }, 2,
+			      [](int p, xg::model &mm, bridge &b, float pw, float ph) { overview::env_cell(p, mm, b, pw, ph); },
+			      "音量の形（青。立ち上がり → 落ち着き → 伸ばし → 離して消える）と音程の動き（橙）を、同じ実際の時間の目盛り・"
+			      "同じ離す時刻で 1 枚に。縦は左が音量（dB）、右が音程（セント）。下のフェーダーで EG の Attack・Decay・Release と"
+			      "ピッチ EG の Init・Attack・Rel Lv・Rel Tm を変える");
+			ImGui::EndTabItem();
+		}
+		if (ImGui::BeginTabItem("マトリクス")) {
+			// 操作子 6 つ × 行き先 6 つ（モジュレーションのマトリクス）
+			const float room_h = body_h - (ImGui::GetCursorScreenPos().y - top_y);
+			if (ImGui::BeginChild("matrix", ImVec2(0, room_h), ImGuiChildFlags_None, ImGuiWindowFlags_NoScrollbar)) {
+				const ImVec2 r = ImGui::GetContentRegionAvail();
+				mod_matrix(part, m, br, r.x, r.y);
+			}
+			ImGui::EndChild();
 			ImGui::EndTabItem();
 		}
 		if (ImGui::BeginTabItem("すべて")) {
@@ -289,12 +447,13 @@ void part_shapes::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 	}
 	ImGui::EndGroup();
 
-	// ---- 説明の帯。カーソルを載せた絵・値・名前の説明（無ければ使い方のひとこと）
+	// ---- 説明の帯。カーソルを載せた項目の説明（無ければ使い方のひとこと）。「説明を出す」を切れば出さない
+	if (show_bar) {
 	if (ImGui::BeginChild("hint", ImVec2(0, 0), ImGuiChildFlags_Borders)) {
 		ImGui::PushFont(nullptr, fs * BAR_SCALE);
 		const std::string &t = hint_text();
 		if (t.empty()) {
-			ImGui::TextDisabled("区画や値、名前にカーソルを載せると、ここに中身や説明が出る");
+			ImGui::TextDisabled("項目にカーソルを載せると、ここに説明が出る（「説明を出す」を切るとこの欄は消える）");
 		} else {
 			// 1 行目（区画や項目の名前）は色を変える
 			const size_t nl = t.find('\n');
@@ -307,7 +466,9 @@ void part_shapes::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 		ImGui::PopFont();
 	}
 	ImGui::EndChild();
+	}
 	end_hint_bar();
+	br.want_scope(scope);
 
 	ImGui::PopFont();
 	ImGui::End();

@@ -40,16 +40,28 @@ public:
 	// compact は一覧の中の小さなマスのとき。描くだけでマウスでは触れない（ダブルクリックで
 	// パートの音色の窓を頼むのは呼ぶ側）。点をつまんで変えるのは compact でないときだけ
 	//
-	// EG: アタック・ディケイ・リリースの形を描き、点をつまんで動かす
+	// EG: 音量の形を実際の時間で描き、Attack・Decay・Release のフェーダー（音色の窓。ピッチ EG と同じ時間の目盛り）
 	static void eg_cell(int part, xg::model &m, bridge &br, float w, float h, bool compact);
-	// ピッチ EG: 音程の動き（出だし → 本来の音程 → 離してからリリースレベル）を描き、点をつまんで動かす
+	// 一覧の小さなマスのEG（目安の形。eg_cell が compact のとき使う）
+	static void eg_small(int part, xg::model &m, bridge &br, float w, float h, bool compact);
+	// ピッチ EG: 音程の動きを実際の時間で描き、4 本のフェーダー（音色の窓。EG と同じ時間の目盛り）
 	static void peg_cell(int part, xg::model &m, bridge &br, float w, float h, bool compact);
-	// フィルタ: 周波数特性の山を描き、山の頂をつまんで横でカットオフ、縦でレゾナンス
+	// 一覧の小さなマスのピッチ EG（目安の形。peg_cell が compact のとき使う）
+	static void peg_small(int part, xg::model &m, bridge &br, float w, float h, bool compact);
+	// EG とピッチ EG を 1 枚に（同じ時間の目盛り）。上の段に絵、下の段に 7 本のフェーダー（音色の窓の右の列）
+	static void env_cell(int part, xg::model &m, bridge &br, float w, float h);
+	// 音色の窓の縦 2 段つなぎの区画（フィルタと EQ、EG とピッチ EG）で、絵の段が占める割合
+	static constexpr float MAISON_SPLIT = 0.5f;
+	// フィルタ: 実際の周波数特性とパートの音のスペクトラムを同じ目盛りで描き、Cutoff・Resonance・HPF のフェーダー（音色の窓）
 	static void filter_cell(int part, xg::model &m, bridge &br, float w, float h, bool compact);
+	// 一覧の小さなマスのフィルタ（目安の形。filter_cell が compact のとき使う）
+	static void filter_small(int part, xg::model &m, bridge &br, float w, float h, bool compact);
 	// パートの EQ: 低音と高音の点をつまんで、横で周波数、縦でゲイン
 	static void eq_cell(int part, xg::model &m, bridge &br, float w, float h, bool compact);
-	// ビブラート: 揺れの波の山をつまんで速さと深さ、平らな所の終わりで掛かり始め
+	// ビブラート: 実際の揺れの波と、Rate・Depth・Delay のフェーダー（音色の窓）
 	static void vib_cell(int part, xg::model &m, bridge &br, float w, float h, bool compact);
+	// 一覧の小さなマスのビブラート（波の山をつまむ前の絵。vib_cell が compact のとき使う）
+	static void vib_small(int part, xg::model &m, bridge &br, float w, float h, bool compact);
 	// モジュレーションのビブラート（ホイールの位置ごとの揺れの深さ。音色の窓）
 	static void mod_cell(int part, xg::model &m, bridge &br, float w, float h, bool compact);
 	// マスター EQ の 5 つの帯の特性。edit なら点をつまんで周波数とゲイン、ホイールで Q（マスターの窓）。
@@ -133,6 +145,8 @@ private:
 	// そのパートのホイールの今の値（送ったばかりならその値）と、回して送る
 	static int  mod_now(int part, int ram_value);
 	static void mod_send(int part, int slot, int value, bridge &br);
+	// マウスホイールの回した量 → 動かす量（1 目で 1、big（Ctrl）で 10）
+	static int  wheel_steps(float wheel, bool big);
 	xg::model *m_model = nullptr;     // 閉じたときに受信チャンネルを戻すため（draw で覚える）
 	bool   m_mute[XG_PARTS] = {}, m_solo[XG_PARTS] = {};
 	int    m_saved_rcv[XG_PARTS];     // ミュートで OFF にする前の受信チャンネル（-1 は消していない）

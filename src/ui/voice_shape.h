@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <complex>
 #include <cstring>
 #include <vector>
 
@@ -497,6 +498,35 @@ inline std::vector<filter_line> filter_lines(const u8 *rom, u32 rec, const u8 *p
 		line.hpf = (line.regs[2] & 0x7ff) != 0;
 		line.pts = filter_response(line.regs, hz);
 		out.push_back(std::move(line));
+	}
+	return out;
+}
+
+// ---- パートの EQ（08 pp 72・73・76・77）
+//
+// firmware は声ごとのレジスタ 0x20-0x2B に、低音と高音の 1 次の IIR を 1 つずつ書く（native の eq_set と同じ表）。
+// チップ（swp30 の iir1_block::step）は y = (a0·x + a1·x[-1] + b1·y[-1]) >> 13 を 2 段。
+// だから 1 段の特性は H(z) = (a0 + a1·z⁻¹) / (8192 − b1·z⁻¹)。フィルタのすぐ後ろ、声ごとに掛かる
+inline std::vector<pt> eq_response(const u8 *rom, const u8 *part, const std::vector<float> &hz)
+{
+	namespace nv = xg::nv;
+	std::vector<pt> out;
+	if (!rom)
+		return out;
+	nv::slot_regs r{};
+	nv::eq_set(rom, r, part[xg::ram::PART_EQ_LGAIN], part[xg::ram::PART_EQ_HGAIN],
+	           part[xg::ram::PART_EQ_LFREQ], part[xg::ram::PART_EQ_HFREQ]);
+	// 段 0（低音）: 0x20 a1・0x22 b1・0x24 a0。段 1（高音）: 0x26 b1・0x28 a1・0x2A a0（swp30 の書き込みの割り当て）
+	const double a0[2] = { double(s16(r.v[0x24])), double(s16(r.v[0x2a])) };
+	const double a1[2] = { double(s16(r.v[0x20])), double(s16(r.v[0x28])) };
+	const double b1[2] = { double(s16(r.v[0x22])), double(s16(r.v[0x26])) };
+	for (float f : hz) {
+		const double w = 2.0 * 3.14159265358979323846 * double(f) / RATE;
+		const std::complex<double> z1 = std::polar(1.0, -w);
+		std::complex<double> h = 1.0;
+		for (int k = 0; k < 2; k++)
+			h *= (a0[k] + a1[k] * z1) / (8192.0 - b1[k] * z1);
+		out.push_back({ f, float(20.0 * std::log10(std::max(std::abs(h), 1e-6))) });
 	}
 	return out;
 }

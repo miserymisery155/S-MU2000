@@ -179,6 +179,15 @@ public:
 	// 尾をどこまで追うかはこれで決める
 	void set_slot_held(peek_fn f) { m_slot_held = std::move(f); }
 	void set_rom(const u8 *rom) { m_rom = rom; }
+	// **そのスロット（マスタの声 0-63）を今 native が鳴らしているなら、そのパート**。
+	// 鳴らしていなければ -1（画面のスペクトラムが声をパートに振り分けるのに使う）
+	int slot_part(int i) const
+	{
+		if (i < 0 || i >= SLOTS)
+			return -1;
+		const slot_use &s = m_slot[size_t(i)];
+		return (s.on || s.rel) ? s.part : -1;
+	}
 	// ワーク RAM（firmware が音色を選んだ結果を読む）
 	void set_ram(u8 *ram) { m_ram = ram; m_ramw = ram; }
 
