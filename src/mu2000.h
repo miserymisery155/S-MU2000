@@ -273,6 +273,18 @@ public:
 	int scope_part() const { return m_scope_part.load(std::memory_order_relaxed); }
 	// 直近の n サンプル（n ≤ SCOPE_N、古い順）。読み手は画面の糸。途中の値が混ざってもよい
 	void scope_read(float *out, size_t n) const;
+	// 同じパートの、インサーションを通したあとの音（MEG の出口）。そのパートにインサーションが
+	// 付いていなければ scope_read と同じ（声の和）。目盛りは声の和にそろえてある。
+	// 返り値は通しているインサーションの番号（1-4。無ければ 0）
+	int scope_read_post(float *out, size_t n) const;
+	// 見ているパートに付いているインサーション（1-4。無ければ 0）
+	int scope_insertion() const { const int s = m_scope_ins.load(std::memory_order_relaxed); return s < 0 ? 0 : s + 1; }
+	// エフェクトごとの入口（MEG への送り）と出口。見たいパートを決めているあいだだけ溜める。
+	// インサーションとインサーション接続のバリエーションは掛けたパートだけの音、
+	// システムのリバーブ・コーラス・バリエーションは全パートの送りを混ぜた音。MIX は戻りと乾いた音を混ぜた
+	// マスター EQ の前（出口のみ意味がある）。どれも左右の平均
+	enum scope_fx : int { SCOPE_INS1, SCOPE_INS2, SCOPE_INS3, SCOPE_INS4, SCOPE_VAR, SCOPE_CHO, SCOPE_REV, SCOPE_MIX, SCOPE_FX_N };
+	void scope_read_fx(int fx, bool out, float *dst, size_t n) const;
 
 	sh7043a_device &cpu()  { return *m_cpu; }
 	swp30_device   &swpm() { return m_swpm; }
@@ -743,6 +755,13 @@ private:
 	std::array<std::atomic<u32>, 2> m_scope_w{};          // チップごとの書いた数
 	u32 m_scope_tick = 0;
 	static void scope_tap_fn(void *ctx, const s32 *samples);
+	// インサーションの出口（MEG の m20-m2f。scope_meg_fn）。インサーション 1 はマスタの m28/m29、
+	// 2-4 はスレーブの m28/m29・m2a/m2b・m2c/m2d（firmware が組む MEG の割り付け。エミュで実測）
+	std::atomic<int> m_scope_ins{-1};                     // 見ているパートのインサーション（0-3、-1 は無し）
+	// チップごと、m20-m2f の 8 組 × 入口・出口の輪（[chip][pair * 2 + out][SCOPE_N]。大きいので別に取る）
+	std::vector<float> m_fx_ring = std::vector<float>(2 * 16 * SCOPE_N);
+	std::array<std::atomic<u32>, 2> m_fx_w{};
+	static void scope_meg_fn(void *ctx, const s32 *in, const s32 *out);
 	void scope_refresh_owner();
 	required_device<sci4_device> m_sci4_finder;
 	sci4_device *m_sci4 = nullptr;   // PLG ボード用 0xf00000
