@@ -645,8 +645,10 @@ public:
 					           assign_amod(s.part, s.keynote), s.vamp / 2))));
 				if (movp) {
 					const int d = nv::vib_ramp_reg(m_rom, s.vcnt) & 0x7f;
-					m_poke(u32(i) * 64 + 0x0a,
-					       u16(s.vhi | u16(d < s.vfull ? d : s.vfull)));
+					// せり上がる途中でも、つまみのぶんとの大きいほう（6.215）。
+					// 今の値は s.lfo に置く（つまみが動いたときの元になる）
+					s.lfo = u16(s.vhi | u16(d < s.vfull ? d : s.vfull));
+					m_poke(u32(i) * 64 + 0x0a, s.cal ? lfo_reg(s.lfo, *s.cal, s.part, s.keynote) : s.lfo);
 					// 実機はこの刻みでも切る高さを作り直す
 					//（6.189。位相は進めない）
 					if (s.lstep && s.elem && fenv_on()) {
@@ -2171,18 +2173,23 @@ private:
 		}
 	}
 
-	// LFO のレジスタ。下位が深さで、つまみのぶんを足す（6.198）。
-	// 写し取ったときの値との**差**で動かすのはこれまでどおり。
-	// 割り当てが既定（深さ 10）なら、前の 10 段の表と同じ値になる
+	// LFO のレジスタ。下位が深さで、つまみのぶん（6.198）と音色自身の深さの**大きいほう**（6.215）。
+	// 実機は 表[max(つまみの合計の頭打ち, 音色自身の目盛り)] で、足さない。表（VIB_REG_TAB）は
+	// 単調なので、レジスタの値どうしの max と同じ。base は音色自身の値（ビブラートのつまみ・
+	// 遅れてせり上がる分を含む）。写し取りの値がちょうどつまみのぶんなら、音色自身は
+	// それ以下で分からないので 0 と見る（写し取りをつまみを上げたまま取ったときだけ）
 	u16 lfo_reg(u16 base, const nv::voice_cal &c, int part, int note = 60) const
 	{
+		if (!m_rom)
+			return base;
 		const int now = m_cc[part].mod;
 		const int sum = assign_pmod(part, note, now < 0 ? c.cal_mod : now);
-		const int was = assign_pmod(part, note, c.cal_mod, 0x2000);
-		if (sum == was || !m_rom)
-			return base;
-		const int d = nv::pmod_reg(m_rom, sum) - nv::pmod_reg(m_rom, was);
-		return u16((base & 0xff00) | nv::clamp_att(int(base & 0xff) + d));
+		const int was = nv::pmod_reg(m_rom, assign_pmod(part, note, c.cal_mod, 0x2000));
+		int own = int(base & 0xff);
+		if (was > 0 && own == was)
+			own = 0;
+		const int wheel = nv::pmod_reg(m_rom, sum);
+		return u16((base & 0xff00) | (own > wheel ? own : wheel));
 	}
 
 public:

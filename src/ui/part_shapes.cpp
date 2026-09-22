@@ -19,10 +19,11 @@ namespace {
 
 // パートは口 A-D の 64（C・D は実機では USB だけの口）
 constexpr int PARTS = XG_PARTS;
+constexpr float BAR_SCALE = 0.85f;   // 下の説明の帯の字の大きさ（本文に対して）
 
 // 「グラフ ○ つまみ」の切り替え。見出しの行の右端に描き、押されたら true。
 // 見出しと並べて入らなければ字を外して切り替えだけにし、それでも入らなければ見出しを切る
-bool title_toggle(const char *title, const char *id, bool knobs)
+bool title_toggle(const char *title, const char *id, bool knobs, bool &toggle_hovered)
 {
 	const float fs = ImGui::GetFontSize();
 	const char *l = "グラフ", *r = "つまみ";
@@ -47,8 +48,10 @@ bool title_toggle(const char *title, const char *id, bool knobs)
 	ImGui::SetCursorScreenPos(ImVec2(start.x + room - total, start.y));
 	const ImVec2 p = ImGui::GetCursorScreenPos();
 	const bool pressed = ImGui::InvisibleButton(id, ImVec2(total, line_h));
-	hint(knobs ? "いまは「つまみ」（値の棒で触る）。クリックで「グラフ」（絵で触る）に切り替える"
-	           : "いまは「グラフ」（絵で触る）。クリックで「つまみ」（値の棒で触る）に切り替える");
+	toggle_hovered = ImGui::IsItemHovered();
+	if (toggle_hovered)
+		hint(knobs ? "いまは「つまみ」（値の棒で触る）。クリックで「グラフ」（絵で触る）に切り替える"
+		           : "いまは「グラフ」（絵で触る）。クリックで「つまみ」（値の棒で触る）に切り替える");
 	const ImU32 on = ImGui::GetColorU32(ImGuiCol_Text), off = ImGui::GetColorU32(ImGuiCol_TextDisabled);
 	float sx = p.x;
 	if (words) {
@@ -67,7 +70,7 @@ bool title_toggle(const char *title, const char *id, bool knobs)
 // 1 つの区画。見出しと、大きな絵か値の棒（右上の切り替えで選ぶ。index が負なら絵は無く棒だけ）
 template <typename Draw>
 void panel(const char *id, const char *title, float w, float h, int part, xg::model &m, bridge &br,
-           std::initializer_list<const char *> keys, int index, Draw draw)
+           std::initializer_list<const char *> keys, int index, Draw draw, bool keys_too = false)
 {
 	const float fs = ImGui::GetFontSize();
 	// 見出しを枠の上端に寄せる（上下の余白を詰める）
@@ -79,23 +82,49 @@ void panel(const char *id, const char *title, float w, float h, int part, xg::mo
 		return;
 	}
 	const bool knobs = index < 0 || shapes_knobs(index);
+	bool toggle_hovered = false;
 	ImGui::PushFont(nullptr, fs * 0.8f);      // 見出しは小さめに
 	if (index < 0)
 		ImGui::TextUnformatted(title);
-	else if (title_toggle(title, "##mode", knobs))
+	else if (title_toggle(title, "##mode", knobs, toggle_hovered))
 		set_shapes_knobs(index, !knobs);
 	ImGui::PopFont();
+	begin_values();                           // 絵の点の字（実際の時間など）を集める
 	if (!knobs) {
 		// 絵だけ。区画の残りを全部使う
 		const ImVec2 avail = ImGui::GetContentRegionAvail();
 		draw(part, m, br, avail.x, std::max(fs * 4.0f, avail.y));
-		ImGui::EndChild();
-		return;
+	} else {
+		ImGui::PushItemWidth(-fs * 6.0f);
+		for (const char *k : keys)
+			param_slider(k, part, m, br);
+		ImGui::PopItemWidth();
 	}
-	ImGui::PushItemWidth(-fs * 6.0f);
-	for (const char *k : keys)
-		param_slider(k, part, m, br);
-	ImGui::PopItemWidth();
+	const std::vector<std::string> values = end_values();
+	// 区画にカーソルが載ったら、下の帯に区画の名前と、中の項目の名前と値を 1 行ずつ。
+	// 絵に点の字があればそれ（実際の時間などつき）、無ければ（EQ・つまみ・ポルタメント）XG の値
+	if (!toggle_hovered && ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows | ImGuiHoveredFlags_AllowWhenBlockedByActiveItem)) {
+		// 2 行目に項目を 1 行で並べる
+		std::string text = std::string(title) + "\n";
+		const char *sep = "";
+		for (const std::string &v : values) {
+			text += sep + v;
+			sep = "    ";
+		}
+		// 点の字が無ければ項目を全部。keys_too なら、点の字に出ていない項目も後ろに
+		if (values.empty() || keys_too)
+			for (const char *k : keys) {
+				const char *label = P(k).label;
+				bool shown = false;
+				for (const std::string &v : values)
+					shown = shown || v.find(label) != std::string::npos;
+				if (!shown) {
+					text += sep + param_line(k, part, m);
+					sep = "    ";
+				}
+			}
+		hint("%s", text.c_str());
+	}
 	ImGui::EndChild();
 }
 
@@ -184,11 +213,18 @@ void part_shapes::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 	// 音色を選ぶ面は、左に分類・右に音色とバンク違いの 2 列（xgui::program_pane）
 	const float pane_w = std::min(fs * 15.6f, avail.x * 0.3f);     // 前の 6 割
 	// 下の説明の帯（4 行ぶん。入り切らなかった字の行と、説明の 3 行）を残す
-	const float bar_h = ImGui::GetTextLineHeightWithSpacing() * 4.0f + st.WindowPadding.y * 2.0f;
+	// 帯は小さめの字で 3 行（区画の名前と、中の項目を 1 行に並べたもの。折り返しても 3 行まで）
+	ImGui::PushFont(nullptr, fs * BAR_SCALE);
+	const float bar_h = ImGui::GetTextLineHeightWithSpacing() * 3.0f + st.WindowPadding.y * 2.0f;
+	ImGui::PopFont();
 	const float body_h = std::max(fs * 8.0f, avail.y - bar_h - st.ItemSpacing.y);
 
 	if (ImGui::BeginChild("voicepane", ImVec2(pane_w, body_h)))
+	{
+		ImGui::PushFont(nullptr, fs * 0.85f);   // 分類・音色・バンク違いの 3 つは小さめの字で
 		program_pane(part, m, &ram, br);
+		ImGui::PopFont();
+	}
 	ImGui::EndChild();
 	ImGui::SameLine();
 
@@ -196,7 +232,8 @@ void part_shapes::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 	const float top_y = ImGui::GetCursorScreenPos().y;
 	if (ImGui::BeginTabBar("right")) {
 		if (ImGui::BeginTabItem("形")) {
-			// 3 × 2。上に VIB・FILTER・EG、下にピッチ EG・EQ・ポルタメント（絵は無く棒だけ）
+			// 3 × 2。上に VIB・モジュレーション・FILTER（揺れの 2 つを隣に）、下に EG・ピッチ EG・EQ。
+			// ポルタメントは「すべて」のタブにある
 			const ImVec2 room = ImGui::GetContentRegionAvail();
 			const float room_h = body_h - (ImGui::GetCursorScreenPos().y - top_y);
 			const float w = (room.x - st.ItemSpacing.x * 2.0f) / 3.0f;
@@ -204,11 +241,15 @@ void part_shapes::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 			panel("vib", "ビブラート（VIB）", w, h, part, m, br, { "part.vib_rate", "part.vib_depth", "part.vib_delay" }, 0,
 			      [](int p, xg::model &mm, bridge &b, float pw, float ph) { overview::vib_cell(p, mm, b, pw, ph, false); });
 			ImGui::SameLine();
+			panel("mod", "モジュレーション（MW）", w, h, part, m, br,
+			      { "part.mw_lfo_pmod", "part.mw_pitch", "part.mw_filter", "part.mw_amp", "part.mw_lfo_fmod", "part.mw_lfo_amod" }, 5,
+			      [](int p, xg::model &mm, bridge &b, float pw, float ph) { overview::mod_cell(p, mm, b, pw, ph, false); }, true);
+			ImGui::SameLine();
 			panel("filter", "フィルタ（FILTER）", w, h, part, m, br, { "part.cutoff", "part.resonance", "part.hpf_cutoff" }, 1,
 			      [](int p, xg::model &mm, bridge &b, float pw, float ph) { overview::filter_cell(p, mm, b, pw, ph, false); });
-			ImGui::SameLine();
 			panel("eg", "音量の形（EG）", w, h, part, m, br, { "part.attack", "part.decay", "part.release" }, 2,
 			      [](int p, xg::model &mm, bridge &b, float pw, float ph) { overview::eg_cell(p, mm, b, pw, ph, false); });
+			ImGui::SameLine();
 			panel("peg", "音程の形（ピッチ EG）", w, h, part, m, br,
 			      { "part.peg_init_level", "part.peg_attack_time", "part.peg_rel_level", "part.peg_rel_time" }, 3,
 			      [](int p, xg::model &mm, bridge &b, float pw, float ph) { overview::peg_cell(p, mm, b, pw, ph, false); });
@@ -216,9 +257,6 @@ void part_shapes::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 			panel("eq", "パートの EQ", w, h, part, m, br,
 			      { "part.eq_bass_gain", "part.eq_bass_freq", "part.eq_treble_gain", "part.eq_treble_freq" }, 4,
 			      [](int p, xg::model &mm, bridge &b, float pw, float ph) { overview::eq_cell(p, mm, b, pw, ph, false); });
-			ImGui::SameLine();
-			panel("porta", "ポルタメント", w, h, part, m, br, { "part.porta_switch", "part.porta_time" }, -1,
-			      [](int, xg::model &, bridge &, float pw, float ph) { ImGui::Dummy(ImVec2(pw, ph)); });
 			ImGui::EndTabItem();
 		}
 		if (ImGui::BeginTabItem("すべて")) {
@@ -253,18 +291,20 @@ void part_shapes::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 
 	// ---- 説明の帯。カーソルを載せた絵・値・名前の説明（無ければ使い方のひとこと）
 	if (ImGui::BeginChild("hint", ImVec2(0, 0), ImGuiChildFlags_Borders)) {
-		// 絵に入り切らなかった点の字は、いつもここの頭に
-		const std::string &hv = hidden_values();
-		if (!hv.empty()) {
-			ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(255, 214, 120, 255));
-			ImGui::TextWrapped("%s", hv.c_str());
-			ImGui::PopStyleColor();
-		}
+		ImGui::PushFont(nullptr, fs * BAR_SCALE);
 		const std::string &t = hint_text();
-		if (t.empty())
-			ImGui::TextDisabled("絵の点や値、名前にカーソルを載せると、ここに説明が出る");
-		else
-			ImGui::TextWrapped("%s", t.c_str());
+		if (t.empty()) {
+			ImGui::TextDisabled("区画や値、名前にカーソルを載せると、ここに中身や説明が出る");
+		} else {
+			// 1 行目（区画や項目の名前）は色を変える
+			const size_t nl = t.find('\n');
+			ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(255, 214, 120, 255));
+			ImGui::TextUnformatted(t.c_str(), t.c_str() + (nl == std::string::npos ? t.size() : nl));
+			ImGui::PopStyleColor();
+			if (nl != std::string::npos)
+				ImGui::TextWrapped("%s", t.c_str() + nl + 1);
+		}
+		ImGui::PopFont();
 	}
 	ImGui::EndChild();
 	end_hint_bar();

@@ -82,24 +82,44 @@ const xg_snapshot *g_current_ram = nullptr;
 namespace {
 bool g_hint_bar = false;
 std::string g_hint;
-std::string g_hidden;
+std::vector<std::string> g_values;               // begin_values から集めている点の字
+bool g_collect = false;
 }
 
-void begin_hint_bar() { g_hint_bar = true; g_hint.clear(); g_hidden.clear(); }
+void begin_hint_bar() { g_hint_bar = true; g_hint.clear(); }
 void end_hint_bar() { g_hint_bar = false; }
 bool hint_bar() { return g_hint_bar; }
 const std::string &hint_text() { return g_hint; }
 
-void hidden_value(const char *text)
+void begin_values()
 {
-	if (!g_hint_bar)
-		return;
-	if (!g_hidden.empty())
-		g_hidden += "   ";
-	for (const char *c = text; *c; c++)
-		g_hidden += *c == '\n' ? ' ' : *c;       // 2 行の字も 1 行に
+	g_values.clear();
+	g_collect = true;
 }
-const std::string &hidden_values() { return g_hidden; }
+
+std::vector<std::string> end_values()
+{
+	g_collect = false;
+	return std::move(g_values);
+}
+
+void shape_value(const char *text)
+{
+	if (!g_collect)
+		return;
+	std::string line;
+	for (const char *c = text;; c++) {          // 2 行の字は 2 行に分ける
+		if (*c == '\n' || !*c) {
+			if (!line.empty())
+				g_values.push_back(line);
+			line.clear();
+			if (!*c)
+				break;
+		} else {
+			line += *c;
+		}
+	}
+}
 
 void hint(const char *fmt, ...)
 {
@@ -339,6 +359,26 @@ const xg::param &P(const char *key)
 	return *p;
 }
 
+std::string value_text(const char *key, int v)
+{
+	const xg::param &p = P(key);
+	if (std::strstr(key, "eq") && std::strstr(key, "freq"))
+		return eq::hz_text(v) + " Hz";
+	if (!std::strncmp(key, "master_eq.q", 11)) {
+		char buf[16];
+		std::snprintf(buf, sizeof(buf), "%.1f", v / 10.0);
+		return buf;
+	}
+	return xg::format(p, v);
+}
+
+std::string param_line(const char *key, int part, xg::model &m)
+{
+	const xg::param &p = P(key);
+	int v = 0;
+	return std::string(p.label) + " : " + (m.get(p, part, v) ? value_text(key, v) : std::string("--"));
+}
+
 bool param_slider(const char *key, int part, xg::model &m, bridge &br, const char *label)
 {
 	ImGui::PushID(key);
@@ -353,18 +393,7 @@ bool param_slider(const char *key, int part, xg::model &m, bridge &br, const cha
 		return false;
 	}
 	// 書式の % は SliderInt の書式として読まれないよう重ねる
-	const bool hz = std::strstr(key, "eq") && std::strstr(key, "freq");
-	const bool q = !std::strncmp(key, "master_eq.q", 11);
-	std::string shown;
-	if (hz) {
-		shown = eq::hz_text(v) + " Hz";
-	} else if (q) {
-		char buf[16];
-		std::snprintf(buf, sizeof(buf), "%.1f", v / 10.0);
-		shown = buf;
-	} else {
-		shown = xg::format(p, v);
-	}
+	const std::string shown = value_text(key, v);
 	std::string text;
 	for (char c : shown) {
 		if (c == '%')
@@ -1018,7 +1047,8 @@ const help_text HELP[] = {
 		"リリース（CC72）。鍵盤を離してから音が消えるまでの長さ",
 		"Release (CC72). How long the sound takes to fade after the key is released." } },
 	{ "part.vib_rate", { "ビブラートの速さ", "Vibrato speed." } },
-	{ "part.vib_depth", { "ビブラートの深さ", "Vibrato depth." } },
+	{ "part.vib_depth", { "ビブラートの深さ（音色自身の揺れを深くする）。モジュレーションホイールなどの揺れとは足し合わさず、深いほうが効く",
+	                      "Vibrato depth (the voice's own vibrato). It does not add to the vibrato from the mod wheel etc.; the deeper one wins." } },
 	{ "part.vib_delay", { "弾いてからビブラートが掛かり始めるまでの時間", "Time before the vibrato starts." } },
 	{ "part.note_shift", { "音程を半音単位でずらす（移調）", "Transposes the part in semitones." } },
 	{ "part.detune", { "音程をわずかにずらす（音の厚みを出すときなど）", "Fine pitch offset, e.g. to thicken the sound." } },
@@ -1129,7 +1159,8 @@ const char *source_help(const char *name)
 		{ "filter",   "でフィルタのカットオフを動かす量。＋なら上げるほど開き、−なら上げるほど閉じる",
 		              " moves the filter cutoff by this much. With + raising it opens the filter, with - it closes it." },
 		{ "amp",      "で音量を動かす量。＋なら上げるほど大きく、−なら上げるほど小さく", " changes the volume by this much. With + raising it gets louder, with - quieter." },
-		{ "lfo_pmod", "でビブラート（音程の揺れ）を深くする量", " adds this much vibrato (pitch wobble)." },
+		{ "lfo_pmod", "でビブラート（音程の揺れ）を深くする量。音色のビブラート（Vib Depth を含む）とは足し合わさず、深いほうが効く",
+		              " adds this much vibrato (pitch wobble). It does not add to the voice's own vibrato (including Vib Depth); the deeper one wins." },
 		{ "lfo_fmod", "でフィルタの揺れ（ワウ）を深くする量", " adds this much filter wobble." },
 		{ "lfo_amod", "でトレモロ（音量の揺れ）を深くする量", " adds this much tremolo (volume wobble)." },
 	};

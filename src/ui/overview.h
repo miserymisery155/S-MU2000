@@ -50,6 +50,8 @@ public:
 	static void eq_cell(int part, xg::model &m, bridge &br, float w, float h, bool compact);
 	// ビブラート: 揺れの波の山をつまんで速さと深さ、平らな所の終わりで掛かり始め
 	static void vib_cell(int part, xg::model &m, bridge &br, float w, float h, bool compact);
+	// モジュレーションのビブラート（ホイールの位置ごとの揺れの深さ。音色の窓）
+	static void mod_cell(int part, xg::model &m, bridge &br, float w, float h, bool compact);
 	// マスター EQ の 5 つの帯の特性。edit なら点をつまんで周波数とゲイン、ホイールで Q（マスターの窓）。
 	// edit でなければ描くだけ（一覧のマスターの行）
 	static void master_eq_plot(xg::model &m, bridge &br, float w, float h, bool edit);
@@ -123,9 +125,14 @@ private:
 	int    m_pc_note[17] = { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 };
 	int    m_pc_slot[17] = {};
 	int    m_pc_base = 60;                 // A の鍵（C3）
-	// モジュレーションホイールで送った値と時刻（RAM の写しが追いつくまではこちらを出す）
-	int    m_mod_sent = -1;
-	double m_mod_sent_at = -10.0;
+	// モジュレーションホイールで送った値と時刻（RAM の写しが追いつくまではこちらを出す）。
+	// 帯のホイールとモジュレーションの絵（mod_cell）の両方から回すので共有する
+	static inline int    m_mod_sent = -1;
+	static inline int    m_mod_sent_part = -1;
+	static inline double m_mod_sent_at = -10.0;
+	// そのパートのホイールの今の値（送ったばかりならその値）と、回して送る
+	static int  mod_now(int part, int ram_value);
+	static void mod_send(int part, int slot, int value, bridge &br);
 	xg::model *m_model = nullptr;     // 閉じたときに受信チャンネルを戻すため（draw で覚える）
 	bool   m_mute[XG_PARTS] = {}, m_solo[XG_PARTS] = {};
 	int    m_saved_rcv[XG_PARTS];     // ミュートで OFF にする前の受信チャンネル（-1 は消していない）

@@ -53,9 +53,11 @@ bool hint_bar();
 // 説明を出す。帯があれば帯へ、無ければ直前の部品のツールチップへ（printf の書式）
 void hint(const char *fmt, ...);
 const std::string &hint_text();
-// 絵の中に入り切らず出さなかった点の字。帯のある窓では帯に並べて出す
-void hidden_value(const char *text);
-const std::string &hidden_values();
+// 絵の点の字（実際の時間や音程）を集める。begin_values と end_values の間に描いた字を、
+// 出せなかった分も含めて 1 行ずつ返す（音色の窓が、区画にカーソルが載ったとき帯に並べる）
+void begin_values();
+std::vector<std::string> end_values();
+void shape_value(const char *text);
 
 // マウスで動かしている値の送信。押している間は 60 ms に 1 回、行き先ごとに最新の値だけ送り、
 // 離したらすぐ送る（毎コマ送ると直列が詰まって反応が遅れる）。窓の持ち主は毎コマ描いた後に drag_flush を呼ぶ
@@ -134,6 +136,9 @@ inline constexpr part_group PART_GROUPS[] = {
 // EQ の周波数は表の番号でなく Hz、マスター EQ の Q は 10 分の 1 で出す。戻り値は「値を変えたか」。
 // label を渡すとパラメータの名前の代わりにそれを出す（"##" で始めれば名前を出さない）
 bool param_slider(const char *key, int part, xg::model &m, bridge &br, const char *label = nullptr);
+// 値の棒と同じ書き方の値（EQ の周波数は Hz など）と、「名前 : 値」の 1 行
+std::string value_text(const char *key, int value);
+std::string param_line(const char *key, int part, xg::model &m);
 
 // ---- 一覧の表示の大きさ（文字の大きさの倍率、0.5〜1.5）。editor.ini に覚えておく
 float &overview_zoom();

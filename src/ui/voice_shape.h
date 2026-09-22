@@ -352,6 +352,55 @@ inline std::vector<vib_line> vib_lines(const u8 *rom, u32 rec, const u8 *part, f
 	return out;
 }
 
+// ---- モジュレーションのビブラート
+//
+// レジスタ 0x0a の下位（LFO の音程の深さ）→ 片側のセント。下位 7bit が深さ、bit7 で 8 倍
+// （swp30 の get_pitch: 状態 ±0x800 × 深さ を 12bit か 9bit 右へ。音程は 1 オクターブ 1024）
+inline float lfo_depth_cents(int low)
+{
+	const int d = low & 0x7f;
+	const double units = (low & 0x80) ? 2048.0 * d / 512.0 : 2048.0 * d / 4096.0;
+	return float(units * 1200.0 / 1024.0);
+}
+
+// ホイールの位置ごとの揺れの深さ。実機は 表[max(つまみの合計の頭打ち, 音色自身の目盛り)]
+// で、足さない（doc/native-engine.md の 6.215）。音色自身は Vib Depth と遅れてせり上がる
+// 分の行き着く先を含む。ホイール以外のつまみ（AT・AC など）は 0 と見る
+struct mod_line {
+	float own_cents = 0;                    // 音色自身の揺れ（Vib Depth 込み、行き着いた深さ）
+	std::array<float, 128> wheel{};         // ホイールのぶんだけの深さ（位置ごと）
+	std::array<float, 128> eff{};           // 実際に効く深さ（大きいほう）
+	bool active = true;
+};
+
+inline std::vector<mod_line> mod_lines(const u8 *rom, u32 rec, const u8 *part)
+{
+	namespace nv = xg::nv;
+	std::vector<mod_line> out;
+	if (!rom || !rec)
+		return out;
+	const int n = nv::element_count(rom, rec);
+	const int depth = part[0x20];                // MW LFO PM
+	for (int e = 0; e < n; e++) {
+		const u8 *el = nv::element(rom, rec, e);
+		mod_line line;
+		line.active = nv::element_active(el, NOTE, VEL);
+		const nv::slot_regs sr = nv::build_note(rom, el, NOTE, 0, nullptr, nv::defaults(), 0, VEL, part[0x1a], part[0x1b],
+		                                        part[0x15], part[0x16], -1, NOTE, false, part[0x62], part[0x63]);
+		int own = sr.v[0x0a] & 0xff;
+		if (nv::vib_ramps(el))                   // 遅れてせり上がる音色は、行き着く先
+			own = nv::vib_depth(nv::vib_ramp_reg(rom, nv::vib_ramp_target(el)) & 0x7f, part[0x16]);
+		line.own_cents = lfo_depth_cents(own);
+		for (int w = 0; w < 128; w++) {
+			const int wheel = nv::pmod_reg(rom, depth * w / 128);
+			line.wheel[size_t(w)] = lfo_depth_cents(wheel);
+			line.eff[size_t(w)] = lfo_depth_cents(own > wheel ? own : wheel);
+		}
+		out.push_back(std::move(line));
+	}
+	return out;
+}
+
 // ---- フィルタ
 //
 // 鍵を押したときのフィルタのレジスタ（0x00-0x04）を native の口と同じ式で組み、チップの
