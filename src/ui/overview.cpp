@@ -1542,15 +1542,23 @@ void overview::vib_cell(int part, xg::model &m, bridge &br, float w, float h, bo
 
 	// ---- 波（実際の揺れ）
 	voice_ctx v;
-	std::vector<shape::vib_line> ls;
+	std::vector<shape::vib_line> ls, own_ls;
 	if (known && voice_of(part, v)) {
 		v.blk[0x15] = u8(vals[0]); v.blk[0x16] = u8(vals[1]); v.blk[0x17] = u8(vals[2]);
 		ls = shape::vib_lines(v.rom, v.rec, v.blk, 1500.0f);
+		// 音色自身の揺れ（Depth を既定の 64 にしたもの）。背景に薄く出して、Depth で足した・引いたぶんを見せる
+		if (vals[1] != 64) {
+			u8 own_blk[XG_PART_COPY];
+			std::memcpy(own_blk, v.blk, sizeof(own_blk));
+			own_blk[0x16] = 64;
+			own_ls = shape::vib_lines(v.rom, v.rec, own_blk, 1500.0f);
+		}
 	}
 	if (!ls.empty()) {
 		const shape::vib_line &L = lead_line(ls);
+		const shape::vib_line *O = own_ls.empty() ? nullptr : &lead_line(own_ls);
 		// 縦の目盛り（片側）。最低 ±220 セント、深い音色はそれに合わせて広げる
-		const float span = std::max(220.0f, L.depth_cents * 1.15f);
+		const float span = std::max({ 220.0f, L.depth_cents * 1.15f, O ? O->depth_cents * 1.15f : 0.0f });
 		auto y_of = [&](float c) { return mid - half * c / span; };
 		dl->AddLine(ImVec2(x0, mid), ImVec2(x1, mid), col(ImGuiCol_TextDisabled, 0.35f));
 		for (float c : { 50.0f, 100.0f, 200.0f, 400.0f }) {
@@ -1567,6 +1575,15 @@ void overview::vib_cell(int part, xg::model &m, bridge &br, float w, float h, bo
 			const float xd = x0 + (x1 - x0) * std::min(1.0f, L.delay_ms / 1500.0f);
 			for (float y = top; y < bottom; y += fs * 0.5f)
 				dl->AddLine(ImVec2(xd, y), ImVec2(xd, std::min(bottom, y + fs * 0.25f)), col(ImGuiCol_TextDisabled, 0.5f));
+		}
+		// 音色自身の揺れ（Depth 64）を背景に薄く、その上に Depth 込みの実際の揺れ
+		if (O) {
+			std::vector<ImVec2> op;
+			op.reserve(O->pts.size());
+			for (const shape::pt &p : O->pts)
+				op.push_back(ImVec2(x0 + (x1 - x0) * p.ms / 1500.0f, y_of(p.cents)));
+			if (op.size() >= 2)
+				dl->AddPolyline(op.data(), int(op.size()), col(ImGuiCol_TextDisabled, 0.35f), 0, 1.0f);
 		}
 		std::vector<ImVec2> pts;
 		pts.reserve(L.pts.size());

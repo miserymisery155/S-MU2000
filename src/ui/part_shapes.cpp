@@ -6,6 +6,7 @@
 #include "fx_editor.h"
 #include "fx_help.h"
 #include "fx_icons.h"
+#include "eq_curve.h"
 
 #include "imgui.h"
 #include "xg/fx_params.h"
@@ -15,6 +16,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -334,6 +337,175 @@ int scope_fx_of(int slot)
 	return slot <= 4 ? mu2000::SCOPE_INS1 + (slot - 1) : slot == 5 ? mu2000::SCOPE_REV : slot == 6 ? mu2000::SCOPE_CHO : mu2000::SCOPE_VAR;
 }
 
+// ---- エフェクトの EQ・フィルタの特性（目安）を、スペクトラムと同じ周波数の目盛りで重ねる
+//
+// パラメータは LCD の名前で見分ける（設定の窓の EQ の絵 fx_editor::eq_graph と同じ読み方）:
+//   低域の棚   EQ LowFreq / Low Freq と EQ LowGain / Low Gain
+//   中域の山   EQ MidFreq / Mid Freq / EQ Freq と EQ MidGain / Mid Gain / EQ Gain、幅 EQ MidWidt / Mid Width / EQ Width
+//   高域の棚   EQHighFreq / High Freq と EQHighGain / High Gain
+//   LPF・HPF   LPF Cutoff・DryLPFFreq・HPF Cutoff（Thru は掛けない）。LPF Reso があれば共振の山つきの 2 次
+//   クロスオーバー CrsoverFrq（縦の点線と周波数だけ）
+// 周波数は表の字（"5.6k" など）から読む。形は eq_curve.h と同じく見た目の目安で、MEG の実際の式ではない
+// （LPF・HPF は 6 dB/oct とみる）。ワウの CutoffFreq（0-127 と Hz の対応が分からない）、DYNA FLT
+// （切る周波数が音で動く）、LO-FI の FltrType（音色の型）は描かない。focus は下の段でカーソルが
+// 載っている・つまんでいるパラメータ（その印を大きく）
+void fx_response_overlay(int slot, const xg::fx_def &def, xg::model &m, ImVec2 a, ImVec2 b, const xg::fx_param *focus)
+{
+	auto find = [&](std::initializer_list<const char *> names) {
+		for (int i = 0; i < def.count; i++)
+			for (const char *nm : names)
+				if (!std::strcmp(def.params[i].label, nm))
+					return i;
+		return -1;
+	};
+	auto value = [&](int i, int &v) {
+		if (i < 0)
+			return false;
+		u32 addr = 0;
+		int size = 0;
+		if (!fx_where(slot, def.params[i], addr, size) || !m.get_raw(addr, size, v))
+			return false;
+		v = std::clamp(v, int(def.params[i].lo), int(def.params[i].hi));
+		return true;
+	};
+	// 表の字から Hz（Thru・読めない字は false）
+	auto hz_of = [&](int i, float &hz) {
+		int v = 0;
+		if (!value(i, v))
+			return false;
+		const std::string t = fx_value_text(def.params[i], v);
+		char *end = nullptr;
+		const double x = std::strtod(t.c_str(), &end);
+		if (end == t.c_str() || x <= 0.0)
+			return false;
+		hz = float(x * (end && *end == 'k' ? 1000.0 : 1.0));
+		return true;
+	};
+	auto number_of = [&](int i, float &x) {
+		int v = 0;
+		if (!value(i, v))
+			return false;
+		x = float(std::atof(fx_value_text(def.params[i], v).c_str()));
+		return x > 0.0f;
+	};
+
+	struct band { eq::shape shape; float hz = 0, db = 0, q = 0.7f; int fi = -1, gi = -1, wi = -1; const char *name; };
+	std::vector<band> bands;
+	auto add_band = [&](eq::shape sh, std::initializer_list<const char *> fn, std::initializer_list<const char *> gn,
+	                    std::initializer_list<const char *> wn, const char *name) {
+		band bd;
+		bd.shape = sh;
+		bd.name = name;
+		bd.fi = find(fn);
+		bd.gi = find(gn);
+		bd.wi = wn.size() ? find(wn) : -1;
+		int g = 64;
+		if (bd.fi < 0 || bd.gi < 0 || !hz_of(bd.fi, bd.hz) || !value(bd.gi, g))
+			return;
+		bd.db = float(g - 64);
+		float q = 0;
+		if (bd.wi >= 0 && number_of(bd.wi, q))
+			bd.q = q;
+		bands.push_back(bd);
+	};
+	add_band(eq::shape::low_shelf, { "EQ LowFreq", "Low Freq" }, { "EQ LowGain", "Low Gain" }, {}, "Lo");
+	add_band(eq::shape::peak, { "EQ MidFreq", "Mid Freq", "EQ Freq" }, { "EQ MidGain", "Mid Gain", "EQ Gain" },
+	         { "EQ MidWidt", "Mid Width", "EQ Width" }, "Mid");
+	add_band(eq::shape::high_shelf, { "EQHighFreq", "High Freq" }, { "EQHighGain", "High Gain" }, {}, "Hi");
+	const int lpf_i = find({ "LPF Cutoff", "DryLPFFreq" }), hpf_i = find({ "HPF Cutoff" });
+	const int reso_i = find({ "LPF Reso" }), xo_i = find({ "CrsoverFrq" });
+	float lpf = 0, hpf = 0, xo = 0, reso = 0;
+	const bool has_lpf = lpf_i >= 0 && hz_of(lpf_i, lpf);
+	const bool has_hpf = hpf_i >= 0 && hz_of(hpf_i, hpf);
+	const bool has_xo = xo_i >= 0 && hz_of(xo_i, xo);
+	const bool has_reso = reso_i >= 0 && number_of(reso_i, reso);
+	if (bands.empty() && !has_lpf && !has_hpf && !has_xo)
+		return;
+
+	const float fs = ImGui::GetFontSize();
+	ImDrawList *dl = ImGui::GetWindowDrawList();
+	const float x0 = a.x, x1 = b.x, top = a.y + fs * 0.9f, bottom = b.y - fs * 0.7f;
+	const float mid = (top + bottom) * 0.5f, half = (bottom - top) * 0.5f;
+	const float DB = 18.0f;
+	auto x_hz = [&](float f) { return x0 + (x1 - x0) * eq::t_of_hz(std::clamp(f, 20.0f, 20000.0f)); };
+	auto y_db = [&](float db) { return mid - half * std::clamp(db, -DB, DB) / DB; };
+	auto total_db = [&](float f) {
+		float db = 0;
+		for (const band &bd : bands)
+			db += eq::band_db(bd.shape, bd.db, bd.hz, bd.q, f);
+		if (has_lpf) {
+			const float r = f / lpf;
+			const float m2 = has_reso ? 1.0f / ((1.0f - r * r) * (1.0f - r * r) + (r / reso) * (r / reso))
+			                          : 1.0f / (1.0f + r * r);
+			db += 10.0f * std::log10(std::max(m2, 1e-9f));
+		}
+		if (has_hpf) {
+			const float r = hpf / f;
+			db += 10.0f * std::log10(1.0f / (1.0f + r * r));
+		}
+		return db;
+	};
+	const ImU32 lc = IM_COL32(255, 200, 90, 230), fillc = IM_COL32(255, 200, 90, 40);
+	// 0 dB の点線
+	for (float x = x0; x < x1; x += fs * 0.6f)
+		dl->AddLine(ImVec2(x, mid), ImVec2(std::min(x1, x + fs * 0.3f), mid), IM_COL32(255, 200, 90, 70), 1.0f);
+	// 特性（0 dB との間を薄く塗る）
+	const int np = std::max(24, int((x1 - x0) / 2.0f));
+	std::vector<ImVec2> pts;
+	pts.reserve(size_t(np) + 1);
+	for (int i = 0; i <= np; i++) {
+		const float t = float(i) / float(np);
+		pts.push_back(ImVec2(x0 + (x1 - x0) * t, y_db(total_db(eq::hz_of_t(t)))));
+	}
+	for (size_t i = 1; i < pts.size(); i++)
+		dl->AddQuadFilled(ImVec2(pts[i - 1].x, mid), pts[i - 1], pts[i], ImVec2(pts[i].x, mid), fillc);
+	dl->AddPolyline(pts.data(), int(pts.size()), lc, 0, std::max(1.5f, fs * 0.1f));
+	// 印と字
+	const float tfs = fs * 0.6f;
+	auto tag = [&](ImVec2 c, const std::string &t, ImU32 col, bool lit) {
+		const ImVec2 ts = ImGui::GetFont()->CalcTextSizeA(tfs, FLT_MAX, 0.0f, t.c_str());
+		const float tx = std::clamp(c.x - ts.x * 0.5f, x0 + 1.0f, x1 - ts.x - 1.0f);
+		const float ty = c.y + fs * 0.35f + ts.y < bottom ? c.y + fs * 0.35f : c.y - fs * 0.35f - ts.y;
+		dl->AddRectFilled(ImVec2(tx - 2, ty - 1), ImVec2(tx + ts.x + 2, ty + ts.y + 1), IM_COL32(0, 0, 0, 150), 3.0f);
+		dl->AddText(ImGui::GetFont(), tfs, ImVec2(tx, ty), lit ? IM_COL32(255, 255, 255, 255) : col, t.c_str());
+	};
+	auto khz = [](float f) {
+		char t[16];
+		if (f >= 1000.0f) std::snprintf(t, sizeof(t), f >= 10000.0f ? "%.0fk" : "%.1fk", f / 1000.0f);
+		else              std::snprintf(t, sizeof(t), "%.0f", f);
+		return std::string(t);
+	};
+	auto is_focus = [&](int i) { return i >= 0 && focus == &def.params[i]; };
+	for (const band &bd : bands) {
+		const bool lit = is_focus(bd.fi) || is_focus(bd.gi) || is_focus(bd.wi);
+		const ImVec2 c(x_hz(bd.hz), y_db(total_db(bd.hz)));
+		const float r = std::max(3.0f, fs * 0.24f) * (lit ? 1.5f : 1.0f);
+		dl->AddCircleFilled(c, r, lc);
+		dl->AddCircle(c, r, IM_COL32(40, 30, 10, 255), 0, 1.5f);
+		tag(c, std::string(bd.name) + " " + khz(bd.hz), lc, lit);
+	}
+	auto vline = [&](float f, const char *name, int idx) {
+		const bool lit = is_focus(idx);
+		const float x = x_hz(f);
+		const ImU32 c = lit ? IM_COL32(255, 255, 255, 230) : IM_COL32(255, 170, 60, 200);
+		for (float y = top; y < bottom; y += fs * 0.4f)
+			dl->AddLine(ImVec2(x, y), ImVec2(x, std::min(bottom, y + fs * 0.2f)), c, lit ? 2.0f : 1.2f);
+		tag(ImVec2(x, top + fs * 0.1f), std::string(name) + " " + khz(f), c, lit);
+	};
+	if (has_lpf)
+		vline(lpf, "LPF", lpf_i);
+	if (has_hpf)
+		vline(hpf, "HPF", hpf_i);
+	if (has_xo)
+		vline(xo, "X-over", xo_i);
+	// 目盛りと断り（右上）
+	{
+		const char *t = "EQ・フィルタ（目安）  ±18 dB";
+		const ImVec2 ts = ImGui::GetFont()->CalcTextSizeA(tfs, FLT_MAX, 0.0f, t);
+		dl->AddText(ImGui::GetFont(), tfs, ImVec2(x0 + 2.0f, b.y - ts.y * 2.3f), IM_COL32(255, 200, 90, 200), t);
+	}
+}
+
 // エフェクト 1 つ（メゾネット）。上の段に種類の名前と、通したあと（緑）・通す前（灰）のスペクトラム。
 // 下の段に種類の選択、設定の窓を開くボタン、つまみ（システムエフェクトは戻りとパンを先に）。
 // part_only は、このパートだけの音か（インサーション・インサーション接続のバリエーション）、
@@ -426,8 +598,9 @@ void fx_cell(int slot, bool part_only, int part, xg::model &m, bridge &br, float
 	if (is_var && !var_sys && !var_mine)
 		label = var_part < XG_PARTS + 2 ? "ほかのパート（" + part_name(var_part) + "）のインサーション。このパートの Var Send は効かない"
 		                                : std::string("インサーション接続で、どのパートにも掛かっていない。このパートの Var Send は効かない");
+	const ImVec2 spec_a(pos.x + pad, y), spec_b(pos.x + w - pad, split - pad);
 	overview::spectrum_view(br, part, bridge::scope_src(fx, true), bridge::scope_src(fx, false), 10 + slot,
-	                        ImVec2(pos.x + pad, y), ImVec2(pos.x + w - pad, split - pad), label.c_str());
+	                        spec_a, spec_b, label.c_str());
 	dl->AddLine(ImVec2(pos.x, split), ImVec2(pos.x + w, split), ImGui::GetColorU32(ImGuiCol_Border), 1.0f);
 
 	// ---- 下の段: 種類と、設定の窓
@@ -523,6 +696,7 @@ void fx_cell(int slot, bool part_only, int part, xg::model &m, bridge &br, float
 			break;
 	}
 	ImGui::PushFont(nullptr, fs * kscale);
+	const xg::fx_param *focus_fp = nullptr;     // カーソルが載っている・つまんでいるパラメータ（上の段の印を大きく）
 	for (int k = 0; k < n; k++) {
 		const knob_item &it = items[size_t(k)];
 		ImGui::SetCursorScreenPos(ImVec2(kx0 + float(k % per_row) * cw, ky0 + float(k / per_row) * ch));
@@ -554,6 +728,8 @@ void fx_cell(int slot, bool part_only, int part, xg::model &m, bridge &br, float
 			const std::string text = known ? fx_value_text(*it.fp, v) : std::string("--");
 			if (fx_editor::knob(id, v, it.fp->lo, it.fp->hi, ksize, it.fp->label, text.c_str(), false, it.lock) && known)
 				drag_send(br, m.set_raw(addr, size, v));
+			if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled) || ImGui::IsItemActive())
+				focus_fp = it.fp;
 			if (it.lock && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
 				hint("%s  %s\nこのパートのインサーションにしていないので、ここでは見るだけ（上の INS と PART を両方入れると触れる）",
 				     it.fp->label, text.c_str());
@@ -571,6 +747,9 @@ void fx_cell(int slot, bool part_only, int part, xg::model &m, bridge &br, float
 		                          : msb == 0x40 ? "THRU（パラメータは無い）" : "この種類のパラメータの表はまだ無い");
 	}
 	ImGui::PopFont();
+	// 上の段のスペクトラムに、EQ・フィルタの特性（目安）を重ねる
+	if (def)
+		fx_response_overlay(slot, *def, m, spec_a, spec_b, focus_fp);
 	ImGui::SetCursorScreenPos(pos);
 	ImGui::Dummy(ImVec2(w, h));
 }
@@ -1070,8 +1249,8 @@ void part_shapes::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 			ImGui::BeginGroup();
 			panel("vib", "ビブラート（VIB）", w, h, part, m, br, { "part.vib_rate", "part.vib_depth", "part.vib_delay" }, 0,
 			      [](int p, xg::model &mm, bridge &b, float pw, float ph) { overview::vib_cell(p, mm, b, pw, ph, false); },
-			      "音色の揺れ（ビブラート）。絵は実際の揺れで、右のフェーダーで速さ（Rate）・深さ（Depth）・"
-			      "掛かり始めるまでの時間（Delay）を変える");
+			      "音色の揺れ（ビブラート）。絵は Depth 込みの実際の揺れ（薄い灰色の線は Depth を既定の 64 にしたときの"
+			      "音色自身の揺れ）。右のフェーダーで速さ（Rate）・深さ（Depth）・掛かり始めるまでの時間（Delay）を変える");
 			panel("mod", "モジュレーション（MW）", w, h, part, m, br,
 			      { "part.mw_lfo_pmod", "part.mw_pitch", "part.mw_filter", "part.mw_amp", "part.mw_lfo_fmod", "part.mw_lfo_amod" }, 5,
 			      [](int p, xg::model &mm, bridge &b, float pw, float ph) { overview::mod_cell(p, mm, b, pw, ph, false); },
