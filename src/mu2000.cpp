@@ -35,8 +35,11 @@ const char *getenv_or2(const char *name, const char *def)
 // MIDI は 31250bps。28MHz の CPU から見て 1 ビット = 896 サイクル
 constexpr u64 MIDI_BIT_CYCLES = 28000000 / 31250;
 
-// USB は実機で 19,500 byte/s 出た（doc/dump/usb.md）。1 バイトぶんのサイクル数
-constexpr u64 USB_BYTE_CYCLES = 28000000 / 19500;
+// **USB で受ける速さは実機で 10,000 byte/s**（2026-09-23 に実機を録って測った。
+// doc/native-engine.md の 6.218）。`doc/dump/usb.md` の 19,500 byte/s は
+// **実機 → PC の向き**（334 バイトの SysEx を吸ったとき）の値で、こちらとは別の道。
+// 1 バイトぶんのサイクル数
+constexpr u64 USB_BYTE_CYCLES = 28000000 / 10000;
 
 bool read_file(const std::string &path, std::vector<u8> &out, size_t expect)
 {
@@ -1179,9 +1182,9 @@ void mu2000::usb_step(u64 now)
 		return;
 
 	// 受信。1 バイト渡すごとに IRQ3（ベクタ 67）を上げる。
-	// 間隔は実機で測った USB の実効帯域 19,500 byte/s に合わせる
-	// （doc/dump/usb.md の実測）。DIN の 3,125 byte/s より 6 倍速いが、
-	// 発音の間隔は firmware 側が頭打ちなので実測とは食い違わない。
+	// 間隔は実機で測った USB の受けの速さ 10,000 byte/s に合わせる
+	// （2026-09-23・doc/native-engine.md の 6.218）。DIN の 3,125 byte/s より
+	// 3 倍速い。荷物の大きさを振って実機と並べると、ずれは平均 3ms に収まる。
 	// 4 つの口が 1 本の流れを分け合うので、遅くすると互いに待たせてしまう
 	if (!u.have && now >= u.next && (!u.cmd.empty() || !u.rx.empty())) {
 		// コマンドを先に渡す
