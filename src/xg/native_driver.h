@@ -305,6 +305,39 @@ public:
 				m_fw_touch[i] = m_clock + 1;   // 0 は「触っていない」
 	}
 
+	// **firmware が声のレジスタに書いたスロットも、その firmware のものとみなす**
+	//（6.220）。鍵を押した瞬間の印だけだと、firmware の音が 2 秒より長く伸びる
+	// ときに印が切れ、こちらがそのスロットを取ってしまう。すると firmware は
+	// 自分の音の続き（フィルタの包絡線 0x00・0x01・0x04 など）を書き続けるので、
+	// こちらの音が途中で化ける。書いている間は避け続ければ、それが起きない。
+	// **毎サンプル書き替わる MEG の戻り（0x0e・0x0f・0x38-0x3f）は除く**こと。
+	// それを含めると全スロットが firmware のものになってしまう（呼ぶ側で除く）
+	void mark_fw_slot(u32 slot)
+	{
+		if (slot < SLOTS)
+			m_fw_touch[slot] = m_clock + 1;
+	}
+
+	// **踏まれたスロットは諦める**（6.220）。firmware が、こちらが鳴らしている
+	// スロットに自分の音を置いてしまったときに呼ばれる。そこはもう firmware の
+	// 包絡線が走っているので、こちらが書き続けても**二重に書いた音**にしかならない。
+	// こちらの音は手放して（キーオフは送らない。送ると firmware の音が切れる）、
+	// 以後そのスロットは firmware のものとして避ける。
+	// `SMU2000_NO_YIELD=1` で、この譲りを止めて前のままにできる
+	void yield_slot(u32 slot)
+	{
+		static const bool off = std::getenv("SMU2000_NO_YIELD") != nullptr;
+		if (off || slot >= SLOTS)
+			return;
+		slot_use &u = m_slot[slot];
+		if (!u.on && !u.rel)
+			return;
+		u.on = u.held = u.sost = u.rel = false;
+		u.cal = nullptr;
+		u.elem = nullptr;
+		m_fw_touch[slot] = m_clock + 1;
+	}
+
 	// **包絡線の格子の位相**。実機の包絡線は 441 サンプルの全体共通の格子で
 	// 進む（doc/native-engine.md の 6.60）。その位相は起動から決まっているので、
 	// native の口が始まる前に firmware が書いた 0x00 の時刻から拾っておく。
@@ -2691,6 +2724,10 @@ public:
 		const u32 rec = record_of(part);
 		if (!rec)
 			return false;
+		// **写し取りが要素の数だけ揃っていなくても native で鳴らす**（6.219）。
+		// 足りないぶんは「合成の写し」で組む（note_on）。firmware に戻す道も
+		// 試したが、鳴る時刻がずれてスロットの取り合いも変わるので、
+		// 実機との差はかえって開いた（パンのずれ 0.41dB 対 0.65dB）
 		return nocal_mode() || m_cal.find(cal_key(rec, part)) != m_cal.end();
 	}
 
@@ -2754,6 +2791,23 @@ public:
 			if (!c && size_t(used) < cals.size()) {
 				c = &cals[used];
 				taken |= u32(1) << used;
+			}
+			// **写し取りが足りないときは「合成の写し」に落とす**（6.219）。
+			// 要素の数より写し取った数が少ないことがある（写し取りの音の最中に
+			// firmware がこちらのスロットを取り返すと、その要素は記録が残らない）。
+			// ここを null のままにしていたので、**パン・送り・フィルタ・共振を
+			// 丸ごと書かずに鳴らしていた**（音が大きく外れる）。nocal の道と同じ
+			// 合成の写しを渡せば、式の道としてひと通り組まれる。
+			// **使い回しの器**を指すこと（スロットが指したまま残るので、
+			// 一時物を指すと宙に浮く）
+			if (!c) {
+				const std::vector<nv::voice_cal> &sc = synth_cals();
+				c = &sc[size_t(used) % sc.size()];
+				m_cal_missing++;
+				if (debug_on())
+					std::fprintf(stderr, "cal 足りない part=%d note=%d vel=%d 要素 %d 個目/%d"
+					                     " 写し取り %d 個 → 合成の写しで組む\n",
+					             part + 1, note, vel, k + 1, nelem, int(cals.size()));
 			}
 			used++;
 			const int slot = take_slot(part, note);
@@ -2836,18 +2890,7 @@ public:
 			                                  pvel, pc.atk, pc.dec,
 			                                  pc.vrate, pc.vdep, wnote, note,
 			                                  pc.soft, part_ram(part, 0x62), part_ram(part, 0x63));
-			// **写し取りが無いとき（`c` が null）も式の道**。`build_note` は
-			// `cal && cal->have` で見ているので、null は「写し取っていない」と同じ。
-			// ここだけ `c` を確かめずに見ていたので、要素の数より写し取った数が
-			// 少ない音色で**落ちていた**（実機の曲で踏む。doc/native-engine.md の 6.219）
-			if (!c) {
-				m_cal_missing++;
-				if (debug_on())
-					std::fprintf(stderr, "cal 足りない part=%d note=%d vel=%d 要素 %d 個目/%d"
-					                     " 写し取り %d 個\n",
-					             part + 1, note, vel, k + 1, nelem, int(cals.size()));
-			}
-			if (!c || c->synth)
+			if (c->synth)
 				apply_part_eq(sr, part);
 			// 音程の包絡線の行き先（byte31）。初めの高さと同じなら書かない
 			{
