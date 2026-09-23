@@ -291,6 +291,8 @@ public:
 	const std::unordered_map<u64, std::vector<nv::voice_cal>> &drum_map() const { return m_drum; }
 	size_t cal_count() const { return m_cal.size() + m_drum.size(); }
 	int peak_slots() const { return m_peak; }
+	// 写し取りの記録が足りないまま組んだ音の数（6.219）
+	u32 cal_missing() const { return m_cal_missing; }
 
 	// **firmware が最近触ったスロット**を覚える。firmware はこちらの使用中を
 	// 知らないので、避けないと「firmware が自分の音の続きを書く」ときに
@@ -2834,7 +2836,18 @@ public:
 			                                  pvel, pc.atk, pc.dec,
 			                                  pc.vrate, pc.vdep, wnote, note,
 			                                  pc.soft, part_ram(part, 0x62), part_ram(part, 0x63));
-			if (c->synth)
+			// **写し取りが無いとき（`c` が null）も式の道**。`build_note` は
+			// `cal && cal->have` で見ているので、null は「写し取っていない」と同じ。
+			// ここだけ `c` を確かめずに見ていたので、要素の数より写し取った数が
+			// 少ない音色で**落ちていた**（実機の曲で踏む。doc/native-engine.md の 6.219）
+			if (!c) {
+				m_cal_missing++;
+				if (debug_on())
+					std::fprintf(stderr, "cal 足りない part=%d note=%d vel=%d 要素 %d 個目/%d"
+					                     " 写し取り %d 個\n",
+					             part + 1, note, vel, k + 1, nelem, int(cals.size()));
+			}
+			if (!c || c->synth)
 				apply_part_eq(sr, part);
 			// 音程の包絡線の行き先（byte31）。初めの高さと同じなら書かない
 			{
@@ -3616,6 +3629,7 @@ private:
 	u64 m_clock = 0;
 	u64 m_alt_kill_next = ~u64(0);  // つぎに止めを刺す時刻（6.151）
 	int m_peak = 0;
+	u32 m_cal_missing = 0;
 	bool m_traj = false;
 	bool m_rec = false;            // 写し取りの最中（段が後から増える）
 	u64 m_traj_next = 0;           // つぎに段を書く時刻
