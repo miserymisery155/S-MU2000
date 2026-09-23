@@ -182,7 +182,8 @@ public:
 
 	// ---- パートの音（音色の窓のスペクトラム）。画面が見たいパートを置き（-1 で止める）、
 	// 音声の糸が 25ms ごとに直近の SCOPE_N サンプルを置く（mu2000::scope_read）。読み手は待たない
-	static constexpr size_t SCOPE_N = 2048;
+	// 4096 サンプル（93ms）。2048 だと刻みが 21.5Hz で、低いほうが 1 本ずつ飛んで絵が荒れた
+	static constexpr size_t SCOPE_N = 4096;
 	void want_scope(int part) { m_scope_want.store(part, std::memory_order_relaxed); }
 	int scope_wanted() const { return m_scope_want.load(std::memory_order_relaxed); }
 	// 置くもの: 0 が声の和（mu2000::scope_read）、1 + fx × 2 + out がエフェクト fx（mu2000::scope_fx）の

@@ -1769,6 +1769,7 @@ void time_grid(ImDrawList *dl, float t_end, float t_off, float x0, float x1, flo
 struct spec_curve {
 	int part = -1;
 	std::vector<float> sm;
+	std::vector<float> pw;        // 力（線形）の移動平均。コマごとの雑音の揺れをならす
 	float peak = -200.0f;
 	bool ok = false;
 };
@@ -1779,6 +1780,8 @@ struct spec_curve {
 // 直流は引き、振幅 16 ほどより小さいものは鳴っていないことにし、目盛りの上端は振幅 400 ほどより下げない
 // （小さな残りかすを「いちばん大きい所から 60 dB」で画面いっぱいに引き伸ばさない）
 constexpr float SPEC_SILENT_DB = 78.0f;
+// 20Hz より下の bin は見ない（音ではなく、窓の中での音量の変わりぶん＝包絡線がここに出る）
+constexpr size_t SPEC_BIN0 = size_t(20.0 * double(bridge::SCOPE_N) / 44100.0) + 1;
 constexpr float SPEC_REF_MIN_DB = 106.0f;
 
 void spec_update(bridge &br, int part, int src, spec_curve &c)
@@ -1798,33 +1801,49 @@ void spec_update(bridge &br, int part, int src, spec_curve &c)
 	if (c.part != part || c.sm.size() != db.size()) {
 		c.part = part;
 		c.sm.assign(db.size(), -200.0f);
+		c.pw.assign(db.size(), 0.0f);
 		c.peak = -200.0f;
 	}
+	// **力でならす**（雑音のコマごとの揺れを落とす。山はほとんど動かない）。
+	// 前は「下がるときは 1 コマ 1.5dB まで」と持ちこたえさせていたが、押した瞬間の立ち上がりには
+	// 低いほうまで音が入っているので、その持ちこたえが 0.8 秒ほど平たい山として居座っていた（2026-09-23）。
+	// 持ちこたえはやめて、ならしだけにする（1 コマで 5dB ほど下がる）
 	float frame_peak = -200.0f;
-	for (size_t k = 1; k < db.size(); k++) {
-		c.sm[k] = std::max(db[k], c.sm[k] - 1.5f);
-		frame_peak = std::max(frame_peak, db[k]);
+	for (size_t k = SPEC_BIN0; k < db.size(); k++) {
+		const float p = float(std::pow(10.0, double(db[k]) / 10.0));
+		c.pw[k] = c.pw[k] > 0.0f ? c.pw[k] * 0.3f + p * 0.7f : p;
+		c.sm[k] = float(10.0 * std::log10(std::max(double(c.pw[k]), 1e-20)));
+		frame_peak = std::max(frame_peak, c.sm[k]);
 	}
 	c.peak = std::max(frame_peak, c.peak - 0.5f);
 	c.ok = c.peak > SPEC_SILENT_DB;
 }
 
-// 横の位置ごとに、その幅に入る bin のいちばん大きい値を拾って折れ線に
+// 横の位置ごとに、その幅（最低でも 3 本ぶん）に入る bin を**力で平均**して折れ線に。
+// いちばん大きい値を拾うと、低いほうは 1 本の bin が画面の広い範囲に引き伸ばされて、
+// 窓のにじみや雑音（山より 40-60 dB 下）がそのまま棒になって激しく揺れた（2026-09-23）
 std::vector<ImVec2> spec_points(const spec_curve &c, float floor_db, float x0, float x1, float top, float bottom)
 {
 	const float F_LO = 20.0f, F_HI = 20000.0f;
 	const float span = x1 - x0;
 	std::vector<ImVec2> sp;
 	const float step = std::max(1.5f, ImGui::GetFontSize() * 0.12f);
+	const long last = long(c.sm.size()) - 1;
 	for (float x = x0; x <= x1; x += step) {
 		const float f0 = F_LO * std::pow(F_HI / F_LO, (x - x0) / span);
 		const float f1 = F_LO * std::pow(F_HI / F_LO, (x + step - x0) / span);
-		size_t k0 = size_t(f0 * float(bridge::SCOPE_N) / 44100.0f), k1 = size_t(f1 * float(bridge::SCOPE_N) / 44100.0f);
-		k0 = std::clamp<size_t>(k0, 1, c.sm.size() - 1);
-		k1 = std::clamp<size_t>(std::max(k1, k0), 1, c.sm.size() - 1);
-		float v = -200.0f;
-		for (size_t k = k0; k <= k1; k++)
-			v = std::max(v, c.sm[k]);
+		long k0 = long(f0 * float(bridge::SCOPE_N) / 44100.0f), k1 = long(f1 * float(bridge::SCOPE_N) / 44100.0f);
+		if (k1 - k0 < 2) {                       // 最低 3 本ぶん（低いほうの 1 本飛びをならす）
+			const long mid = (k0 + k1) / 2;
+			k0 = mid - 1;
+			k1 = mid + 1;
+		}
+		k0 = std::clamp<long>(k0, long(SPEC_BIN0), last);
+		k1 = std::clamp<long>(std::max(k1, k0), 1, last);
+		double pw = 0;
+		for (long k = k0; k <= k1; k++)
+			pw += std::pow(10.0, double(c.sm[size_t(k)]) / 10.0);
+		const float v = float(10.0 * std::log10(std::max(pw / double(k1 - k0 + 1), 1e-20)));
 		const float t = std::clamp((v - floor_db) / 60.0f, 0.0f, 1.0f);
 		sp.push_back(ImVec2(x, bottom - (bottom - top) * t));
 	}
@@ -1965,46 +1984,17 @@ void overview::filter_cell(int part, xg::model &m, bridge &br, float w, float h,
 	}
 	dl->AddLine(ImVec2(x0, y_db(0.0f)), ImVec2(x1, y_db(0.0f)), col(ImGuiCol_TextDisabled, 0.35f));
 
-	// ---- このパートの音のスペクトラム（緑）。縦はいちばん大きい所から 60 dB 下まで。下がるときはゆっくり
+	// ---- このパートの音のスペクトラム（緑）。spectrum_view と同じ作り（直流を引き、幅ごとに力で平均、
+	// 縦はいちばん大きい所から 60 dB 下まで、下がるときはゆっくり）
 	{
-		struct scope_state { int part = -1; std::vector<float> sm; float peak = -200.0f; };
-		static scope_state ss;
-		static float wave[bridge::SCOPE_N];
-		if (br.read_scope(wave) == part) {
-			std::vector<float> db;
-			spectrum::magnitude_db(wave, bridge::SCOPE_N, db);
-			if (ss.part != part || ss.sm.size() != db.size()) {
-				ss.part = part;
-				ss.sm.assign(db.size(), -200.0f);
-				ss.peak = -200.0f;
-			}
-			float frame_peak = -200.0f;
-			for (size_t k = 1; k < db.size(); k++) {
-				ss.sm[k] = std::max(db[k], ss.sm[k] - 1.5f);
-				frame_peak = std::max(frame_peak, db[k]);
-			}
-			ss.peak = std::max(frame_peak, ss.peak - 0.5f);
-			if (ss.peak > -150.0f) {
-				const float floor_db = ss.peak - 60.0f;
-				std::vector<ImVec2> sp;
-				const float step = std::max(1.5f, fs * 0.12f);
-				for (float x = x0; x <= x1; x += step) {
-					const float f0 = F_LO * std::pow(F_HI / F_LO, (x - x0) / span);
-					const float f1 = F_LO * std::pow(F_HI / F_LO, (x + step - x0) / span);
-					size_t k0 = size_t(f0 * float(bridge::SCOPE_N) / 44100.0f), k1 = size_t(f1 * float(bridge::SCOPE_N) / 44100.0f);
-					k0 = std::clamp<size_t>(k0, 1, ss.sm.size() - 1);
-					k1 = std::clamp<size_t>(std::max(k1, k0), 1, ss.sm.size() - 1);
-					float v = -200.0f;
-					for (size_t k = k0; k <= k1; k++)
-						v = std::max(v, ss.sm[k]);
-					const float t = std::clamp((v - floor_db) / 60.0f, 0.0f, 1.0f);
-					sp.push_back(ImVec2(x, bottom - (bottom - top) * t));
-				}
-				const ImU32 fill = IM_COL32(120, 220, 170, 55), edge = IM_COL32(140, 240, 190, 140);
-				for (size_t i = 1; i < sp.size(); i++)
-					dl->AddQuadFilled(ImVec2(sp[i - 1].x, bottom), sp[i - 1], sp[i], ImVec2(sp[i].x, bottom), fill);
-				dl->AddPolyline(sp.data(), int(sp.size()), edge, 0, 1.0f);
-			}
+		static spec_curve fc;
+		spec_update(br, part, 0, fc);
+		if (fc.ok) {
+			const std::vector<ImVec2> sp = spec_points(fc, fc.peak - 60.0f, x0, x1, top, bottom);
+			const ImU32 fill = IM_COL32(120, 220, 170, 55), edge = IM_COL32(140, 240, 190, 140);
+			for (size_t i = 1; i < sp.size(); i++)
+				dl->AddQuadFilled(ImVec2(sp[i - 1].x, bottom), sp[i - 1], sp[i], ImVec2(sp[i].x, bottom), fill);
+			dl->AddPolyline(sp.data(), int(sp.size()), edge, 0, 1.0f);
 		}
 	}
 

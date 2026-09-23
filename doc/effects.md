@@ -102,7 +102,11 @@ Resonance は 12.0、Dry/Wet は全部 wet）。値 4 ごと:
 * AUTO WAH の LFO は**上へ**振れる。振れる先の値は **値 + (127 - 値) × LFO Depth / 127**
   （Cutoff 32・Depth 64 で 268 → 1938 Hz、式は値 80 = 1950 Hz。Cutoff 64・Depth 64 で 1097 → 3165 Hz、
   式は値 95.7 = 3200 Hz。Cutoff 96・Depth 64 で 3210 → 5039 Hz、式は値 111.6 = 5000 Hz）
-* TOUCH WAH の Sensitivty で動くぶんは測っていない
+* TOUCH WAH の Sensitivty は、入口の音の大きさで山を**上へ**動かす（エンベロープ・フォロワー）。
+  雑音を強さを変えて鳴らすと、Cutoff 32（268 Hz）で Sens 32 のとき 弱 409 / 中 1357 / 強 3359 Hz、
+  Sens 64 で 689 / 4479 / 7623 Hz、Sens 127 で 2606 / 7623 / 7623 Hz。**上限は表の上端（7.5 kHz ほど）**で
+  頭打ち。Sens 0 では動かない。どこまで上がるかは弾く強さ次第なので、画面は「止まっている位置から上端まで」を
+  薄い帯で出し、濃さを Sensitivty に合わせる
 
 音色の窓のエフェクトの区画は、この表で山の位置を描く（`src/ui/part_shapes.cpp` の `WAH_HZ`）。
 

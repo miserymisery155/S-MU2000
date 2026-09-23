@@ -445,7 +445,9 @@ void fx_response_overlay(int slot, const xg::fx_def &def, xg::model &m, ImVec2 a
 	// ワウ（切る周波数は測った表、Q は Resonance の字）。AUTO WAH は LFO で**上へ**振れるので、その先まで帯で出す
 	// （振れる先の値 = 値 + (127 - 値) x LFO Depth / 127。エミュで測って合わせた。2026-09-23）
 	const int wah_i = find({ "CutoffFreq" }), wq_i = find({ "Resonance" }), wd_i = find({ "LFO Depth" });
+	const int ws_i = find({ "Sensitivty" });          // TOUCH WAH。触れて上へ（上限は表の上端）
 	float wah = 0, wq = 1.0f, wah_top = 0;
+	int wah_sens = 0;
 	bool has_wah = false;
 	if (wah_i >= 0 && wq_i >= 0) {
 		int v = 0;
@@ -458,6 +460,8 @@ void fx_response_overlay(int slot, const xg::fx_def &def, xg::model &m, ImVec2 a
 			int d = 0;
 			if (wd_i >= 0 && value(wd_i, d) && d > 0)
 				wah_top = wah_hz(int(std::lround(v + (127.0f - float(v)) * float(d) / 127.0f)));
+			if (ws_i >= 0 && value(ws_i, wah_sens) && wah_sens > 0)
+				wah_top = wah_hz(127);            // 強く弾くと上端まで上がる（どこまで上がるかは弾く強さ次第）
 		}
 	}
 	if (bands.empty() && !has_lpf && !has_hpf && !has_xo && !has_wah)
@@ -545,13 +549,16 @@ void fx_response_overlay(int slot, const xg::fx_def &def, xg::model &m, ImVec2 a
 	if (has_xo)
 		vline(xo, "X-over", xo_i);
 	if (has_wah && wah_top > wah * 1.02f) {
-		// LFO で振れる先までの帯
-		const bool lit = is_focus(wd_i);
+		// LFO（AUTO WAH）や触れたぶん（TOUCH WAH）で山が上へ動く範囲
+		const bool touch = wah_sens > 0;
+		const bool lit = is_focus(touch ? ws_i : wd_i);
 		const float xa = x_hz(wah), xb = x_hz(wah_top);
-		dl->AddRectFilled(ImVec2(xa, top), ImVec2(xb, bottom), IM_COL32(255, 200, 90, lit ? 45 : 25));
+		const int a0 = touch ? 10 + wah_sens * 25 / 127 : 25;
+		dl->AddRectFilled(ImVec2(xa, top), ImVec2(xb, bottom), IM_COL32(255, 200, 90, lit ? a0 + 20 : a0));
 		for (float y = top; y < bottom; y += fs * 0.4f)
 			dl->AddLine(ImVec2(xb, y), ImVec2(xb, std::min(bottom, y + fs * 0.2f)), IM_COL32(255, 200, 90, lit ? 200 : 120), 1.0f);
-		tag(ImVec2((xa + xb) * 0.5f, top + fs * 0.1f), "LFO → " + khz(wah_top), IM_COL32(255, 200, 90, 220), lit);
+		tag(ImVec2((xa + xb) * 0.5f, top + fs * 0.1f),
+		    touch ? "強く弾くと → " + khz(wah_top) : "LFO → " + khz(wah_top), IM_COL32(255, 200, 90, 220), lit);
 	}
 	if (has_wah) {
 		const bool lit = is_focus(wah_i) || is_focus(wq_i);
