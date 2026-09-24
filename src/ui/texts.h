@@ -211,6 +211,9 @@ struct ui_texts {
 	const char *ps_tab_shape;
 	const char *ps_tab_all;
 	const char *ps_title_vib;
+	const char *ps_title_wobble;
+	const char *ps_about_wobble;
+	const char *ps_bend_hint_fmt;
 	const char *ps_title_mod;
 	const char *ps_title_filterenv;
 	const char *ps_title_env;
