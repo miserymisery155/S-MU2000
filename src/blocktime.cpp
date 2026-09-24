@@ -13,12 +13,14 @@
 // 周波数の上げ下げで数 % 揺れて、小さな改善が測れない。起動の直後の状態を
 // 保存しておき、毎回そこへ戻してから流すので、どの回も中身は同じ仕事になる。
 #include "compat/platform.h"
+#include "compat/realtime.h"
 #include "mu2000.h"
 #include "smf.h"
 
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <string>
 #include <vector>
@@ -37,6 +39,8 @@ struct run_result {
 	int over;
 	size_t blocks;
 	double cpu_ns, swpm_ns, megm_ns, megs_ns;   // 1 サンプルあたり
+	// CPU の枠の内訳（1 サンプルあたり）。sh2_share は SH-2 を回したサンプルの割合
+	double sh2_ns, ndrv_ns, nemisc_ns, sh2_share;
 	double loops;
 };
 
@@ -54,6 +58,13 @@ int main(int argc, char **argv)
 	const int repeats = argc > 5 ? std::max(1, std::atoi(argv[5])) : 5;
 	const int copies = argc > 6 ? std::max(1, std::atoi(argv[6])) : 1;
 	const u32 RATE = 44100;
+
+	// Ask for performance cores (macOS; nothing elsewhere). Default-QoS
+	// processes may land on efficiency cores and migrate; real-time audio
+	// threads run elevated, so this matches production rather than
+	// flattering the numbers. The slave threads inherit it;
+	// mu2000::slave_loop raises itself the same way.
+	smu2000::realtime_raise_self();
 
 	std::vector<smf::event> events;
 	std::string err;
@@ -179,6 +190,10 @@ int main(int argc, char **argv)
 			r.swpm_ns = 1e9 * mu.m_t_swpm / double(freq) / n;
 			r.megm_ns = double(mu.swpm().m_t_meg) / n;
 			r.megs_ns = double(mu.swps().m_t_meg) / n;
+			r.sh2_ns    = 1e9 * mu.m_t_sh2    / double(freq) / n;
+			r.ndrv_ns   = 1e9 * mu.m_t_ndrv   / double(freq) / n;
+			r.nemisc_ns = 1e9 * mu.m_t_nemisc / double(freq) / n;
+			r.sh2_share = double(mu.m_n_sh2) / n;
 			r.loops   = double(mu.m_loops) / n;
 		}
 		std::printf("  %s  平均 %.3f ms  最悪 %.2f  超過 %d  | CPU %.0f ns  SWP30 %.0f ns（うち MEG %.0f）  スレーブの MEG %.0f ns\n",
@@ -227,6 +242,16 @@ int main(int argc, char **argv)
 		            median(col(&run_result::cpu_ns)), median(col(&run_result::swpm_ns)),
 		            median(megm), spread(megm), median(col(&run_result::megs_ns)));
 		std::printf("  実行ループ %.1f 周 / サンプル\n", median(col(&run_result::loops)));
+		// CPU の枠の中身。測るために時計を 3 対よけいに読むので、
+		// 足しても CPU の値とは一致しない（その差が時計の代金）
+		const double sh2 = median(col(&run_result::sh2_ns));
+		const double ndrv = median(col(&run_result::ndrv_ns));
+		const double nemisc = median(col(&run_result::nemisc_ns));
+		const double share = median(col(&run_result::sh2_share));
+		std::printf("    CPU の内訳: SH-2 %.0f ns（回したのは %.1f%% のサンプル）"
+		            " / native の tick %.0f ns / そのほかの面倒 %.0f ns / 時計と残り %.0f ns\n",
+		            sh2, 100.0 * share, ndrv, nemisc,
+		            median(col(&run_result::cpu_ns)) - sh2 - ndrv - nemisc);
 	}
 	smu2000::pc_prof_report();
 	return 0;

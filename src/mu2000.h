@@ -408,6 +408,11 @@ private:
 	// ---- native の口（段 2）
 	int  m_native_engine = 0;
 	u32  m_fw_hold = 0;            // このサンプル数だけ firmware を回す
+	// 調べ用の切り替えは**作るときに 1 回だけ読む**。run_sample から
+	// `std::getenv` を呼ぶと、それだけで 1 サンプルあたり 1µs 以上かかる
+	// （環境の表を毎回なめるため。doc/native-dsp.md「測るときの注意」と同じ罠）
+	const bool m_fw_always = std::getenv("SMU2000_FW_ALWAYS") != nullptr;
+	const bool m_meter_dbg = std::getenv("SMU2000_METER_DBG") != nullptr;
 	std::atomic<u64> m_ne_samples{0}, m_ne_fw_samples{0};
 	xg::native_driver m_ndrv;
 	// 写し取り中の状態
@@ -860,18 +865,36 @@ private:
 	s32 m_slave_l = 0, m_slave_r = 0;
 	void slave_loop(u64 seen);
 
+	// Parallel real-time audio workgroup (macOS) for the slave thread below,
+	// as an os_workgroup_t. Plain void* so this header stays platform-free;
+	// only macOS front ends set it. The slave joins whatever is set (null
+	// keeps today's behavior); see slave_loop for the join itself.
+	std::atomic<void *> m_rt_wg_want{nullptr};
+
 public:
+	// Parallel real-time audio workgroup (macOS) for the slave thread: an
+	// os_workgroup_t, kept as void* so this header stays platform-free.
+	void set_realtime_workgroup(void *wg) { m_rt_wg_want.store(wg, std::memory_order_release); }
+
 	// 速さの手掛かり。1 サンプルあたり実行ループを何周したか
 	u64 m_loops = 0, m_timer_fires = 0, m_event_fires = 0;
 	// 区間ごとの所要時間（QueryPerformanceCounter の刻み）。
 	// **set_profile(true) のときだけ測る**（1 サンプルにつき 3 回読むので、
 	// 常に測ると 0.3% ほど食う）
 	u64 m_t_cpu = 0, m_t_swpm = 0, m_t_swps = 0, m_t_n = 0;
+	// m_t_cpu の中をさらに割る（式だけの口でここが臨界経路の半分を占めるので、
+	// 何に使っているのかを見るため）。**測るときだけ**時計を 3 対よけいに読むので、
+	// この 3 つを足しても m_t_cpu とは一致しない（その差が時計の代金）
+	//   m_t_sh2    SH-2 を回した時間（run_cycles）。回した回数は m_n_sh2
+	//   m_t_ndrv   native の口の毎サンプルの仕事（native_driver::tick）
+	//   m_t_nemisc その他の native の口の面倒（見張り・メーター・つまみの拾い直し）
+	u64 m_t_sh2 = 0, m_t_ndrv = 0, m_t_nemisc = 0, m_n_sh2 = 0;
 	// SWP30 の中の MEG の時間は m_swpm / m_swps の m_t_meg（ns）に入る
 	void set_profile(bool on) { m_profile = on; m_swpm.m_profile = on; m_swps.m_profile = on; }
 	void clear_profile()
 	{
 		m_t_cpu = m_t_swpm = m_t_swps = m_t_n = m_loops = 0;
+		m_t_sh2 = m_t_ndrv = m_t_nemisc = m_n_sh2 = 0;
 		m_swpm.m_t_meg = m_swps.m_t_meg = 0;
 	}
 private:

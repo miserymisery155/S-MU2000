@@ -146,6 +146,25 @@ class Buffered(Report):
         self.lines.append(line)
 
 
+def step_texts(rep):
+    """ROM 不要。画面の言葉（src/ui/texts*.h）に抜けや書式の食い違いが無いか。
+    tools/check_texts.py の中身そのまま。訳の %s が %d になっていると落ちる"""
+    script = ROOT / "tools" / "check_texts.py"
+    if not script.exists():
+        rep.add("画面の言葉", False, "tools/check_texts.py が無い")
+        return
+    got = subprocess.run([sys.executable, str(script)], capture_output=True,
+                         text=True, encoding="utf-8")
+    last = [l for l in (got.stdout or "").splitlines() if l.strip()]
+    if got.returncode == 0:
+        rep.add("画面の言葉", True, last[-1] if last else "")
+        return
+    rep.add("画面の言葉", False, "食い違いがある")
+    for line in last:
+        if line.startswith("FAIL"):
+            print("    %s" % line)
+
+
 def step_verify(rep, update):
     """ROM 不要。swp30 を素で叩いて、レジスタと乱数が動いているか"""
     exe = tool("verify")
@@ -871,6 +890,10 @@ def main():
 
     print("== 1. verify（ROM 不要）")
     step_verify(rep, a.update)
+
+    print()
+    print("== 1b. 画面の言葉（ROM 不要）")
+    step_texts(rep)
 
     roms = find_roms(a.roms)
     if roms is None:

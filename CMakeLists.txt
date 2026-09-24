@@ -12,6 +12,8 @@ project(S-MU2000 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+# Non-literal printf formats are bugs (translated strings must go through "%s").
+add_compile_options(-Wformat-security)
 if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
 endif()
@@ -143,6 +145,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
       src/ui/player.cpp src/xg/model.cpp
       src/ui/xg_ui.cpp src/ui/fx_help.cpp src/ui/fx_icons.cpp
       src/ui/sdl_popup.cpp
+      src/ui/window_sdl.cpp
+      src/ui/app_linux.cpp
       src/ui/pc_window_linux.cpp
       src/ui/pc_editor.cpp src/ui/overview.cpp src/ui/fx_editor.cpp
       src/ui/part_shapes.cpp src/ui/master_editor.cpp

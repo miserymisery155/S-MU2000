@@ -655,6 +655,11 @@ void engine::fill(float *left, float *right, int n, const float *in_l, const flo
 		m_mu->set_native_engine(want);
 		m_native_engine.store(want);
 	}
+	// Forward a changed workgroup want to the machine (holding m_machine)
+	if (void *want = m_wg_want.load(std::memory_order_acquire); want != m_wg_sent) {
+		m_mu->set_realtime_workgroup(want);
+		m_wg_sent = want;
+	}
 	const auto cpu_t0 = std::chrono::steady_clock::now();
 
 	m_drv.apply_buttons(*m_mu, m_bridge);
@@ -863,6 +868,14 @@ std::string engine::card_path() const
 {
 	std::lock_guard<std::mutex> lock(m_card_mutex);
 	return m_card_path;
+}
+
+void engine::set_realtime_workgroup(void *wg)
+{
+	// The observer arrives on the render thread, so never wait here: just
+	// stash it. fill() forwards it while already holding the lock. Wants
+	// that arrive before boot survive too, so no boot-time race.
+	m_wg_want.store(wg, std::memory_order_release);
 }
 
 void engine::card_flush()

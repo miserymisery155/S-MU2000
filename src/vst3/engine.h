@@ -193,6 +193,12 @@ public:
 	void card_flush();
 	std::string card_path() const;
 
+	// The machine's parallel thread's audio workgroup (macOS): an
+	// os_workgroup_t, kept as void*. Arrives on the render thread, so it
+	// is only stashed here; fill() forwards it while holding the lock.
+	// Pre-boot wants survive too.
+	void set_realtime_workgroup(void *wg);
+
 private:
 	// 機械に触る仕事を、m_machine を取ってその場でやる
 	bool on_machine(const std::function<void(mu2000 &)> &fn);
@@ -259,6 +265,11 @@ private:
 	ui::bridge m_bridge;
 	// 口の入切（-1 は「頑みが無い」）と、いまの口
 	std::atomic<int> m_want_native{-1};
+	// The wanted audio workgroup and the one already forwarded to the
+	// machine. The observer must not wait: stash here and forward inside
+	// fill() (same shape as m_want_native). m_machine guards m_wg_sent.
+	std::atomic<void *> m_wg_want{nullptr};
+	void *m_wg_sent = nullptr;
 	std::atomic<int> m_native_engine{0};
 	double m_load = 0.0;           // 一覧に出す重さ（%）
 	ui::driver m_drv;
