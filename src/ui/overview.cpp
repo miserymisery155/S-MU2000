@@ -372,9 +372,19 @@ void overview::cell(const column &c, int part, xg::model &m, const xg_snapshot &
 		break;
 	}
 	case src::bend: {
-		// RAM には MSB の半分と、下のバイトの最下位ビットに MSB の残り
-		const int msb = (blk[xg::ram::PART_BEND] & 0x3f) * 2 + (blk[xg::ram::PART_BEND + 1] & 1);
-		v = msb; bipolar = true;
+		// **入ってきた MIDI から取る**（ui/driver.h）。式だけの口では firmware に
+		// ベンドを渡さない（音程はこちらで作る）ので、ワーク RAM の PART_BEND は
+		// 動かない。受信チャンネルが分からないパートだけ、RAM の値で代わりにする
+		int rcv = 127;
+		m.get(P("part.rcv_channel"), part, rcv);
+		const int bslot = rcv >= 0 && rcv < PARTS ? rcv : -1;
+		int msb;
+		if (bslot >= 0)
+			msb = 64 + (ram.bend[bslot] >> 7);          // 14bit → MSB（64 が真ん中）
+		else
+			// RAM には MSB の半分と、下のバイトの最下位ビットに MSB の残り
+			msb = (blk[xg::ram::PART_BEND] & 0x3f) * 2 + (blk[xg::ram::PART_BEND + 1] & 1);
+		v = std::clamp(msb, 0, 127); bipolar = true;
 		char buf[8];
 		std::snprintf(buf, sizeof(buf), "%+d", msb - 64);
 		text = msb == 64 ? "0" : buf;

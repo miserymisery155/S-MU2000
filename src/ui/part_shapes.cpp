@@ -1418,6 +1418,8 @@ void part_shapes::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 							param_slider(key, part, m, br);
 						}
 						ImGui::PopItemWidth();
+						if (!std::strcmp(g.title, texts().xgui_group_bend))
+							bend_now_line(part, m, current_ram());
 						ImGui::Spacing();
 					}
 					ImGui::EndTable();

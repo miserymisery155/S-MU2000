@@ -127,6 +127,7 @@ inline const ui_texts &ja_texts()
 		.xgui_group_eq = "パートの EQ",
 		.xgui_group_mod = "モジュレーション",
 		.xgui_group_bend = "ピッチベンド",
+		.xgui_bend_now_fmt = "いま %+d（%+.2f 半音）",
 		.xgui_group_cat = "チャンネルアフタータッチ",
 		.xgui_group_pat = "ポリアフタータッチ",
 		.xgui_part_fmt = "パート %s",

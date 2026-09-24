@@ -127,6 +127,7 @@ inline const ui_texts &en_texts()
 		.xgui_group_eq = "Part EQ",
 		.xgui_group_mod = "Modulation",
 		.xgui_group_bend = "Pitch bend",
+		.xgui_bend_now_fmt = "Now %+d (%+.2f semitones)",
 		.xgui_group_cat = "Channel aftertouch",
 		.xgui_group_pat = "Polyphonic aftertouch",
 		.xgui_part_fmt = "Part %s",

@@ -158,6 +158,7 @@ struct ui_texts {
 	const char *xgui_group_eq;
 	const char *xgui_group_mod;
 	const char *xgui_group_bend;
+	const char *xgui_bend_now_fmt;
 	const char *xgui_group_cat;
 	const char *xgui_group_pat;
 	const char *xgui_part_fmt;       // %s: A1..
