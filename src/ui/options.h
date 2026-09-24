@@ -38,6 +38,9 @@ inline bool consume_engine_option(const char *arg, engine_options &o)
 	if (!std::strcmp(arg, "--native-fx")) { o.native_fx = 1; return true; }
 	if (!std::strcmp(arg, "--native-fx-full")) { o.native_fx = 2; return true; }
 	if (!std::strcmp(arg, "--native-engine")) { o.native_engine = 1; return true; }
+	// **写し取りの道に戻す**（既定は式だけ。doc/native-engine.md の 6.223）
+	if (!std::strcmp(arg, "--cal")) { xg::native_driver::set_nocal(false); return true; }
+	if (!std::strcmp(arg, "--nocal")) { xg::native_driver::set_nocal(true); return true; }
 	if (!std::strcmp(arg, "--voicecache")) { o.voicecache = 1; return true; }
 	if (!std::strcmp(arg, "--no-voicecache")) { o.voicecache = 0; return true; }
 	return false;
