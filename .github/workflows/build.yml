@@ -35,20 +35,19 @@ jobs:
       - name: Build all targets (including VST3 and CLAP)
         run: make -j$(nproc) all
 
-      - name: Zip Windows build
+      - name: Stage Windows build
         run: |
-          mkdir -p dist
+          mkdir -p dist/S-MU2000-windows
           cd build
-          zip -r ../dist/S-MU2000-windows.zip \
-            *.exe \
-            S-MU2000.vst3 \
-            S-MU2000.clap
+          cp *.exe ../dist/S-MU2000-windows/
+          cp -r S-MU2000.vst3 ../dist/S-MU2000-windows/
+          cp -r S-MU2000.clap ../dist/S-MU2000-windows/
 
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
         with:
           name: S-MU2000-windows
-          path: dist/S-MU2000-windows.zip
+          path: dist/S-MU2000-windows
           if-no-files-found: error
 
   build-macos:
@@ -69,20 +68,52 @@ jobs:
       - name: Build AUv3 (ad-hoc signed, no ROMs baked in)
         run: make -j$(sysctl -n hw.ncpu) auv3 CODESIGN_ID=- AUV3_ROMS=none
 
-      - name: Zip macOS build
+      - name: Stage macOS build
         run: |
-          mkdir -p dist
+          mkdir -p dist/S-MU2000-macos
           cd build
-          zip -r -y ../dist/S-MU2000-macos.zip \
-            verify boot render live gui statetest blocktime \
-            S-MU2000.vst3 \
-            S-MU2000.component \
-            S-MU2000.clap \
-            S-MU2000.app
+          cp verify boot render live gui statetest blocktime vst3probe aubprobe ../dist/S-MU2000-macos/
+          cp -r S-MU2000.vst3 ../dist/S-MU2000-macos/
+          cp -r S-MU2000.component ../dist/S-MU2000-macos/
+          cp -r S-MU2000.clap ../dist/S-MU2000-macos/
+          cp -r S-MU2000.app ../dist/S-MU2000-macos/
 
       - name: Upload macOS artifact
         uses: actions/upload-artifact@v4
         with:
           name: S-MU2000-macos
-          path: dist/S-MU2000-macos.zip
+          path: dist/S-MU2000-macos
+          if-no-files-found: error
+
+  build-linux:
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_branch || github.ref }}
+
+      - name: Install build dependencies
+        run: |
+          sudo add-apt-repository -y ppa:savoury1/sdl3
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libsdl3-dev libcairo2-dev
+
+      - name: Build all targets (verify/boot/render/live/gui, VST3, CLAP)
+        run: make -j$(nproc) all
+
+      - name: Stage Linux build
+        run: |
+          mkdir -p dist/S-MU2000-linux
+          cd build-linux
+          cp verify boot render live gui panel statetest blocktime vst3probe clapprobe ../dist/S-MU2000-linux/
+          cp -r S-MU2000.vst3 ../dist/S-MU2000-linux/
+          cp -r S-MU2000.clap ../dist/S-MU2000-linux/
+
+      - name: Upload Linux artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: S-MU2000-linux
+          path: dist/S-MU2000-linux
           if-no-files-found: error
