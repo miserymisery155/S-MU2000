@@ -88,17 +88,47 @@ jobs:
   build-linux:
     runs-on: ubuntu-latest
     if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+    env:
+      SDL3_VERSION: "3.4.16"
 
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_branch || github.ref }}
 
-      - name: Install build dependencies
+      - name: Install apt build dependencies
         run: |
-          sudo add-apt-repository -y ppa:savoury1/sdl3
           sudo apt-get update
-          sudo apt-get install -y libasound2-dev libsdl3-dev libcairo2-dev
+          sudo apt-get install -y libasound2-dev libcairo2-dev cmake ninja-build \
+            libdecor-0-dev libdrm-dev libgbm-dev libgl-dev libpulse-dev \
+            libwayland-dev libx11-dev libxcursor-dev libxext-dev libxfixes-dev \
+            libxi-dev libxkbcommon-dev libxrandr-dev libxss-dev
+
+      - name: Cache SDL3
+        id: cache-sdl3
+        uses: actions/cache@v4
+        with:
+          path: /opt/sdl3
+          key: sdl3-${{ env.SDL3_VERSION }}-${{ runner.os }}
+
+      - name: Build SDL3 from source
+        if: steps.cache-sdl3.outputs.cache-hit != 'true'
+        run: |
+          git clone --branch release-${SDL3_VERSION} --depth 1 https://github.com/libsdl-org/SDL.git sdl3-src
+          cmake -S sdl3-src -B sdl3-build -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/opt/sdl3
+          cmake --build sdl3-build
+          sudo cmake --install sdl3-build
+
+      - name: Install cached SDL3
+        if: steps.cache-sdl3.outputs.cache-hit == 'true'
+        run: sudo cp -r /opt/sdl3/. /usr/local/
+
+      - name: Point pkg-config / compiler at SDL3
+        run: |
+          echo "PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:${PKG_CONFIG_PATH}" >> "$GITHUB_ENV"
+          echo "CPATH=/usr/local/include:${CPATH}" >> "$GITHUB_ENV"
+          echo "LIBRARY_PATH=/usr/local/lib:${LIBRARY_PATH}" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=/usr/local/lib:${LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
 
       - name: Build all targets (verify/boot/render/live/gui, VST3, CLAP)
         run: make -j$(nproc) all
