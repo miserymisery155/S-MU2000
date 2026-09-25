@@ -119,8 +119,7 @@ jobs:
           cmake --build sdl3-build
           sudo cmake --install sdl3-build
 
-      - name: Install cached SDL3
-        if: steps.cache-sdl3.outputs.cache-hit == 'true'
+      - name: Install SDL3 into system paths
         run: sudo cp -r /opt/sdl3/. /usr/local/
 
       - name: Point pkg-config / compiler at SDL3
