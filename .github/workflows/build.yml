@@ -102,7 +102,7 @@ jobs:
           sudo apt-get install -y libasound2-dev libcairo2-dev cmake ninja-build \
             libdecor-0-dev libdrm-dev libgbm-dev libgl-dev libpulse-dev \
             libwayland-dev libx11-dev libxcursor-dev libxext-dev libxfixes-dev \
-            libxi-dev libxkbcommon-dev libxrandr-dev libxss-dev
+            libxi-dev libxkbcommon-dev libxrandr-dev libxss-dev libxtst-dev
 
       - name: Cache SDL3
         id: cache-sdl3
