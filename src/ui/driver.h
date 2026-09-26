@@ -267,7 +267,7 @@ public:
 	{
 		snapshot s;
 		hd44780_device &lcd = mu.lcd();
-		const u8 *img = lcd.render();
+		const u8 *img = mu.lcd_render();
 		const int cols = lcd.line_size();
 		for (int row = 0; row < LCD_ROWS; row++)
 			for (int col = 0; col < LCD_COLS; col++)
@@ -276,6 +276,7 @@ public:
 						img[16 * (row * cols + col) + y];
 		s.leds   = mu.leds();
 		s.lcd_on = lcd.display_on();
+		s.contrast = u8(mu.lcd_contrast());
 		s.voices_master = u8(mu.swpm().sounding_voices());
 		s.voices_slave  = u8(mu.swps().sounding_voices());
 		s.ready  = ready;

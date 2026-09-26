@@ -564,6 +564,36 @@ void mu2000::fill_missing_glyphs(std::vector<u8> &rom)
 			bar(0x7f + a * 9 + b, a, b);
 		}
 
+	// **PAN の画面のパンの印**。演奏画面で SELECT を PAN に合わせると、メーターの
+	// 欄が各パートのパンの位置に変わる。firmware の書く字を測ると
+	//
+	//     上の行: 上のレベルメータと同じ棒の字で、R 寄りの量（0-5）を下から伸ばす
+	//             （どちらも 0 なら空白）
+	//     下の行: コード = 0xd0 + 7(a + 1) + b
+	//             a, b = L 寄りの量 0-5。-1 はその側を消す（点滅で選んだパートを
+	//             消すときに使う。1 マスに 2 パート入るので、片側だけ消える）。
+	//             測った字: C/C d7、L1/R1 de、L64/R63 fa、C/L2 d8、R2/L63 dc、
+	//             消/R1 d0、L1/消 dd、L64/消 f9、C/消 d6。両方消すと 0xcf に
+	//             なって上の棒の字と重なるので、それは作らない
+	//
+	// 下の行の字は**いちばん上の段が真ん中**で、そこから下へ a + 1 段点く。
+	// 実機では C が真ん中の 1 段だけ、L に 1 でも寄ると下へ 2 段、R に 1 でも
+	// 寄ると上の行の棒と合わせて上へ 2 段になる（利用者に実機で見てもらった）。
+	// pan 0 は L64 で 5、pan 127 は R63 で 5、1 と 2 はどちらも 1。
+	// 手元の字形 ROM ではこの範囲が全部空白で、C のときに何も出ていなかった
+	for (int a = -1; a <= 5; a++)
+		for (int b = -1; b <= 5; b++) {
+			const int code = 0xd0 + (a + 1) * 7 + b;
+			if (code < 0xd0 || code > 0xff)
+				continue;
+			for (int y = 0; y < 8; y++) {
+				u8 v = 0;
+				if (y <= a) v |= 0x18;
+				if (y <= b) v |= 0x03;
+				rom[code * 16 + y] = v;
+			}
+		}
+
 	// **バンク No.・プログラム No. の前に出る右向きの三角**（利用者が実機を
 	// 撮ってくれた写真で分かった）。演奏画面の下の行は
 	//
@@ -841,6 +871,15 @@ void mu2000::build_bus()
 		mem_bus::device d;
 		d.start = 0xe00000; d.end = 0xe00000;
 		d.w8 = [this](offs_t, u8 v) { m_ledsw2 = v; };
+		m_bus.add_device(d);
+	}
+	{
+		mem_bus::device d;
+		d.start = 0xd80000; d.end = 0xd80000;
+		d.r8 = [this](offs_t) { return m_d80; };
+		// 下 3bit が LCD のコントラスト（UTIL > SYS の Contrast − 1）。
+		// 上の bit は起動中に a1 / e1 などと動く別のもの（入力の levels か）
+		d.w8 = [this](offs_t, u8 v) { m_d80 = v; };
 		m_bus.add_device(d);
 	}
 
@@ -1370,6 +1409,91 @@ void mu2000::note_fw_swp(bool master, u32 reg, u16 value)
 	m_ndrv.mark_fw_slot(reg / 64);
 }
 
+// firmware が表示を変えた書き込みから、点滅しているマスを覚える
+void mu2000::blink_learn()
+{
+	const hd44780_device::change *ch = nullptr;
+	const int n = m_lcd.changes(ch);
+	for (int i = 0; i < n; i++) {
+		const int at = ch[i].cg ? 0x80 + (ch[i].addr & 0x3f) : (ch[i].addr & 0x7f);
+		blink_cell &c = m_blink[at];
+		const u8 was = ch[i].before, now = ch[i].after;
+		const u64 t = m_fw_clock;
+		const bool pair = c.count && ((was == c.v[0] && now == c.v[1]) ||
+		                              (was == c.v[1] && now == c.v[0]));
+		if (!pair) {
+			// 別の値が来た。ここから数え直す
+			c = blink_cell();
+			c.v[0] = was;
+			c.v[1] = now;
+			c.count = 1;
+			c.last_fw = t;
+			continue;
+		}
+		// was の値が続いた長さ。前に覚えた長さと 25% 以上違えば数え直す
+		const int wi = (was == c.v[0]) ? 0 : 1;
+		const u64 gap = t - c.last_fw;
+		c.last_fw = t;
+		if (c.dur[wi] && (gap * 4 < c.dur[wi] * 3 || gap * 4 > c.dur[wi] * 5)) {
+			c.dur[wi] = gap;
+			c.count = 1;
+			c.on = false;
+			continue;
+		}
+		c.dur[wi] = c.dur[wi] ? (c.dur[wi] * 3 + gap) / 4 : gap;
+		if (c.count < 250)
+			c.count++;
+		const bool sane = c.dur[0] >= 44100 / 50 && c.dur[1] >= 44100 / 50 &&
+		                  c.dur[0] <= 44100 * 2 && c.dur[1] <= 44100 * 2;
+		// 両方の長さが 2 回ずつ揃い、20ms-2 秒に入っていれば点滅とみなす。
+		// 全速の間は firmware の切り替えに位相を合わせ直す
+		if (sane && c.count >= 5 && (!c.on || !m_throttled)) {
+			c.on = true;
+			c.anchor = m_ne_clock;
+			c.anchor_i = u8(1 - wi);
+		}
+	}
+	m_lcd.clear_changes();
+}
+
+const u8 *mu2000::lcd_render()
+{
+	if (!m_native_engine || !m_throttled)
+		return m_lcd.render();
+	// 細く回している間は、覚えた点滅をこちらの時計で切り替えて描き、
+	// 描いたら元に戻す（firmware の思っている画面は変えない）
+	u8 keep[0xC0];
+	bool touched[0xC0] = {};
+	u8 *dd = const_cast<u8 *>(m_lcd.ddram());
+	u8 *cg = const_cast<u8 *>(m_lcd.cgram());
+	for (int at = 0; at < 0xC0; at++) {
+		blink_cell &c = m_blink[at];
+		if (!c.on)
+			continue;
+		const u64 cycle = c.dur[0] + c.dur[1];
+		// firmware の時計で 1 周期半書き換わらなければ、点滅は終わった
+		if (!cycle || m_fw_clock - c.last_fw > cycle * 3 / 2) {
+			c.on = false;
+			continue;
+		}
+		const bool is_cg = at >= 0x80;
+		const int addr = is_cg ? at - 0x80 : at;
+		if (is_cg ? m_lcd.cg_owned(u32(addr)) : m_lcd.owned(u32(addr)))
+			continue;
+		u8 &cell = is_cg ? cg[addr] : dd[addr];
+		const u64 pos = (m_ne_clock - c.anchor) % cycle;
+		const int first = c.anchor_i;
+		keep[at] = cell;
+		touched[at] = true;
+		cell = c.v[pos < c.dur[first] ? first : 1 - first];
+	}
+	const u8 *img = m_lcd.render();
+	for (int at = 0; at < 0xC0; at++)
+		if (touched[at])
+			(at >= 0x80 ? cg[at - 0x80] : dd[at]) = keep[at];
+	return img;
+}
+
 void mu2000::set_native_engine(int mode)
 {
 	// 切るときは、こちらで鳴らしている音を先に離す。切ったあとは firmware が
@@ -1379,6 +1503,10 @@ void mu2000::set_native_engine(int mode)
 	// **液晶のマスを firmware に返す**（6.188・6.190）
 	m_lcd.clear_owned();
 	m_lcd.clear_cg_owned();
+	for (blink_cell &c : m_blink)
+		c = blink_cell();
+	m_lcd.clear_changes();
+	m_throttled = false;
 	m_native_engine = mode;
 	m_fw_hold = 0;
 	m_learning = false;
@@ -2036,6 +2164,14 @@ void mu2000::draw_meter()
 	// どれか 1 つでも当てはまらなければ、**1 マスも触らない**。
 	// 別の画面では同じ桁に文字が出ていて、消すと表示が壊れる
 	if (cur[0x40] != 0x89) {
+		m_lcd.clear_owned();
+		return;
+	}
+	// **演奏画面だけ**。VOL・EXP・REV・CHO・VAR の画面でも firmware は同じ
+	// 欄へ同じ棒の字で各パートの値を描くので、棒の字かどうかでは見分けられず、
+	// 上から音量メーターを描いて値を消していた。演奏画面は下の行 9 桁目が
+	// バンク番号の前の三角（0x10 / 0x11）、値の画面はそこが '='
+	if (cur[0x49] != 0x10 && cur[0x49] != 0x11) {
 		m_lcd.clear_owned();
 		return;
 	}
@@ -2978,6 +3114,9 @@ void mu2000::run_sample(s32 &left, s32 &right)
 		// 100ms ごとに 5ms だけ回す。止まりっぱなしにしないのが目的なので、
 		// これで十分（パネルの反応は 100ms 以内、CPU は数 % 増えるだけ）
 		if (m_ne_clock % KEEPALIVE_EVERY == 0) {
+			// 直前の 100ms に firmware が半分も回っていなければ、細く回している
+			m_throttled = (m_fw_clock - m_thr_fw0) < KEEPALIVE_EVERY / 2;
+			m_thr_fw0 = m_fw_clock;
 			m_fw_hold = std::max(m_fw_hold, KEEPALIVE_RUN);
 			if (!m_fw_why)
 				m_fw_why = 5;
@@ -3125,6 +3264,7 @@ void mu2000::run_sample(s32 &left, s32 &right)
 		}
 	}
 	if (run_cpu) {
+		m_fw_clock++;
 		if (m_profile) {
 			const u64 pc0 = smu2000::perf_ticks();
 			run_cycles(cycles);
@@ -3132,6 +3272,11 @@ void mu2000::run_sample(s32 &left, s32 &right)
 			m_n_sh2++;
 		} else
 			run_cycles(cycles);
+		// firmware が液晶を書き換えていれば、点滅かどうかを覚える
+		if (m_native_engine)
+			blink_learn();
+		else
+			m_lcd.clear_changes();
 	}
 
 	if (m_profile) {
@@ -3203,7 +3348,7 @@ namespace {
 
 // 保存の形。中身の並びを変えたら上げる
 constexpr u32 STATE_MAGIC   = 0x554d3253;   // "S2MU"
-constexpr u32 STATE_VERSION = 12;  // 2: MIDI の入口が A/B の 2 口になった / 3: SWP30 のピッチ EG / 4: サンプリングの録音の位置 / 5: SmartMedia の命令の途中 / 6: MEG の印と 2 つ目の idx / 7: USB の口（C・D）の受け取り途中 / 8: 2 つ目の A/D 変換器（AN4 = HOST SELECT） / 9: SWP30 の書き込みの待ち / 10: USB のコマンド（M37640 からの知らせ） / 11: 液晶の「native の持ち物」（6.188） / 12: 外字の「native の持ち物」（6.190）
+constexpr u32 STATE_VERSION = 13;  // 13: d80000（LCD のコントラスト） / 2: MIDI の入口が A/B の 2 口になった / 3: SWP30 のピッチ EG / 4: サンプリングの録音の位置 / 5: SmartMedia の命令の途中 / 6: MEG の印と 2 つ目の idx / 7: USB の口（C・D）の受け取り途中 / 8: 2 つ目の A/D 変換器（AN4 = HOST SELECT） / 9: SWP30 の書き込みの待ち / 10: USB のコマンド（M37640 からの知らせ） / 11: 液晶の「native の持ち物」（6.188） / 12: 外字の「native の持ち物」（6.190）
 constexpr u32 STATE_VERSION_OLDEST = 2;
 
 } // namespace
@@ -3292,6 +3437,12 @@ void mu2000::state(state_io &s)
 			}
 			s.v(m_usb.cur_cmd);
 		}
+	}
+
+	// 版 13 から: d80000 の値（LCD のコントラスト）
+	if (s.version() >= 13) {
+		s.tag("d80");
+		s.v(m_d80);
 	}
 }
 

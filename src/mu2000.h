@@ -328,6 +328,9 @@ public:
 
 	// パネルの LED 10 個。MAME の mulcd_device::set_leds と同じ並び
 	u16 leds() const;
+	// UTIL > SYS の Contrast（1-8）。firmware が d80000 の下 3bit に
+	// 「値 − 1」を書く。まだ書かれていなければ工場出荷の 2
+	int lcd_contrast() const { return m_d80 ? (m_d80 & 7) + 1 : 2; }
 
 	const std::string &error() const { return m_error; }
 
@@ -344,6 +347,10 @@ public:
 	// 1: 鍵の上げ下げを native driver でさばき、CPU はその間止める
 	void set_native_engine(int mode);
 	int native_engine() const { return m_native_engine; }
+
+	// 画面へ渡す液晶の絵（hd44780::render と同じ並び）。native の口で
+	// firmware を細く回している間は、覚えた点滅をこちらで切り替えて描く
+	const u8 *lcd_render();
 	// native の口の内訳（調べ用）
 	// SH-2 を回したのはなぜか（サンプル数）。doc/native-engine.md の 6.21
 	std::atomic<u64> m_ne_by_note{0};    // firmware が鳴らしている音がある
@@ -427,6 +434,28 @@ private:
 	static constexpr u64 RESET_HOLD_MAX = 44100 * 2 / 5;   // 400ms で必ず解く
 	void hold_after_reset(u64 fire);
 	u32  m_fw_hold = 0;            // このサンプル数だけ firmware を回す
+
+	// **液晶の点滅を native で受け持つ**。点滅（カーソル・値・▼）は firmware が
+	// 時間を数えて書き換えるので、firmware を細く回すと 20 分の 1 の速さになり
+	// 止まって見える。firmware が全速のときに「2 つの値を一定の間隔で行き来する
+	// マス」を覚え、細く回している間はその間隔でこちらが切り替えて描く。
+	// マスは DDRAM 0x00-0x7F と CGRAM 0x80-0xBF
+	// 点いている時間と消えている時間は同じとは限らない（演奏画面の ▼ は
+	// 点いて 325ms・消えて 75ms）ので、2 つの値それぞれの長さを覚える
+	struct blink_cell {
+		u8  v[2] = {};             // 行き来する 2 つの値
+		u64 dur[2] = {};           // それぞれが続く長さ（firmware の時刻、サンプル）
+		u8  count = 0;             // 同じ長さで続いた回数
+		bool on = false;           // 点滅とみなしている
+		u64 last_fw = 0;           // 最後に書き換わった firmware の時刻
+		u64 anchor = 0;            // 切り替えの起点（実時間 = m_ne_clock）
+		u8  anchor_i = 0;          // 起点で出ていた値（v の添字）
+	};
+	blink_cell m_blink[0xC0];
+	u64  m_fw_clock = 0;           // firmware を回したサンプル数（firmware の時刻）
+	u64  m_thr_fw0 = 0;            // 細く回しているかを測る窓の頭の m_fw_clock
+	bool m_throttled = false;      // いま firmware を細く回している
+	void blink_learn();
 	// 調べ用の切り替えは**作るときに 1 回だけ読む**。run_sample から
 	// `std::getenv` を呼ぶと、それだけで 1 サンプルあたり 1µs 以上かかる
 	// （環境の表を毎回なめるため。doc/native-dsp.md「測るときの注意」と同じ罠）
@@ -834,6 +863,8 @@ private:
 	// ビジーフラグが立つのを確かめており、常に空いていると先へ進まない
 	hd44780_device m_lcd;
 	u8  m_ledsw1 = 0, m_ledsw2 = 0;
+	// d80000: LCD のコントラストほか（MAME の地図では "contrast, levels"）
+	u8  m_d80 = 0;
 	// 押されているボタン。行 6 × 桁 8。押すと 0 になる
 	u8  m_sws[6] = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
 	u8   ledsw_r() const;
