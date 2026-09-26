@@ -286,6 +286,16 @@ public:
 	enum scope_fx : int { SCOPE_INS1, SCOPE_INS2, SCOPE_INS3, SCOPE_INS4, SCOPE_VAR, SCOPE_CHO, SCOPE_REV, SCOPE_MIX, SCOPE_FX_N };
 	void scope_read_fx(int fx, bool out, float *dst, size_t n) const;
 
+	// ---- S-MU2000: 全パートの音と最終の出力（一覧の小さなスペクトラム用）
+	// 上の 1 パートぶんと同じく、声の出力を混ぜる前に拾ってパートごとに足す。こちらは 64 パート
+	// 全部を同時に、短い輪（PSCOPE_N）で持つ。最終の出力はマスタの DAC に出る左右の平均。
+	// 一覧が見えている間だけ動かす（set_part_scopes(false) で止まる）。音には触らない
+	static constexpr size_t PSCOPE_N = 1024;
+	void set_part_scopes(bool on);
+	// part 0-63 はそのパートの声の和、PSCOPE_OUT は最終の出力。直近の n サンプル（n ≤ PSCOPE_N、古い順）
+	static constexpr int PSCOPE_OUT = 64;
+	void part_scope_read(int part, float *out, size_t n) const;
+
 	sh7043a_device &cpu()  { return *m_cpu; }
 	swp30_device   &swpm() { return m_swpm; }
 
@@ -773,7 +783,7 @@ private:
 	// firmware が、こちらが鳴らしているスロットに書いた回数
 	u32  m_ne_fw_stomp = 0;
 	void note_fw_swp(bool master, u32 reg, u16 value);
-	u64  m_fw_keymask = 0;     // firmware がつぎに鳴らすスロットのマスク
+	u64  m_fw_keymask[2] = { 0, 0 };  // firmware がつぎに鳴らすスロットのマスク（マスタ・スレーブ）
 	// firmware を細く回し続ける刻み（100ms ごとに 5ms）。止めきると液晶・
 	// ボタン・firmware 自身の後始末が全部止まる
 	// **パネルを触っている間は firmware を全速で回す**（doc/native-engine.md の 6.119）。
@@ -837,6 +847,12 @@ private:
 	std::array<std::atomic<u32>, 2> m_fx_w{};
 	static void scope_meg_fn(void *ctx, const s32 *in, const s32 *out);
 	void scope_refresh_owner();
+	// 全パートの輪（[chip][k][part]）と最終の出力の輪
+	std::atomic<bool> m_pscope_on{false};
+	std::vector<float> m_pscope = std::vector<float>(2 * PSCOPE_N * 64);
+	std::array<std::atomic<u32>, 2> m_pscope_w{};
+	std::vector<float> m_oscope = std::vector<float>(PSCOPE_N);
+	std::atomic<u32> m_oscope_w{0};
 	required_device<sci4_device> m_sci4_finder;
 	sci4_device *m_sci4 = nullptr;   // PLG ボード用 0xf00000
 	mem_bus      m_bus;

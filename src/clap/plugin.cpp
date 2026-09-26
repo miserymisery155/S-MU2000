@@ -529,6 +529,10 @@ private:
 	// 音を出したチャンネル（口ごとに 16 ビット）。止めるときに流す先を絞る
 	std::atomic<uint16_t>  m_sounded[mu2000::MIDI_PORTS] = {};
 
+	// process で時刻順（同じ時刻はリセットを先）に並べ直すための入れ物
+	struct ordered { uint32_t time, rank, index; };
+	std::vector<ordered> m_order;
+
 	// 音を作る途中の入れ物。process の間だけ有効
 	float       *m_left = nullptr, *m_right = nullptr;
 	const float *m_in_l = nullptr, *m_in_r = nullptr;
@@ -752,13 +756,31 @@ clap_process_status mu_plugin::process(const clap_process_t *pr)
 	// イベントは時刻順に来る。その時刻まで音を作ってから流す
 	m_xg.begin_block();
 	if (const clap_input_events_t *ev = pr->in_events) {
+		// 同じ時刻ならリセットの SysEx を先に（engine.h の is_reset_sysex。issue #51）。
+		// ホストによっては SysEx をチャンネルメッセージの後ろにまとめて渡してくる
 		const uint32_t count = ev->size(ev);
+		m_order.clear();
 		for (uint32_t i = 0; i < count; i++) {
 			const clap_event_header_t *h = ev->get(ev, i);
 			if (!h || h->space_id != CLAP_CORE_EVENT_SPACE_ID)
 				continue;
-			fill_to(std::min(h->time, n));
-			event(h);
+			bool reset = false;
+			if (h->type == CLAP_EVENT_MIDI_SYSEX) {
+				const auto *e = reinterpret_cast<const clap_event_midi_sysex_t *>(h);
+				reset = e->buffer && smu2000::vst3::is_reset_sysex(e->buffer, e->size);
+			}
+			m_order.push_back({ std::min(h->time, n), reset ? 0u : 1u, i });
+		}
+		std::sort(m_order.begin(), m_order.end(), [](const ordered &a, const ordered &b) {
+			if (a.time != b.time)
+				return a.time < b.time;
+			if (a.rank != b.rank)
+				return a.rank < b.rank;
+			return a.index < b.index;
+		});
+		for (const ordered &o : m_order) {
+			fill_to(o.time);
+			event(ev->get(ev, o.index));
 		}
 	}
 	fill_to(n);

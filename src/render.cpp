@@ -181,6 +181,8 @@ int main(int argc, char **argv)
 	double lcd_at = -1.0;   // --lcd-at 秒: その時刻の液晶の中身を 16 進で出す
 	// --lcd-every 秒: その間隔でずっと出す（画面のちらつきを見るため）
 	double lcd_every = 0.0;
+	// --voices-every 秒: 鳴っている声の数（SWP30 マスタ・スレーブ）をその間隔で出す
+	double voices_every = 0.0, voices_next = 0.0;
 	double lcd_next = 0.0;
 	const char *mu_dac_path = nullptr;
 	u32 mu_dac_from = 0, mu_dac_count = 0;
@@ -210,6 +212,8 @@ int main(int argc, char **argv)
 			lcd_at = std::atof(argv[++i]);
 		else if (!std::strcmp(argv[i], "--lcd-every") && i + 1 < argc)
 			lcd_every = std::atof(argv[++i]);
+		else if (!std::strcmp(argv[i], "--voices-every") && i + 1 < argc)
+			voices_every = std::atof(argv[++i]);
 		else if (!std::strcmp(argv[i], "--dump-dac") && i + 3 < argc) {
 			mu_dac_path = argv[++i];
 			mu_dac_from = u32(std::strtoul(argv[++i], nullptr, 0));
@@ -463,6 +467,11 @@ int main(int argc, char **argv)
 				for (int pos = 0; pos < 24; pos++)
 					std::printf(" %02x", dd[line * 0x40 + pos]);
 			std::printf("\n");
+		}
+		if (voices_every > 0.0 && i >= size_t((boot + voices_next) * rate)) {
+			std::printf("VOICES %.3f M %d S %d\n", voices_next,
+			            mu.swpm().sounding_voices(), mu.swps().sounding_voices());
+			voices_next += voices_every;
 		}
 		if (lcd_every > 0.0 && i >= size_t((boot + lcd_next) * rate)) {
 			const double now = lcd_next;

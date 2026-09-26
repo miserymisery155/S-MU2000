@@ -962,6 +962,11 @@ const help_text HELP[] = {
 	{ "INS 2", { "インサーションエフェクト 2。使い方は INS 1 と同じ", "Insertion effect 2. Works like INS 1." } },
 	{ "INS 3", { "インサーションエフェクト 3。使い方は INS 1 と同じ", "Insertion effect 3. Works like INS 1." } },
 	{ "INS 4", { "インサーションエフェクト 4。使い方は INS 1 と同じ", "Insertion effect 4. Works like INS 1." } },
+	{ "SPECTRUM", {
+		"最終の出力（スピーカーに出る音。エフェクトとマスター EQ のあと）のスペクトラム。\n"
+		"横は周波数（30Hz〜16kHz）、縦は大きさ（いちばん大きい所から 60dB）",
+		"The spectrum of the final output (what reaches the speakers, after the effects and the master EQ).\n"
+		"Frequency sideways (30 Hz to 16 kHz), level upwards (60 dB below the loudest point)." } },
 	{ "MASTER EQ", {
 		"マスター EQ。全部の音の最後に掛かる 5 つの帯のイコライザ。左が低い音、右が高い音。\n"
 		"点をつまんで、横で周波数、縦でゲイン（±12dB）。点の近くでホイールを回すと幅（Q）。\n"
@@ -989,6 +994,13 @@ const help_text HELP[] = {
 	{ "VEL", {
 		"鍵盤を弾いた強さ（ベロシティ）。音が鳴るたびに跳ねて、落ちていく",
 		"How hard the key was played (velocity). Jumps on each note and falls back." } },
+	{ "SPEC", {
+		"このパートがいま出している音のスペクトラム。横は周波数（左が低い 30Hz、右が高い 16kHz）、\n"
+		"縦は大きさ（そのパートのいちばん大きい所から 60dB）。声ごとの出力をパートに振り分けて足したもの\n"
+		"（インサーション・システムエフェクトより前）",
+		"The spectrum of what this part is playing now. Frequency sideways (30 Hz on the left to 16 kHz on the right),\n"
+		"level upwards (60 dB below this part's loudest point). The voices' outputs summed per part,\n"
+		"before insertion and system effects." } },
 	{ "VOL", {
 		"パートの音量（CC7 / Volume）。曲の中のパートどうしの大きさの釣り合いを取る",
 		"Part volume (CC7). Balances the loudness of the parts against each other." } },

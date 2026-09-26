@@ -80,6 +80,7 @@ private:
 	struct queued_event {
 		vint32 offset = 0;
 		std::uint32_t sequence = 0;
+		bool reset = false;          // リセットの SysEx。同じ時刻なら先に流す（is_reset_sysex）
 		std::vector<std::uint8_t> bytes;
 	};
 
@@ -290,6 +291,7 @@ private:
 				if (s->dump && s->dump_bytes > 0 && s->dump_bytes <= 1024 * 1024)
 					q.bytes.assign(reinterpret_cast<const std::uint8_t *>(s->dump),
 					               reinterpret_cast<const std::uint8_t *>(s->dump) + s->dump_bytes);
+				q.reset = smu2000::vst3::is_reset_sysex(q.bytes.data(), q.bytes.size());
 			}
 			if (!q.bytes.empty()) {
 				if ((q.bytes[0] & 0xf0) == 0x90 && q.bytes.size() >= 3 && q.bytes[2])
@@ -367,8 +369,13 @@ private:
 				m_engine.all_notes_off(&sounded, 1);
 		}
 
+		// 同じ時刻ならリセットを先に（engine.h の is_reset_sysex。issue #51）
 		std::stable_sort(m_events.begin(), m_events.end(), [](const queued_event &a, const queued_event &b) {
-			return a.offset != b.offset ? a.offset < b.offset : a.sequence < b.sequence;
+			if (a.offset != b.offset)
+				return a.offset < b.offset;
+			if (a.reset != b.reset)
+				return a.reset;
+			return a.sequence < b.sequence;
 		});
 		vint32 done = 0;
 		for (const queued_event &e : m_events) {

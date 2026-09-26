@@ -876,6 +876,7 @@ private:
 		uint8          b[16];
 		const uint8   *sysex;
 		uint32         sysex_len;
+		uint8          rank = 1;      // 0 はリセット。同じ時刻なら先に流す（is_reset_sysex）
 	};
 
 	void queue(int32 port, int32 off, uint8 a, uint8 b = 0, uint8 c = 0, int n = 3)
@@ -1132,7 +1133,8 @@ tresult PLUGIN_API mu_plugin::process(ProcessData &data)
 				// 本物のシステムエクスクルーシブ（と、その途中の切れ端）はバイト列のまま
 				if (m_msgs.size() < m_msgs.capacity())
 					m_msgs.push_back({ off, int32(m_msgs.size()), uint8(port), 0, { 0, 0, 0 },
-					                   e.data.bytes, e.data.size });
+					                   e.data.bytes, e.data.size,
+					                   uint8(smu2000::vst3::is_reset_sysex(e.data.bytes, e.data.size) ? 0 : 1) });
 				else
 					m_dropped++;
 				break;
@@ -1143,8 +1145,14 @@ tresult PLUGIN_API mu_plugin::process(ProcessData &data)
 		}
 	}
 
+	// 時刻順。同じ時刻ならリセットを先に（is_reset_sysex。パラメータから作った音色の指定が
+	// SysEx のリセットより先に並ぶので、そのままだとリセットが音色を消す。issue #51）
 	std::sort(m_msgs.begin(), m_msgs.end(), [](const msg &a, const msg &b) {
-		return a.off != b.off ? a.off < b.off : a.seq < b.seq;
+		if (a.off != b.off)
+			return a.off < b.off;
+		if (a.rank != b.rank)
+			return a.rank < b.rank;
+		return a.seq < b.seq;
 	});
 
 	// ---- 時刻順に、音を作りながら流し込む

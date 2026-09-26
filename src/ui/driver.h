@@ -224,6 +224,7 @@ public:
 		if (ready) {
 			publish_xg(mu, br);
 			publish_scope(mu, br);
+			publish_part_scopes(mu, br);
 		}
 	}
 
@@ -242,6 +243,19 @@ public:
 		br.publish_scope(m_scope.data(), want);
 	}
 	std::vector<float> m_scope = std::vector<float>(size_t(bridge::SCOPE_SRCS) * bridge::SCOPE_N);
+
+	// 全パートの音と最終の出力（一覧の小さなスペクトラム）。一覧が見えているあいだだけ
+	void publish_part_scopes(mu2000 &mu, bridge &br)
+	{
+		const bool want = br.part_scopes_wanted();
+		mu.set_part_scopes(want);
+		if (!want)
+			return;
+		for (int s = 0; s < bridge::PSCOPE_SRCS; s++)
+			mu.part_scope_read(s, m_pscope.data() + size_t(s) * bridge::PSCOPE_N, bridge::PSCOPE_N);
+		br.publish_part_scopes(m_pscope.data());
+	}
+	std::vector<float> m_pscope = std::vector<float>(size_t(bridge::PSCOPE_SRCS) * bridge::PSCOPE_N);
 
 	// firmware のワーク RAM から XG の値を写す（xg/ram.h）
 	void publish_xg(mu2000 &mu, bridge &br)

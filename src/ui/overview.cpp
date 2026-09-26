@@ -14,6 +14,7 @@
 #include "spectrum.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -1961,6 +1962,87 @@ std::vector<ImVec2> spec_points(const spec_curve &c, float floor_db, float x0, f
 	return sp;
 }
 
+// ---- 一覧の小さなスペクトラム（パートごとの声の和と、マスターの最終の出力）
+// 1024 点（23ms）なので低いほうは粗いが、欄が小さいので足りる。力でならし、山の高さはゆっくり下げる
+struct mini_spec {
+	unsigned serial = 0;
+	std::vector<float> pw;
+	float peak = -200.0f;
+	bool ok = false;
+};
+
+mini_spec &mini_spec_of(int src)
+{
+	static std::array<mini_spec, bridge::PSCOPE_SRCS> all;
+	return all[size_t(std::clamp(src, 0, bridge::PSCOPE_SRCS - 1))];
+}
+
+// 1024 点では 4096 点より 12dB 小さく出る（SPEC_SILENT_DB・SPEC_REF_MIN_DB は 4096 点の値）
+constexpr float MINI_SILENT_DB = SPEC_SILENT_DB - 12.0f;
+constexpr float MINI_REF_MIN_DB = SPEC_REF_MIN_DB - 12.0f;
+
+void mini_spec_update(bridge &br, int src, mini_spec &c)
+{
+	const unsigned serial = br.part_scopes_serial();
+	if (serial == c.serial)
+		return;
+	c.serial = serial;
+	static std::vector<float> wave(bridge::PSCOPE_N);
+	if (!br.read_part_scope(src, wave.data())) {
+		c.ok = false;
+		return;
+	}
+	double mean = 0;
+	for (float v : wave)
+		mean += v;
+	mean /= double(wave.size());
+	for (float &v : wave)
+		v -= float(mean);
+	std::vector<float> db;
+	spectrum::magnitude_db(wave.data(), bridge::PSCOPE_N, db);
+	if (c.pw.size() != db.size())
+		c.pw.assign(db.size(), 0.0f);
+	float frame_peak = -200.0f;
+	for (size_t k = 1; k < db.size(); k++) {
+		const float p = float(std::pow(10.0, double(db[k]) / 10.0));
+		c.pw[k] = c.pw[k] > 0.0f ? c.pw[k] * 0.4f + p * 0.6f : p;
+		frame_peak = std::max(frame_peak, float(10.0 * std::log10(std::max(double(c.pw[k]), 1e-20))));
+	}
+	c.peak = std::max(frame_peak, c.peak - 1.0f);
+	c.ok = frame_peak > MINI_SILENT_DB;
+}
+
+void mini_spec_draw(ImDrawList *dl, const mini_spec &c, ImVec2 a, ImVec2 b, ImU32 color)
+{
+	dl->AddRectFilled(a, b, IM_COL32(0, 0, 0, 50), 2.0f);
+	if (!c.ok || c.pw.empty() || b.x - a.x < 4.0f)
+		return;
+	const float F_LO = 30.0f, F_HI = 16000.0f;
+	const float floor_db = std::max(c.peak, MINI_REF_MIN_DB) - 60.0f;
+	const float span = b.x - a.x;
+	const float step = std::max(1.0f, span / 64.0f);
+	const long last = long(c.pw.size()) - 1;
+	const float bin_hz = 44100.0f / float(bridge::PSCOPE_N);
+	std::vector<ImVec2> sp;
+	for (float x = a.x; x <= b.x + 0.01f; x += step) {
+		const float f0 = F_LO * std::pow(F_HI / F_LO, (x - a.x) / span);
+		const float f1 = F_LO * std::pow(F_HI / F_LO, std::min(x + step - a.x, span) / span);
+		const long k0 = std::clamp<long>(long(f0 / bin_hz), 1, last);
+		const long k1 = std::clamp<long>(std::max(long(f1 / bin_hz), k0), 1, last);
+		double pw = 0;
+		for (long k = k0; k <= k1; k++)
+			pw += double(c.pw[size_t(k)]);
+		const float v = float(10.0 * std::log10(std::max(pw / double(k1 - k0 + 1), 1e-20)));
+		const float t = std::clamp((v - floor_db) / 60.0f, 0.0f, 1.0f);
+		sp.push_back(ImVec2(std::min(x, b.x), b.y - (b.y - a.y) * t));
+	}
+	const ImU32 fill = (color & ~IM_COL32_A_MASK) | (ImU32(90) << IM_COL32_A_SHIFT);
+	const ImU32 edge = (color & ~IM_COL32_A_MASK) | (ImU32(220) << IM_COL32_A_SHIFT);
+	for (size_t i = 1; i < sp.size(); i++)
+		dl->AddQuadFilled(ImVec2(sp[i - 1].x, b.y), sp[i - 1], sp[i], ImVec2(sp[i].x, b.y), fill);
+	dl->AddPolyline(sp.data(), int(sp.size()), edge, 0, 1.0f);
+}
+
 } // namespace
 
 int overview::fader_strip(const char *id, const char *const *keys, const char *const *names, int n, int group_after, int part,
@@ -2760,6 +2842,18 @@ void overview::row(int part, xg::model &m, const xg_snapshot &ram, bridge &br, f
 		dl->AddRectFilled(ImVec2(a.x, top), b, NOTE_ON);
 	}
 
+	// ---- スペクトラム（このパートの声の和。エフェクトの前）
+	ImGui::TableNextColumn();
+	{
+		const ImVec2 pos = ImGui::GetCursorScreenPos();
+		const float w = ImGui::GetContentRegionAvail().x;
+		ImGui::Dummy(ImVec2(w, h));
+		const float pad = fs * 0.2f;
+		mini_spec &c = mini_spec_of(part);
+		mini_spec_update(br, part, c);
+		mini_spec_draw(dl, c, ImVec2(pos.x + pad, pos.y + pad), ImVec2(pos.x + w - pad, pos.y + h - pad), part_color(part));
+	}
+
 	// ---- 値の棒
 	for (const column &c : COLUMNS) {
 		ImGui::TableNextColumn();
@@ -3432,7 +3526,7 @@ void overview::master_pane(xg::model &m, const xg_snapshot &ram, bridge &br)
 
 	const ImGuiTableFlags flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_BordersOuterH |
 	                              ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_PadOuterX;
-	constexpr int NCOL = 11;
+	constexpr int NCOL = 12;
 	if (!ImGui::BeginTable("master", NCOL, flags))
 		return;
 	ImGui::TableSetupColumn(UI_TEXT(bar_master, "Master"), ImGuiTableColumnFlags_WidthFixed, fs * 18.5f);
@@ -3446,12 +3540,13 @@ void overview::master_pane(xg::model &m, const xg_snapshot &ram, bridge &br)
 	ImGui::TableSetupColumn("CHORUS", ImGuiTableColumnFlags_WidthFixed, fs * 7.5f);
 	ImGui::TableSetupColumn("REVERB", ImGuiTableColumnFlags_WidthFixed, fs * 7.5f);
 	ImGui::TableSetupColumn("MASTER EQ", ImGuiTableColumnFlags_WidthFixed, fs * 11);
+	ImGui::TableSetupColumn("SPECTRUM", ImGuiTableColumnFlags_WidthFixed, fs * 11);
 	ImGui::TableSetupColumn("##mkeys", ImGuiTableColumnFlags_WidthStretch);
 	// Help keys, parallel to the displays above (the マスター display is
 	// translated; the rest are ASCII and double as their own keys).
 	static const char *const MASTER_COL_KEYS[] = {
 		"マスター", "M.VOL", "INS 1", "INS 2", "INS 3", "INS 4",
-		"VARIATION", "CHORUS", "REVERB", "MASTER EQ", "##mkeys",
+		"VARIATION", "CHORUS", "REVERB", "MASTER EQ", "SPECTRUM", "##mkeys",
 	};
 	headers_with_help(NCOL, MASTER_COL_KEYS);
 	ImGui::TableNextRow(0, h);
@@ -3494,6 +3589,19 @@ void overview::master_pane(xg::model &m, const xg_snapshot &ram, bridge &br)
 	system_fx_cell(UI_TEXT(sys_reverb, "Reverb"), xg::rev_types(), "reverb.type", "REV", false, m, ram, br, h);
 	ImGui::TableNextColumn();
 	master_eq_cell(m, br, h);
+
+	// ---- 最終の出力のスペクトラム（エフェクトとマスター EQ のあと）
+	ImGui::TableNextColumn();
+	{
+		const ImVec2 pos = ImGui::GetCursorScreenPos();
+		const float w = ImGui::GetContentRegionAvail().x;
+		ImGui::Dummy(ImVec2(w, h));
+		const float pad = fs * 0.2f;
+		mini_spec &c = mini_spec_of(mu2000::PSCOPE_OUT);
+		mini_spec_update(br, mu2000::PSCOPE_OUT, c);
+		mini_spec_draw(dl, c, ImVec2(pos.x + pad, pos.y + pad), ImVec2(pos.x + w - pad, pos.y + h - pad),
+		               IM_COL32(140, 240, 190, 255));
+	}
 
 	// ---- 鍵盤。全パートで鳴っている鍵を重ねる。色はパートごと、重なったら混ぜる
 	ImGui::TableNextColumn();
@@ -3936,28 +4044,31 @@ void overview::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 	const float h = fs * 2.3f;
 
 	// マスターの表（見出しは別）。インサーションとバリエーションの設定もここ
+	br.want_part_scopes();            // 一覧のスペクトラム。見えているあいだだけ音源が溜める
 	master_pane(m, ram, br);
 	ImGui::Spacing();
 
 	const ImGuiTableFlags flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_BordersInnerV |
 	                              ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_PadOuterX;
 	ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(1, 1));
-	if (ImGui::BeginTable("rows", NCOLS + 3, flags)) {
+	if (ImGui::BeginTable("rows", NCOLS + 4, flags)) {
 		ImGui::TableSetupScrollFreeze(1, 1);            // 見出しは流さない
 		ImGui::TableSetupColumn(UI_TEXT(ov_part_col, "Part (right-click for voice)"), ImGuiTableColumnFlags_WidthFixed, fs * 18.5f);
 		ImGui::TableSetupColumn("VEL", ImGuiTableColumnFlags_WidthFixed, fs * 2.2f);
+		ImGui::TableSetupColumn("SPEC", ImGuiTableColumnFlags_WidthFixed, fs * 6.0f);
 		for (const column &c : COLUMNS)
 			ImGui::TableSetupColumn(c.title, ImGuiTableColumnFlags_WidthFixed,
 			                        wide(c.from) ? fs * 3.6f : c.from == src::ins ? fs * 6.2f : fs * 3.4f);
 		ImGui::TableSetupColumn("##keys", ImGuiTableColumnFlags_WidthStretch);   // 見出しは要らない
 		// Help keys, parallel to the displays above (the part display is
 		// translated; the rest double as their own keys).
-		const char *part_keys[NCOLS + 3];
+		const char *part_keys[NCOLS + 4];
 		part_keys[0] = "パート（右クリックで音色）";
 		part_keys[1] = "VEL";
-		for (int i = 0; i < NCOLS; i++) part_keys[2 + i] = COLUMNS[i].title;
-		part_keys[NCOLS + 2] = "##keys";
-		headers_with_help(NCOLS + 3, part_keys);
+		part_keys[2] = "SPEC";
+		for (int i = 0; i < NCOLS; i++) part_keys[3 + i] = COLUMNS[i].title;
+		part_keys[NCOLS + 3] = "##keys";
+		headers_with_help(NCOLS + 4, part_keys);
 
 		for (int part = 0; part < PARTS; part++) {
 			ImGui::TableNextRow(0, h);

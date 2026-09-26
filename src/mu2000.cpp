@@ -112,21 +112,68 @@ void mu2000::set_scope_part(int part)
 		scope_refresh_owner();
 }
 
+void mu2000::set_part_scopes(bool on)
+{
+	if (m_pscope_on.exchange(on, std::memory_order_relaxed) != on && on)
+		scope_refresh_owner();
+}
+
 void mu2000::scope_tap_fn(void *ctx, const s32 *samples)
 {
 	const scope_tap &t = *static_cast<const scope_tap *>(ctx);
 	mu2000 &m = *t.self;
 	const int part = m.m_scope_part.load(std::memory_order_relaxed);
-	if (part < 0)
-		return;
-	float sum = 0.0f;
 	const int base = t.chip * 64;
-	for (int i = 0; i < 64; i++)
-		if (samples[i] && m.m_scope_owner[size_t(base + i)].load(std::memory_order_relaxed) == part)
-			sum += float(samples[i]);
-	const u32 w = m.m_scope_w[size_t(t.chip)].load(std::memory_order_relaxed);
-	m.m_scope_ring[size_t(t.chip)][w & (SCOPE_N - 1)] = sum;
-	m.m_scope_w[size_t(t.chip)].store(w + 1, std::memory_order_release);
+	if (part >= 0) {
+		float sum = 0.0f;
+		for (int i = 0; i < 64; i++)
+			if (samples[i] && m.m_scope_owner[size_t(base + i)].load(std::memory_order_relaxed) == part)
+				sum += float(samples[i]);
+		const u32 w = m.m_scope_w[size_t(t.chip)].load(std::memory_order_relaxed);
+		m.m_scope_ring[size_t(t.chip)][w & (SCOPE_N - 1)] = sum;
+		m.m_scope_w[size_t(t.chip)].store(w + 1, std::memory_order_release);
+	}
+	// 全パート（一覧）。1 サンプルに 64 パートぶんの行を 1 つ
+	if (m.m_pscope_on.load(std::memory_order_relaxed)) {
+		const u32 w = m.m_pscope_w[size_t(t.chip)].load(std::memory_order_relaxed);
+		float *row = m.m_pscope.data() + (size_t(t.chip) * PSCOPE_N + (w & (PSCOPE_N - 1))) * 64;
+		std::fill(row, row + 64, 0.0f);
+		for (int i = 0; i < 64; i++) {
+			if (!samples[i])
+				continue;
+			const int o = m.m_scope_owner[size_t(base + i)].load(std::memory_order_relaxed);
+			if (o >= 0 && o < 64)
+				row[o] += float(samples[i]);
+		}
+		m.m_pscope_w[size_t(t.chip)].store(w + 1, std::memory_order_release);
+	}
+}
+
+void mu2000::part_scope_read(int part, float *out, size_t n) const
+{
+	n = std::min(n, PSCOPE_N);
+	if (part == PSCOPE_OUT) {
+		const u32 end = m_oscope_w.load(std::memory_order_acquire);
+		for (size_t i = 0; i < n; i++) {
+			const u32 k = end - u32(n) + u32(i);
+			out[i] = (end >= n || k < end) ? m_oscope[k & (PSCOPE_N - 1)] : 0.0f;
+		}
+		return;
+	}
+	if (part < 0 || part >= 64) {
+		std::fill(out, out + n, 0.0f);
+		return;
+	}
+	const u32 end = std::min(m_pscope_w[0].load(std::memory_order_acquire), m_pscope_w[1].load(std::memory_order_acquire));
+	for (size_t i = 0; i < n; i++) {
+		const u32 k = end - u32(n) + u32(i);
+		if (end < n && k >= end) {
+			out[i] = 0.0f;
+			continue;
+		}
+		const size_t at = size_t(k & (PSCOPE_N - 1));
+		out[i] = m_pscope[at * 64 + size_t(part)] + m_pscope[(PSCOPE_N + at) * 64 + size_t(part)];
+	}
 }
 
 namespace {
@@ -198,7 +245,7 @@ void mu2000::scope_refresh_owner()
 	constexpr u32 VOICE_STRIDE = 148;
 	for (int v = 0; v < 128; v++) {
 		int owner = -1;
-		if (m_native_engine && v < 64)
+		if (m_native_engine)
 			owner = m_ndrv.slot_part(v);
 		if (owner < 0) {
 			const u32 off = VOICE_TABLE + u32(v) * VOICE_STRIDE;
@@ -1368,20 +1415,25 @@ void mu2000::note_fw_swp(bool master, u32 reg, u16 value)
 	// 普通に走っているので、そのときの 0x00 の書き込みが格子の目にあたる
 	if (master && !m_native_engine && reg < 0x1000 && (reg % 64) == 0)
 		m_ndrv.set_eg_phase(u32(trace_sample()));
-	if (!m_native_engine || !master)
+	if (!m_native_engine)
 		return;
 	// リセットが終わったかを測るのに使う（issue #51。hold_after_reset）
-	m_fw_swp_at = m_ne_clock;
+	if (master)
+		m_fw_swp_at = m_ne_clock;
+	// スレーブの声はスロット 64-127（native_driver の SLOTS）
+	const int chip = master ? 0 : 1;
+	const u32 base = master ? 0 : 64;
+	u64 &keymask = m_fw_keymask[chip];
 	// **firmware が鍵を押した瞬間のマスク**を拾う。これが firmware の
 	// 「このスロットを使う」という宣言なので、以後そこは避ける。
 	// あらゆる書き込みで印を付けると、ほとんどのスロットが firmware の
 	// ものになってしまい、かえってぶつかりが増えた
 	switch (reg) {
-	case 0x18e: m_fw_keymask = (m_fw_keymask & ~(u64(0xffff) << 48)) | (u64(value) << 48); return;
-	case 0x18f: m_fw_keymask = (m_fw_keymask & ~(u64(0xffff) << 32)) | (u64(value) << 32); return;
-	case 0x1ce: m_fw_keymask = (m_fw_keymask & ~(u64(0xffff) << 16)) | (u64(value) << 16); return;
-	case 0x1cf: m_fw_keymask = (m_fw_keymask & ~u64(0xffff)) | value; return;
-	case 0x20e: m_ndrv.mark_fw_slots(m_fw_keymask); return;
+	case 0x18e: keymask = (keymask & ~(u64(0xffff) << 48)) | (u64(value) << 48); return;
+	case 0x18f: keymask = (keymask & ~(u64(0xffff) << 32)) | (u64(value) << 32); return;
+	case 0x1ce: keymask = (keymask & ~(u64(0xffff) << 16)) | (u64(value) << 16); return;
+	case 0x1cf: keymask = (keymask & ~u64(0xffff)) | value; return;
+	case 0x20e: m_ndrv.mark_fw_slots(keymask, int(base)); return;
 	default: break;
 	}
 	if (reg >= 0x1000)
@@ -1390,13 +1442,14 @@ void mu2000::note_fw_swp(bool master, u32 reg, u16 value)
 	// MEG の戻りのミキサは毎サンプル書き替わるので数えない
 	if (rr == 0x0e || rr == 0x0f || (rr >= 0x38 && rr <= 0x3f))
 		return;
-	if ((m_ndrv.slot_mask() >> (reg / 64)) & 1) {
+	const u32 slot = base + reg / 64;
+	if (m_ndrv.slot_mask().test(int(slot))) {
 		m_ne_fw_stomp++;
 		static const bool dbg = std::getenv("SMU2000_STOMP_DEBUG") != nullptr;
 		if (dbg)
-			std::fprintf(stderr, "stomp slot=%u reg=%02x value=%04x\n", reg / 64, rr, value);
+			std::fprintf(stderr, "stomp slot=%u reg=%02x value=%04x\n", slot, rr, value);
 		// そこはもう firmware の音が走っている。二重に書かず、譲って避ける
-		m_ndrv.yield_slot(reg / 64);
+		m_ndrv.yield_slot(slot);
 		return;
 	}
 	// **書いたスロットは firmware のものとして避け続ける**（6.220）。
@@ -1406,7 +1459,7 @@ void mu2000::note_fw_swp(bool master, u32 reg, u16 value)
 	// **いま鳴らしているスロットには印を付けない**（上で返している）。
 	// そこはもう取り合いになっていて、避けても今の音は直らないうえ、
 	// 使える枠だけが減って下のほう（firmware が使う側）へ押し出される
-	m_ndrv.mark_fw_slot(reg / 64);
+	m_ndrv.mark_fw_slot(slot);
 }
 
 // firmware が表示を変えた書き込みから、点滅しているマスを覚える
@@ -1570,17 +1623,22 @@ void mu2000::set_native_engine(int mode)
 		// バスの所で記録されるが、こちらは write16 を直に呼ぶので通らない。
 		// 両方を同じ形で残せば、firmware と native の書き込みを 1 つずつ
 		// 突き合わせられる（"N " が native）
+		// **0x1000 から上はスレーブ**（スロット 64-127。native_driver の SLOTS）
+		const bool slave = reg >= 0x1000;
+		if (slave)
+			reg -= 0x1000;
 		if (m_swp_trace)
-			std::fprintf(m_swp_trace, "N 00800000 %04x %04x  pc=00000000  t=%.6f s=%llu\n",
-			             reg, value, double(trace_sample()) / 44100.0,
+			std::fprintf(m_swp_trace, "N %s %04x %04x  pc=00000000  t=%.6f s=%llu\n",
+			             slave ? "00802000" : "00800000", reg, value, double(trace_sample()) / 44100.0,
 			             (unsigned long long)trace_sample());
-		m_swpm.write16(reg, value);
+		(slave ? m_swps : m_swpm).write16(reg, value);
 	});
 	// **チップの「音程の包絡線が着いた」印**を native の口にも見せる。
 	// 実機の firmware も内部レジスタ 4 の bit14 で同じものを見ている（0x12B81C）
-	m_ndrv.set_peg_peek([this](int chan) { return m_swpm.peg_reached(chan); });
-	m_ndrv.set_slot_peek([this](int chan) { return m_swpm.slot_active(chan); });
-	m_ndrv.set_slot_held([this](int chan) { return !m_swpm.slot_freed(chan); });
+	// スロット 64-127 はスレーブの声 0-63
+	m_ndrv.set_peg_peek([this](int chan) { return (chan < 64 ? m_swpm : m_swps).peg_reached(chan & 63); });
+	m_ndrv.set_slot_peek([this](int chan) { return (chan < 64 ? m_swpm : m_swps).slot_active(chan & 63); });
+	m_ndrv.set_slot_held([this](int chan) { return !(chan < 64 ? m_swpm : m_swps).slot_freed(chan & 63); });
 }
 
 // 音色の 1 音目を firmware に鳴らさせて、スロットに書かれた値を写し取る
@@ -1651,12 +1709,12 @@ void mu2000::native_learn_start(u32 rec)
 				// **firmware がこちらの鳴っているスロットを取ったか**を見る。
 				// firmware は native の使用中を知らないので、声が増えると
 				// 奪い合いになり、写し取りに 2 つの音の値が混ざる
-				if (const u64 clash = m_learn_mask & m_ndrv.slot_mask()) {
+				if (const u64 clash = m_learn_mask & m_ndrv.slot_mask().w[0]) {
 					m_ne_slot_clash++;
 					if (std::getenv("SMU2000_NATIVE_DEBUG"))
 						std::fprintf(stderr, "スロットの奪い合い: firmware=%016llx native=%016llx 重なり=%016llx\n",
 						             (unsigned long long)m_learn_mask,
-						             (unsigned long long)m_ndrv.slot_mask(),
+						             (unsigned long long)m_ndrv.slot_mask().w[0],
 						             (unsigned long long)clash);
 				}
 				m_learn_keyed |= m_learn_mask;
@@ -3060,7 +3118,8 @@ void mu2000::run_sample(s32 &left, s32 &right)
 	if (m_nfx_on && !(++m_nfx_tick & 0x1ff))
 		native_fx_update();
 	// 画面がパートの音を見ているときは、声 → パートを 256 サンプル（6ms）ごとに読み直す
-	if (m_scope_part.load(std::memory_order_relaxed) >= 0 && !(++m_scope_tick & 0xff))
+	if ((m_scope_part.load(std::memory_order_relaxed) >= 0 || m_pscope_on.load(std::memory_order_relaxed)) &&
+	    !(++m_scope_tick & 0xff))
 		scope_refresh_owner();
 
 	// 台数が変わっていたら別スレッドの使い方を見直す（8192 サンプルごと）
@@ -3337,6 +3396,12 @@ void mu2000::run_sample(s32 &left, s32 &right)
 	// スレーブの DAC はどこにも繋がっていない
 	left  = lm;
 	right = rm;
+	// 一覧のマスターのスペクトラム（最終の出力、左右の平均）
+	if (m_pscope_on.load(std::memory_order_relaxed)) {
+		const u32 w = m_oscope_w.load(std::memory_order_relaxed);
+		m_oscope[w & (PSCOPE_N - 1)] = (float(lm) + float(rm)) * 0.5f;
+		m_oscope_w.store(w + 1, std::memory_order_release);
+	}
 }
 
 // ---- 状態の保存と復元
