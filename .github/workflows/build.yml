@@ -5,6 +5,10 @@
 # every commit is: full compilation with -Wformat-security clean, the
 # localization tables (tools/check_texts.py, no ROM needed), and whatever
 # ROM-free test steps exist. Anything needing ROMs stays local.
+#
+# Every job also zips its build output and uploads it as a workflow
+# artifact, one zip per platform, so a given commit's builds can be
+# downloaded straight from the Actions run without rebuilding.
 
 name: build
 
@@ -23,6 +27,17 @@ jobs:
       - run: make auv3 AUV3_ROMS=none clap
       - run: python3 tools/check_texts.py
       - run: make test
+      - name: Zip build output
+        run: |
+          mkdir -p artifact-staging
+          zip -r artifact-staging/macos-build.zip . \
+            -x '.git/*' -x 'artifact-staging/*'
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-build
+          path: artifact-staging/macos-build.zip
+          if-no-files-found: error
 
   linux:
     runs-on: ubuntu-latest
@@ -63,6 +78,17 @@ jobs:
           export PKG_CONFIG_PATH="$HOME/sdl3/lib/pkgconfig:$HOME/sdl3/lib/x86_64-linux-gnu/pkgconfig"
           export LD_LIBRARY_PATH="$HOME/sdl3/lib:$HOME/sdl3/lib/x86_64-linux-gnu"
           SDL_VIDEODRIVER=dummy make test
+      - name: Zip build output
+        run: |
+          mkdir -p artifact-staging
+          zip -r artifact-staging/linux-build.zip . \
+            -x '.git/*' -x 'artifact-staging/*'
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-build
+          path: artifact-staging/linux-build.zip
+          if-no-files-found: error
 
   windows:
     # The owner's own setup (MSYS2 mingw64): native build, texts, and the
@@ -77,10 +103,21 @@ jobs:
         with:
           msystem: mingw64
           update: true
-          install: mingw-w64-x86_64-toolchain mingw-w64-x86_64-make mingw-w64-x86_64-python make
+          install: mingw-w64-x86_64-toolchain mingw-w64-x86_64-make mingw-w64-x86_64-python make zip
       - run: make -j$(nproc) all
       - run: python3 tools/check_texts.py
       - run: make test
+      - name: Zip build output
+        run: |
+          mkdir -p artifact-staging
+          zip -r artifact-staging/windows-build.zip . \
+            -x '.git/*' -x 'artifact-staging/*'
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-build
+          path: artifact-staging/windows-build.zip
+          if-no-files-found: error
 
   readme:
     # **README は英語が表**（README.md）で、日本語が README.ja.md。
@@ -124,5 +161,16 @@ jobs:
         with:
           msystem: mingw32
           update: true
-          install: mingw-w64-i686-toolchain mingw-w64-i686-make mingw-w64-i686-python make
+          install: mingw-w64-i686-toolchain mingw-w64-i686-make mingw-w64-i686-python make zip
       - run: make -j$(nproc) all
+      - name: Zip build output
+        run: |
+          mkdir -p artifact-staging
+          zip -r artifact-staging/windows-32bit-build.zip . \
+            -x '.git/*' -x 'artifact-staging/*'
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-32bit-build
+          path: artifact-staging/windows-32bit-build.zip
+          if-no-files-found: error
