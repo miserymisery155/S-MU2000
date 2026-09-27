@@ -11,7 +11,7 @@ Contents
 1. [What you need](#1-what-you-need)
 2. [Preparing the ROMs](#2-preparing-the-roms)
 3. [Building](#3-building)
-4. [Standalone (gui.exe)](#4-standalone-guiexe)
+4. [Standalone (`gui`)](#4-standalone-gui)
 5. [The front panel](#5-the-front-panel)
 6. [PC editor windows](#6-pc-editor-windows)
 7. [Using it in a DAW (VST3, CLAP, AU)](#7-using-it-in-a-daw-vst3-clap-au)
@@ -25,7 +25,7 @@ Contents
 | Item | Notes |
 |---|---|
 | An MU2000 | Needed to extract the ROMs. **ROMs are not distributed**; you take them from your own unit |
-| A PC | Windows (x86-64) or macOS (Apple silicon). The whole MU2000 is emulated, so it uses real CPU (about 21% of real time on a 16-part song, Ryzen 7 9700X). **That share is machine-dependent** — it scales with single-core speed, so an older machine can be 2-3× that |
+| A PC | Windows (x86-64), macOS (Apple silicon) or Linux. The whole MU2000 is emulated, so it uses real CPU (about 21% of real time on a 16-part song, Ryzen 7 9700X). **That share is machine-dependent** — it scales with single-core speed, so an older machine can be 2-3× that |
 | A USB cable | For extracting the wave ROM (no MIDI interface needed) |
 | A virtual MIDI cable | To drive the standalone app from a sequencer. On Windows, loopMIDI ([domino.md](domino.md)) |
 
@@ -53,32 +53,80 @@ roms/
 
 ## 3. Building
 
-Windows uses g++ and make from the MSYS2 MINGW64 environment; macOS uses Apple clang++ and make (C++20).
-Linux builds too, but for now only the tools that need no window ([linux.md](linux.md)).
+C++20 is required on all platforms.
+
+### Windows
+
+Use g++ and make from the MSYS2 MINGW64 environment.
+[You can download MSYS2 here.](https://www.msys2.org/)
+
+Once installed, open the `MSYS2 MINGW64` application and type
 
 ```bash
 make
 ```
 
-This produces, in `build/`:
+This builds the executables located in `build/`:
 
 | Output | What it is |
 |---|---|
 | `build/gui.exe` | The standalone app with a hardware-style panel (the one you will use most) |
 | `build/S-MU2000.vst3/` | VST3 plugin |
-| `build/S-MU2000.clap` | CLAP plugin (Windows) |
+| `build/S-MU2000.clap` | CLAP plugin |
 | `build/live.exe` | Plays incoming MIDI without a window |
 | `build/render.exe` | Renders a MIDI file to WAV (**Standard MIDI Files only**, format 0 and 1; convert RCP/XWS to SMF first) |
 
 The Windows executables do not depend on MSYS2 DLLs, so they run from plain PowerShell or Explorer.
+
+### Linux
+
+The standalone `gui`, the VST3 and the CLAP all build on Linux. Install the dependencies first —
+on Debian/Ubuntu:
+
+```bash
+sudo apt install build-essential libasound2-dev libcairo2-dev libfontconfig-dev libsdl3-dev
+```
+
+on Arch:
+
+```bash
+sudo pacman -Sy base-devel alsa-lib cairo fontconfig sdl3
+```
+
+then:
+
+```bash
+make -j$(nproc)
+```
+
+This produces, in `build-linux/` (a separate directory, so object files never mix with a Windows
+build in a shared tree):
+
+| Output | What it is |
+|---|---|
+| `build-linux/gui` | The standalone app with a hardware-style panel (SDL3 window; F2/F3 open the PC windows) |
+| `build-linux/S-MU2000.vst3/` | VST3 plugin |
+| `build-linux/S-MU2000.clap` | CLAP plugin |
+| `build-linux/live` | Plays incoming MIDI without a window (ALSA) |
+| `build-linux/render` | Renders a MIDI file to WAV (same SMF-only note as above) |
+
+Start it with `build-linux/gui roms`. Details: [linux.md](linux.md) (Japanese).
+
+### macOS
+
+Use Apple clang++ and make. `make` builds the tools plus both plugin bundles in `build/`
+(`gui`, `live`, `render`, `S-MU2000.vst3/`, `S-MU2000.component/`).
+
 macOS differences: [porting-macos.md](porting-macos.md).
 
-## 4. Standalone (gui.exe)
+## 4. Standalone (`gui`)
 
 ### Starting
 
 ```bash
-build/gui.exe C:\path\to\roms
+build/gui.exe C:\path\to\roms   # Windows
+build-linux/gui roms             # Linux
+build/gui roms                   # macOS
 ```
 
 After a few seconds the LCD shows the play screen (e.g. `◀000▶001 GrandP #01`), just like powering on the hardware.
@@ -99,10 +147,12 @@ After a few seconds the LCD shows the play screen (e.g. `◀000▶001 GrandP #01
 
 To play from a sequencer such as Domino, create a port in loopMIDI and select it on both sides
 ([domino.md](domino.md)). Ports are remembered **by name**, so you only choose them once.
+On Linux the app creates one ALSA sequencer port (`S-MU2000`); wire it up from the terminal
+with `aconnect` (details: [linux.md](linux.md), Japanese).
 
 ### Audio output and latency
 
-Choose the output device at startup with `--audio "part of the name"` (list names with `build/gui.exe --list`).
+Choose the output device at startup with `--audio "part of the name"` (list names with `--list`).
 It is remembered afterwards.
 
 | Option | Effect |
@@ -111,7 +161,9 @@ It is remembered afterwards.
 | `--latency 10` | Buffer length in milliseconds. Increase it if audio drops out |
 
 Setting the audio interface to 44100Hz with a 256-sample buffer avoids resampling and extra delay.
-Details: [README, 待ち時間 (latency)](../README.md#latency).
+On Linux `--exclusive` has no effect (ALSA has no exclusive mode); pick the device with `--audio`
+(default: `default`).
+Details: [README, Latency](../README.md#latency).
 
 ### Playing MIDI files
 
@@ -151,7 +203,7 @@ It works like the real front panel; the LCD shows exactly what the firmware writ
 SmartMedia cards are PC files (`.img`); `tools/smcard.py` copies WAV files in and out.
 **Sampling — recording through A/D INPUT and playing it back over MIDI — is walked through in [sampling.md](sampling.md)** (Japanese).
 The panel artwork (positions, colours, SVG art) can be changed without rebuilding ([panel-editing.md](panel-editing.md)).
-More about the screens: [gui.md](gui.md).
+More about the screens: [gui.en.md](gui.en.md).
 
 ## 6. PC editor windows
 
@@ -196,8 +248,8 @@ Tick "説明を出す" (show help) at the top to get a description of the hovere
 
 ## 7. Using it in a DAW (VST3, CLAP, AU)
 
-The engine is the same as gui.exe, and so is **the screen** (right-click the panel to open the list and other windows).
-Details: [vst3.md](vst3.md).
+The engine is the same as the standalone app, and so is **the screen** (right-click the panel to open the list and other windows).
+Details: [vst3.en.md](vst3.en.md).
 
 ### Installing
 
@@ -209,12 +261,13 @@ make install-vst3
 make install-clap
 ```
 
-| Format | Location (Windows) |
-|---|---|
-| VST3 | `%LOCALAPPDATA%\Programs\Common\VST3` (current user) or `C:\Program Files\Common Files\VST3` (all users) |
-| CLAP | `%LOCALAPPDATA%\Programs\Common\CLAP` or `C:\Program Files\Common Files\CLAP` |
+| Format | Windows | Linux |
+|---|---|---|
+| VST3 | `%LOCALAPPDATA%\Programs\Common\VST3` (current user) or `C:\Program Files\Common Files\VST3` (all users) | `~/.vst3` |
+| CLAP | `%LOCALAPPDATA%\Programs\Common\CLAP` or `C:\Program Files\Common Files\CLAP` | `~/.clap` |
 
-On macOS the VST3 goes to `~/Library/Audio/Plug-Ins/VST3`; build the Audio Unit with `make au`.
+On macOS the VST3 goes to `~/Library/Audio/Plug-Ins/VST3`; build the Audio Unit with `make au`
+(installed to `~/Library/Audio/Plug-Ins/Components`).
 
 ### Telling the plugin where the ROMs are
 
@@ -229,7 +282,8 @@ The ROMs are 36MB, so instead of copying them, put a **`roms.txt` containing the
 C:\path\to\roms
 ```
 
-The environment variable `S_MU2000_ROMS` also works.
+The environment variable `S_MU2000_ROMS` also works. On Linux, `~/.local/share/S-MU2000/roms.txt`
+is also searched (for installs under `~/.vst3` / `~/.clap`).
 
 ### After inserting
 
@@ -261,6 +315,7 @@ Takes effect when the plugin is loaded again.
 ## 8. Where settings are stored
 
 Windows: `%LOCALAPPDATA%\S-MU2000\`. macOS: `~/Library/Application Support/S-MU2000/`.
+Linux: `$XDG_DATA_HOME/S-MU2000/` (or `~/.local/share/S-MU2000/`).
 
 | File | Contents |
 |---|---|
@@ -279,7 +334,7 @@ Windows: `%LOCALAPPDATA%\S-MU2000\`. macOS: `~/Library/Application Support/S-MU2
 | The plugin makes no sound | The `Status` parameter and `log.txt`. `No ROM` means check the path in `roms.txt` |
 | No sound right after inserting | Boot wait (a few seconds), same as the hardware |
 | Every voice in a song becomes piano | Voice selections arrived before boot finished. Wait for boot before playing |
-| Parts 33-64 are silent | Make sure it started with USB ports (gui.exe without `--host-midi`; no `usb=0` in plugin.ini) |
+| Parts 33-64 are silent | Make sure it started with USB ports (the standalone app without `--host-midi`; no `usb=0` in plugin.ini) |
 | "MIDI が多すぎるので捨てた" (too much MIDI, dropped) | A MIDI loop between the DAW and loopMIDI. Check THRU routing |
 | A port won't open / startup seems stuck | loopMIDI or a driver is hung. Restart loopMIDI or replug the device |
 | Audio drops out | Increase `--latency`. Check the interface buffer and sample rate (44100Hz) |

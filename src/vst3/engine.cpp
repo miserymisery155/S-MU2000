@@ -549,6 +549,12 @@ void engine::midi(const uint8_t *bytes, size_t n, int port)
 	if (s == status::ready) {
 		std::unique_lock<std::mutex> lock(m_machine, std::try_to_lock);
 		if (lock.owns_lock()) {
+			// **預かっている状態があれば、MIDI より先に戻す**（issue #51）。
+			// VST2 の setChunk は起動を待たないので、起動中に戻された状態は
+			// 最初の fill() の頭で戻していた。ところが起動が済んでから届いた MIDI は
+			// fill() より先にここで流れるので、曲頭のリセットと音色の指定のあとに
+			// 状態が丸ごと戻り、音色が消えていた（冷えた起動のときだけ）
+			apply_deferred_state();
 			// 溜まっていた分を先に流して、順番を保つ
 			for (uint8_t b : m_pending[port])
 				m_drv.watch(b, m_mu->midi_in(b, port));

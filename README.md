@@ -4,6 +4,8 @@
 
 A software tone generator modeled on the Yamaha MU2000, designed to be played as a plug-in inside a DAW.
 
+![Screenshot](doc/mu_screenshot.png)
+
 **Current state: runs as VST3 / CLAP (Windows) and VST3 / Audio Unit (macOS), with a hardware-style front-panel screen plus a mouse-and-keyboard editor.**
 
 This project is developed in the open, work-in-progress and all. On X, follow `#S_MU2000`.
@@ -93,14 +95,22 @@ Place the following in the `rom` directory:
 A spare MIDI-based path also exists, and dumps from both paths have been verified
 byte-identical.
 
-## Usage
+## Getting Started
 
-**First-time users: see [doc/manual.md](doc/manual.md)** (what you need → build → play →
-screens → DAW walkthrough. English: [doc/manual.en.md](doc/manual.en.md)).
+See [doc/manual.en.md](doc/manual.en.md).
+Japanese: [doc/manual.md](doc/manual.md)
+
+It explains:
+- What you need.
+- How to build the project.
+- How to play some songs.
+- How to use the GUI.
+- How to set it up with a DAW.
+
+
+### Command Syntax
 
 ```
-make
-
 build/gui.exe    <rom directory> [--midi number] [--midi-b/-c/-d number]  Play with a hardware-style panel
                  [--host-midi]                      Receive on DIN ports (A and B only) instead of USB
                  [--play song.mid]                  Play a MIDI file
@@ -125,6 +135,8 @@ build/rec.exe    --list                             List audio inputs
 build/rec.exe    <number> <wav> <sec> [--send <number> <MIDI>]  Record the real hardware
 ```
 
+### Tips
+
 **To play it from an external sequencer such as Domino, see
 [doc/domino.md](doc/domino.md).** All you need is one virtual MIDI cable (loopMIDI).
 `gui.exe` lets you pick inputs and outputs **while running, from the screen** —
@@ -141,7 +153,7 @@ lives there too (on the hardware it is an analog knob, outside firmware RAM).
 
 Besides the panel there are mouse-and-keyboard windows (list, editor, insertion setup,
 part voices; F2 / F3 or right-click. [doc/pc-editor.md](doc/pc-editor.md)).
-The SmartMedia slot and sampling A/D INPUT also work ([doc/gui.md](doc/gui.md)).
+The SmartMedia slot and sampling A/D INPUT also work ([doc/gui.en.md](doc/gui.en.md)).
 MIDI files can be dropped onto the window or played with `--play`.
 
 **MU2000 settings survive a power cycle.** The same battery-backed RAM as the real hardware is
@@ -152,7 +164,7 @@ this area: when inserted, they start from settings made in gui / live (changes m
 plug-in stay in the DAW project). To restore factory state, start with `--factory`, right-click
 the `gui` window and choose factory reset, or just delete the files.
 
-Screen contents are described in [doc/gui.md](doc/gui.md). There are 3 faces.
+Screen contents are described in [doc/gui.en.md](doc/gui.en.md). There are 3 faces.
 **The panel artwork can be fixed without redrawing** — positions and colors are factored out
 into a text file, `panel.txt` ([doc/panel-editing.md](doc/panel-editing.md)).
 
@@ -169,9 +181,9 @@ its own, so it never drifts against external sync (this is where MAME fell apart
 **Output is opened in whatever format the device reports.** On hardware reporting 48000 Hz,
 conversion from 44100 is done with our own sinc resampler (never through the Windows converter).
 
-## Using it in a DAW
+### Using it in a DAW
 
-Build steps and ROM placement: [doc/vst3.md](doc/vst3.md). Per-DAW notes:
+Build steps and ROM placement: [doc/vst3.en.md](doc/vst3.en.md). Per-DAW notes:
 [doc/reason.md](doc/reason.md) (Reason), [doc/sonar.md](doc/sonar.md) (Cakewalk Sonar).
 
 **VST3.** Installed in `%LOCALAPPDATA%\Programs\Common\VST3` (per-user) or
@@ -287,6 +299,8 @@ test song `dense` in 512-frame blocks averages 2.5 ms with a 7.2 ms worst case
 (2026-09-17, Ryzen 7 9700X).
 
 ## Building
+
+Also consider reading [doc/manual.en.md](doc/manual.en.md).
 
 Windows expects MSYS2 / MinGW-w64 g++, macOS expects Apple clang++, Linux expects g++.
 C++20 is required. `make test` runs the regression tests ([doc/testing.md](doc/testing.md)).

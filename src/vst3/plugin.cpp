@@ -405,17 +405,20 @@ public:
 			              a[0].load(std::memory_order_relaxed), a[1].load(std::memory_order_relaxed),
 			              a[2].load(std::memory_order_relaxed), a[3].load(std::memory_order_relaxed));
 		};
-		char a[96], b[96], c[96], d[96], e[96];
+		char a[96], b[96], c[96], d[96], e[96], f[96], g[96];
+		four(m_got_on, f, sizeof(f));
+		four(m_got_off, g, sizeof(g));
 		four(m_q_ctrl, a, sizeof(a));
 		four(m_q_unit, b, sizeof(b));
 		four(m_got_cc, c, sizeof(c));
 		four(m_got_pc, d, sizeof(d));
 		four(m_got_ev, e, sizeof(e));
-		char line2[640];
+		char line2[900];
 		std::snprintf(line2, sizeof(line2),
 		              "口ごとの内訳: CC の対応の問い合わせ [%s]、音色のユニットの問い合わせ [%s]、"
-		              "届いた CC 等 [%s]、届いたプログラムチェンジ [%s]、届いたイベント（ノート等） [%s]",
-		              a, b, c, d, e);
+		              "届いた CC 等 [%s]、届いたプログラムチェンジ [%s]、届いたイベント（ノート等） [%s]、"
+		              "うちノートオン [%s]、ノートオフ [%s]",
+		              a, b, c, d, e, f, g);
 		m_engine.log_line(line2);
 	}
 
@@ -997,6 +1000,9 @@ private:
 	// （どちらも本スレッド）、got_* は届いたもの（音声の糸）
 	std::atomic<uint32_t> m_q_ctrl[kPorts] = {}, m_q_unit[kPorts] = {};
 	std::atomic<uint32_t> m_got_cc[kPorts] = {}, m_got_pc[kPorts] = {}, m_got_ev[kPorts] = {};
+	// ノートオン・ノートオフ（ベロシティ 0 のノートオンを含む）。数が合わなければ、
+	// ホストから届く前に離しが落ちている
+	std::atomic<uint32_t> m_got_on[kPorts] = {}, m_got_off[kPorts] = {};
 	IComponentHandler    *m_handler = nullptr;
 	double                m_rate = smu2000::vst3::NATIVE_RATE;
 	double                m_value[kPorts * kMidiParams] = {};
@@ -1116,12 +1122,14 @@ tresult PLUGIN_API mu_plugin::process(ProcessData &data)
 			m_got_ev[port].fetch_add(1, std::memory_order_relaxed);
 			switch (e.type) {
 			case Event::kNoteOnEvent: {
+				(e.noteOn.velocity > 0.0f ? m_got_on : m_got_off)[port].fetch_add(1, std::memory_order_relaxed);
 				const int v = std::clamp(int(std::lround(e.noteOn.velocity * 127.0)), 1, 127);
 				queue(port, off, uint8(0x90 | (e.noteOn.channel & 15)),
 				      uint8(e.noteOn.pitch & 127), uint8(v));
 				break;
 			}
 			case Event::kNoteOffEvent: {
+				m_got_off[port].fetch_add(1, std::memory_order_relaxed);
 				const int v = std::clamp(int(std::lround(e.noteOff.velocity * 127.0)), 0, 127);
 				queue(port, off, uint8(0x80 | (e.noteOff.channel & 15)),
 				      uint8(e.noteOff.pitch & 127), uint8(v));
