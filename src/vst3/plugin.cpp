@@ -399,6 +399,24 @@ public:
 			m_engine.log_line(line);
 		}
 		m_busy_ticks = m_produced = m_worst_ticks = m_late = m_dropped = 0;
+		// 口ごとの内訳（A B C D）
+		auto four = [](const std::atomic<uint32_t> *a, char *out, size_t n) {
+			std::snprintf(out, n, "A %u / B %u / C %u / D %u",
+			              a[0].load(std::memory_order_relaxed), a[1].load(std::memory_order_relaxed),
+			              a[2].load(std::memory_order_relaxed), a[3].load(std::memory_order_relaxed));
+		};
+		char a[96], b[96], c[96], d[96], e[96];
+		four(m_q_ctrl, a, sizeof(a));
+		four(m_q_unit, b, sizeof(b));
+		four(m_got_cc, c, sizeof(c));
+		four(m_got_pc, d, sizeof(d));
+		four(m_got_ev, e, sizeof(e));
+		char line2[640];
+		std::snprintf(line2, sizeof(line2),
+		              "口ごとの内訳: CC の対応の問い合わせ [%s]、音色のユニットの問い合わせ [%s]、"
+		              "届いた CC 等 [%s]、届いたプログラムチェンジ [%s]、届いたイベント（ノート等） [%s]",
+		              a, b, c, d, e);
+		m_engine.log_line(line2);
 	}
 
 	tresult PLUGIN_API setState(IBStream *stream) override
@@ -771,6 +789,7 @@ public:
 			return kResultFalse;
 		if (ctrl < 0 || ctrl >= kCtrlCount)
 			return kResultFalse;
+		m_q_ctrl[busIndex].fetch_add(1, std::memory_order_relaxed);
 		id = param_of(busIndex, channel, ctrl);
 		return kResultTrue;
 	}
@@ -858,6 +877,7 @@ public:
 		if (type != kEvent || dir != kInput || busIndex < 0 || busIndex >= kPorts ||
 		    channel < 0 || channel >= kChannels)
 			return kResultFalse;
+		m_q_unit[busIndex].fetch_add(1, std::memory_order_relaxed);
 		unitId = unit_of(busIndex, channel);
 		return kResultTrue;
 	}
@@ -971,6 +991,12 @@ private:
 	smu2000::vst3::engine m_engine;
 	autom::host           m_xg{m_engine};
 	std::vector<msg>      m_msgs;
+	// **口ごとの内訳**（report でログへ）。ホストが複数の口を正しく使っているかを見る。
+	// SONAR で口 B のプログラムチェンジが口 A に届いた件の調べ用。
+	// [口]。q_ctrl は CC の対応の問い合わせ、q_unit はプログラムチェンジのユニットの問い合わせ
+	// （どちらも本スレッド）、got_* は届いたもの（音声の糸）
+	std::atomic<uint32_t> m_q_ctrl[kPorts] = {}, m_q_unit[kPorts] = {};
+	std::atomic<uint32_t> m_got_cc[kPorts] = {}, m_got_pc[kPorts] = {}, m_got_ev[kPorts] = {};
 	IComponentHandler    *m_handler = nullptr;
 	double                m_rate = smu2000::vst3::NATIVE_RATE;
 	double                m_value[kPorts * kMidiParams] = {};
@@ -1051,6 +1077,7 @@ tresult PLUGIN_API mu_plugin::process(ProcessData &data)
 			if (!midi_param(id, port, ch, ctrl, slot))
 				continue;
 			const int32 np = pq->getPointCount();
+			(ctrl == 130 ? m_got_pc : m_got_cc)[port].fetch_add(uint32_t(np), std::memory_order_relaxed);
 			for (int32 p = 0; p < np; p++) {
 				int32 off = 0;
 				ParamValue v = 0.0;
@@ -1086,6 +1113,7 @@ tresult PLUGIN_API mu_plugin::process(ProcessData &data)
 				continue;
 			const int32 off = e.sampleOffset;
 			const int32 port = (e.busIndex >= 0 && e.busIndex < kPorts) ? e.busIndex : 0;
+			m_got_ev[port].fetch_add(1, std::memory_order_relaxed);
 			switch (e.type) {
 			case Event::kNoteOnEvent: {
 				const int v = std::clamp(int(std::lround(e.noteOn.velocity * 127.0)), 1, 127);

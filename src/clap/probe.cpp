@@ -373,7 +373,7 @@ int main(int argc, char **argv)
 		return rc;
 	}
 	if (argc < 4) {
-		std::fprintf(stderr, "使い方: clapprobe <S-MU2000.clap> <MIDI> <出力 wav> [--rate 48000] [--block 512] [--adc-silence] [--sysex-last]\n");
+		std::fprintf(stderr, "使い方: clapprobe <S-MU2000.clap> <MIDI> <出力 wav> [--rate 48000] [--block 512] [--adc-silence] [--sysex-last] [--broadcast]\n");
 		return 1;
 	}
 	const std::string dll = argv[1], mid = argv[2], wav = argv[3];
@@ -386,6 +386,8 @@ int main(int argc, char **argv)
 	// ように SysEx を別に渡すホストのまね）。時刻は変えない。プラグインは同じ時刻の
 	// リセットを先に流すので、曲頭の「XG System On → 音色の指定」が崩れないはず
 	bool sysex_last = false;
+	// どのイベントも 4 つの口すべてへ同じものを配る（issue #59。REAPER のまね）
+	bool broadcast = false;
 	for (int i = 4; i < argc; i++) {
 		if (!std::strcmp(argv[i], "--rate") && i + 1 < argc) rate = std::atof(argv[++i]);
 		else if (!std::strcmp(argv[i], "--block") && i + 1 < argc) block = std::atoi(argv[++i]);
@@ -393,6 +395,7 @@ int main(int argc, char **argv)
 		else if (!std::strcmp(argv[i], "--adc-silence")) adc = true;
 		else if (!std::strcmp(argv[i], "--clap-notes")) clap_notes = true;
 		else if (!std::strcmp(argv[i], "--sysex-last")) sysex_last = true;
+		else if (!std::strcmp(argv[i], "--broadcast")) broadcast = true;
 	}
 
 #if defined(_WIN32)
@@ -447,7 +450,8 @@ int main(int argc, char **argv)
 			if (e.bytes.empty())
 				continue;
 			const uint32_t off = uint32_t(std::clamp<int64_t>(int64_t(e.time * rate) - pos, 0, int64_t(n) - 1));
-			const uint16_t port = uint16_t(e.port < 4 ? e.port : 3);
+			for (int copy = 0; copy < (broadcast ? 4 : 1); copy++) {
+			const uint16_t port = broadcast ? uint16_t(copy) : uint16_t(e.port < 4 ? e.port : 3);
 			if (e.bytes[0] == 0xf0) {
 				clap_event_midi_sysex_t s{};
 				s.header = { sizeof(s), off, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_MIDI_SYSEX, 0 };
@@ -475,6 +479,7 @@ int main(int argc, char **argv)
 					m.data[k] = e.bytes[k];
 				ev.arrival.push_back({ 0, ev.midi.size() });
 				ev.midi.push_back(m);
+			}
 			}
 		}
 		// 時刻順に並べる（同じ時刻なら来た順）。vector が伸び終わってから指す
