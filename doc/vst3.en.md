@@ -69,6 +69,8 @@ powering on the hardware.
 
 ## Clean-up on stop
 
+(See also "When a saved state is restored" at the end of this section.)
+
 When the host stops playback (`setProcessing(false)`, or `stop_processing` in
 CLAP), All Sound Off and All Note Off are sent at the start of the next
 block so that nothing is left ringing.
@@ -136,6 +138,34 @@ takes effect on re-insertion, and one line appears in log.txt when it does.
 time at the port's speed, so controllers placed at the same position as a
 note always arrive slightly before it there. Leave the setting off (the
 default) if you want that behaviour reproduced.
+
+
+### When a saved state is restored (2026-09-27)
+
+A state the host saved (a project, or a VST2 `.set`) includes the voices that
+were sounding at the time. If the host is closed while a song is playing, those
+notes ring forever the next time it opens, since their note-offs never come
+([issue #51](https://github.com/tarboh/S-MU2000/issues/51)). So after a state is
+restored, **All Sound Off and All Notes Off are sent to every channel on every
+port**. The settings stay restored and only the voices stop. The firmware reads
+these messages itself, so its record of held notes is cleared too. A reverb
+tail from the saved moment fades out within about a second.
+
+Unlike the stop case above this goes to every channel, but a state is normally
+restored before playback, so it does not delay the first note. Even when a song
+starts right after the restore, as with vstmididrv, it costs about 10 ms on the
+USB ports, far less than the wait after the song's reset (about 200 ms).
+
+To ignore whatever state the host restores and always start fresh, add this line
+to `plugin.ini` (a line in the log says it took effect):
+
+```
+load_state=0
+```
+
+With vst3probe `--state`, restoring a state saved while a note with no note-off
+was sounding: before the change it kept ringing for all 3 seconds (mean 1177),
+after it fades within 1.2 s (mean 12), and with `load_state=0` it is silent.
 
 ## Threads
 

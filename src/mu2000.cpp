@@ -2575,9 +2575,24 @@ void mu2000::native_sysex(u64 fire)
 		hold_after_reset(fire);
 		return;
 	}
-	// **ドラムのセットアップは SysEx（3n rr pp）では渡さない**（6.180）。
-	// 実機は SysEx で書いても立ち上がりを計算し直さない。
-	// NRPN 16 で書いたときだけ変わる（native_driver の control で見ている）
+	// ドラムのセットアップのリセット（00 00 7D nn）。その組だけ既定に戻る
+	if (hh == 0x00 && mm == 0x00 && ll == 0x7d) {
+		m_nq.push_back({ fire, 8, u8(m_sx[6] & 0x7f), 0, 0 });
+		return;
+	}
+	// **ドラムのセットアップ（3n rr pp）も渡す**。実機は SysEx で書いても
+	// 切る高さ・共振・EG・EQ・HPF を次の打から変える（2026-09-28 に firmware で
+	// 確かめた。6.180 の「SysEx では計算し直さない」は番号の取り違えから出た誤り）。
+	// 組と並びの番号を 1 バイトに詰める（組 2bit、番号 5bit）
+	if (hh >= 0x30 && hh <= 0x33) {
+		const int n = m_sx_pos - 6;
+		for (int i = 0; i < n && i + 6 < int(sizeof(m_sx)); i++) {
+			const int idx = xg::ram::drum_setup_index(ll + i);
+			if (idx >= 0)
+				m_nq.push_back({ fire, 7, u8((hh - 0x30) | (idx << 2)), mm, u8(m_sx[6 + i] & 0x7f) });
+		}
+		return;
+	}
 	if (hh != 0x08 || mm >= 32)
 		return;
 	// **1 回の SysEx で続けて何バイトも書ける**（ll から順に並ぶ）
@@ -2638,6 +2653,8 @@ void mu2000::native_pump()
 						m_prog_sel[e.part].lsb = e.d1;
 				} else {
 					m_prog_sel[e.part].prog = e.d1;
+					// ドラムのパートなら、その組のセットアップが既定に戻る
+					m_ndrv.drum_program(e.part);
 				}
 				native_select_voice(e.part);
 			}
@@ -2666,6 +2683,15 @@ void mu2000::native_pump()
 			// 口が持っている記録（`set_record`）が古いままになる
 			for (int p = 0; p < 64; p++)
 				native_select_voice(p);
+			break;
+		// ドラムのセットアップを書いた（3n rr pp）。part に組と並びの番号が詰めてある
+		case 7:
+			m_ndrv.mark_drum_setup_index(e.part & 3, e.d0, e.part >> 2, e.d1);
+			break;
+		// ドラムのセットアップのリセット（00 00 7D nn）
+		case 8:
+			if (e.part < xg::ram::DRUM_SETUP_SETS)
+				m_ndrv.clear_drum_setup(e.part);
 			break;
 		default: break;
 		}
@@ -2948,7 +2974,13 @@ bool mu2000::native_midi(u8 byte, int port)
 	// 切れていた（実機は 110 段・1.1 秒かけてフィルタを閉じる）。
 	// 録り終わるまで待つぶん、その音色が native になるのは遅れるが、
 	// その間は firmware が鳴らすので音は正しい
-	if ((rec || drum) && !m_learning && !m_ndrv.delegated(part)) {
+	// **パートモード「DRUM」（番号なし）の打は写し取らない**。ドラムセットアップの
+	// 編集が効かないキットの既定値で鳴るので、それを覚えると、同じ鍵を DRUMS1-4 の
+	// パートで鳴らしたときに編集が効かなくなる（覚えた値は鍵で引くため）
+	const bool plain_drum = part >= 0 && part < 64 &&
+	                        size_t(xg::ram::part_base(part) + 0x07) < m_ram.size() &&
+	                        m_ram[xg::ram::part_base(part) + 0x07] == 1;
+	if ((rec || drum) && !m_learning && !m_ndrv.delegated(part) && !plain_drum) {
 		m_learn_note = note;
 		m_learn_vel = vel;
 		m_learn_drum = drum ? m_ndrv.drum_key(part, note) : 0;

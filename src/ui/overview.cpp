@@ -2482,6 +2482,438 @@ void overview::env_cell(int part, xg::model &m, bridge &br, float w, float h)
 	ImGui::PopID();
 }
 
+// ---- ドラムの 1 打（音色の窓のドラムのタブ）
+namespace {
+
+// ドラムの打のフェーダー（fader_row のドラム版）。idx はワーク RAM の並びの番号（xgui::drum_params）。
+// 値は xgui::drum_value、書くのは drum_write（ドラッグの間は間引く）。戻り値はカーソルが載っているか
+// つまんでいるフェーダー（無ければ -1）
+int drum_fader_row(const int *idx, int n, int group_after, int set, int key, bridge &br,
+                   ImVec2 a, ImVec2 b, bool hovered, bool active, ImGuiID id, int *vals,
+                   ImU32 col_first = 0, ImU32 col_second = 0)
+{
+	ImGuiIO &io = ImGui::GetIO();
+	const float fs = ImGui::GetFontSize();
+	ImDrawList *dl = ImGui::GetWindowDrawList();
+	const drum_param *dp = drum_params();
+	const float gfs = fs * 0.6f;
+	const float gap = fs * 0.5f, group = fs * 1.4f;
+	const float room = b.x - a.x - gap * float(n - 1) - (group_after >= 0 ? group - gap : 0.0f);
+	const float fw = std::clamp(room / float(n), fs * 1.0f, fs * 1.8f);
+	const float total = fw * float(n) + gap * float(n - 1) + (group_after >= 0 ? group - gap : 0.0f);
+	std::vector<float> fx0(static_cast<size_t>(n));
+	{
+		float x = a.x + std::max(0.0f, (b.x - a.x - total) * 0.5f);
+		for (int i = 0; i < n; i++) {
+			fx0[size_t(i)] = x;
+			x += fw + (i == group_after ? group : gap);
+		}
+	}
+	const float ftop = a.y + gfs * 2.4f, fbot = b.y;
+	const float cap_h = std::max(6.0f, fs * 0.55f);
+	auto fader_at = [&](ImVec2 p) {
+		if (p.y < a.y || p.y > b.y)
+			return -1;
+		for (int i = 0; i < n; i++)
+			if (p.x >= fx0[size_t(i)] - gap * 0.5f && p.x <= fx0[size_t(i)] + fw + gap * 0.5f)
+				return i;
+		return -1;
+	};
+	auto value_at = [&](float y, const drum_param &d) {
+		const float lo = ftop + cap_h * 0.5f, hi = fbot - cap_h * 0.5f;
+		return std::clamp(d.lo + int(std::lround((hi - y) / std::max(1.0f, hi - lo) * float(d.hi - d.lo))), d.lo, d.hi);
+	};
+	const int over = hovered ? fader_at(io.MousePos) : -1;
+	if (over >= 0) {
+		ImGui::SetItemKeyOwner(ImGuiKey_MouseWheelY);
+		if (io.MouseWheel != 0.0f) {
+			const drum_param &d = dp[idx[over]];
+			const int step = std::max(1, int(std::lround(std::fabs(io.MouseWheel)))) * (io.KeyCtrl ? 10 : 1);
+			const int nv = std::clamp(vals[over] + (io.MouseWheel > 0 ? step : -step), d.lo, d.hi);
+			if (nv != vals[over]) {
+				drum_write(br, set, key, idx[over], nv);
+				vals[over] = nv;
+			}
+		}
+	}
+	ImGuiStorage *st = ImGui::GetStateStorage();
+	int grab = st->GetInt(id, -1);
+	if (active && ImGui::IsItemActivated())
+		grab = fader_at(io.MousePos);
+	if (!active)
+		grab = -1;
+	st->SetInt(id, grab);
+	if (grab >= 0) {
+		const int nv = value_at(io.MousePos.y, dp[idx[grab]]);
+		if (nv != vals[grab]) {
+			drum_write(br, set, key, idx[grab], nv, true);
+			vals[grab] = nv;
+		}
+	}
+	const int focus = grab >= 0 ? grab : over;
+	if (focus >= 0) {
+		const std::string hk = std::string("drum.") + dp[idx[focus]].head;
+		const char *help = help_for(hk.c_str());
+		hint(UI_TEXT(ov_value_tip_fmt, "%s  %s\n%s (drag or wheel)"), dp[idx[focus]].head,
+		     drum_value_text(idx[focus], vals[focus]).c_str(), help ? help : "");
+	}
+	for (int i = 0; i < n; i++) {
+		const drum_param &d = dp[idx[i]];
+		std::string t = drum_value_text(idx[i], vals[i]);
+		if (t.size() > 3 && t.compare(t.size() - 3, 3, " Hz") == 0)
+			t.resize(t.size() - 3);
+		const ImU32 nc = (group_after >= 0 && i > group_after) ? col_second : col_first;
+		fader_picture(dl, fx0[size_t(i)], fx0[size_t(i)] + fw, ftop, fbot, vals[i], d.lo, d.hi, d.head,
+		              t.c_str(), focus == i, nc);
+	}
+	return focus;
+}
+
+// その打の 23 個（書いたばかりの値を含む）
+void drum_vals(const xg_snapshot &ram, int set, int key, u8 *out)
+{
+	for (int i = 0; i < XG_DRUM_PARAMS; i++)
+		out[i] = u8(drum_value(ram, set, key, i));
+}
+
+// 絵の地（メゾネットの上の段）の四角と、下の段の境目。区画ごとに同じ作り
+struct maison {
+	ImVec2 pos;
+	float split, pad;
+	bool hovered, active;
+	ImGuiID id;
+};
+
+maison begin_maison(const char *id, float w, float h)
+{
+	const float fs = ImGui::GetFontSize();
+	ImDrawList *dl = ImGui::GetWindowDrawList();
+	maison m;
+	ImGui::PushID(id);
+	m.pos = ImGui::GetCursorScreenPos();
+	ImGui::InvisibleButton("##cell", ImVec2(w, h), ImGuiButtonFlags_MouseButtonLeft);
+	m.id = ImGui::GetItemID();
+	m.hovered = ImGui::IsItemHovered();
+	m.active = ImGui::IsItemActive();
+	m.pad = fs * 0.25f;
+	m.split = m.pos.y + h * overview::MAISON_SPLIT;
+	dl->AddRectFilled(m.pos, ImVec2(m.pos.x + w, m.pos.y + h), col(m.hovered || m.active ? ImGuiCol_FrameBgHovered : ImGuiCol_FrameBg), 3.0f);
+	dl->PushClipRect(m.pos, ImVec2(m.pos.x + w, m.pos.y + h), true);
+	return m;
+}
+
+void end_maison(const maison &m, float w)
+{
+	ImDrawList *dl = ImGui::GetWindowDrawList();
+	dl->AddLine(ImVec2(m.pos.x, m.split), ImVec2(m.pos.x + w, m.split), col(ImGuiCol_Border), 1.0f);
+	dl->PopClipRect();
+	ImGui::PopID();
+}
+
+void center_text(ImDrawList *dl, float x0, float x1, float top, float bottom, const char *t)
+{
+	const ImVec2 ts = ImGui::CalcTextSize(t);
+	dl->AddText(ImVec2((x0 + x1 - ts.x) * 0.5f, (top + bottom - ts.y) * 0.5f), col(ImGuiCol_TextDisabled), t);
+}
+
+} // namespace
+
+// フィルタと EQ。上の段に、打のフィルタ（切る高さ・共振・HPF）と打ごとの EQ を合わせた実際の特性
+// （太線。細線がフィルタだけ、点線が EQ だけ）と、パートの音のスペクトラム（背景）。
+// 下の段に Cutoff・Reso・VelCut・HPF と EQ の 4 本
+void overview::drum_filter_cell(int part, int set, int key, const xg_snapshot &ram, bridge &br, float w, float h)
+{
+	static const int IDX[8] = { 11, 12, 22, 20, 16, 18, 17, 19 };
+	const float fs = ImGui::GetFontSize();
+	ImDrawList *dl = ImGui::GetWindowDrawList();
+	u8 all[XG_DRUM_PARAMS];
+	drum_vals(ram, set, key, all);
+	int vals[8];
+	for (int i = 0; i < 8; i++)
+		vals[i] = all[IDX[i]];
+	const maison mz = begin_maison("drumfilter", w, h);
+	const int focus = drum_fader_row(IDX, 8, 3, set, key, br, ImVec2(mz.pos.x + mz.pad, mz.split + mz.pad),
+	                                 ImVec2(mz.pos.x + w - mz.pad, mz.pos.y + h - mz.pad), mz.hovered, mz.active, mz.id, vals,
+	                                 IM_COL32(150, 190, 255, 255), IM_COL32(255, 210, 110, 255));
+	for (int i = 0; i < 8; i++)
+		all[IDX[i]] = u8(vals[i]);
+	const float x0 = mz.pos.x + mz.pad, x1 = mz.pos.x + w - mz.pad;
+	const float top = mz.pos.y + mz.pad, bottom = mz.split - mz.pad;
+	const float span = x1 - x0;
+	const float F_LO = 20.0f, F_HI = 20000.0f;
+	auto x_hz = [&](float f) { return x0 + span * std::log(std::clamp(f, F_LO, F_HI) / F_LO) / std::log(F_HI / F_LO); };
+	const float DB_TOP = 24.0f, DB_BOTTOM = -36.0f;
+	auto y_db = [&](float db) { return top + (bottom - top) * (DB_TOP - std::clamp(db, DB_BOTTOM, DB_TOP)) / (DB_TOP - DB_BOTTOM); };
+	spectrum_view(br, part, 0, -1, 3, ImVec2(x0, top), ImVec2(x1, bottom), nullptr, true);
+	for (float f : { 100.0f, 1000.0f, 10000.0f }) {
+		const float x = x_hz(f);
+		dl->AddLine(ImVec2(x, top), ImVec2(x, bottom), col(ImGuiCol_TextDisabled, 0.15f));
+		const char *t = f >= 10000.0f ? "10k" : f >= 1000.0f ? "1k" : "100";
+		dl->AddText(ImGui::GetFont(), fs * 0.55f, ImVec2(x + 2.0f, bottom - fs * 0.6f), col(ImGuiCol_TextDisabled, 0.7f), t);
+	}
+	dl->AddLine(ImVec2(x0, y_db(0.0f)), ImVec2(x1, y_db(0.0f)), col(ImGuiCol_TextDisabled, 0.35f));
+
+	const xg::voice_rom *vr = voices();
+	const shape::drum_line L = shape::drum_shape(vr ? vr->data() : nullptr, ram.kit[part], key, all,
+	                                             ram.parts[part]);
+	if (L.ok) {
+		std::vector<ImVec2> fpts, epts, tpts;
+		for (size_t i = 0; i < L.filter.size(); i++) {
+			const float x = x_hz(L.filter[i].ms);
+			const float edb = i < L.eq.size() ? L.eq[i].cents : 0.0f;
+			fpts.push_back(ImVec2(x, y_db(L.filter[i].cents)));
+			epts.push_back(ImVec2(x, y_db(edb)));
+			tpts.push_back(ImVec2(x, y_db(L.filter[i].cents + edb)));
+		}
+		dl->PathClear();
+		dl->PathLineTo(ImVec2(tpts.front().x, bottom));
+		for (const ImVec2 &p : tpts)
+			dl->PathLineTo(p);
+		dl->PathLineTo(ImVec2(tpts.back().x, bottom));
+		dl->PathFillConcave(col(ImGuiCol_SliderGrab, 0.18f));
+		dl->AddPolyline(fpts.data(), int(fpts.size()), IM_COL32(150, 190, 255, 150), 0, 1.0f);
+		for (size_t i = 1; i < epts.size(); i += 2)
+			dl->AddLine(epts[i - 1], epts[i], IM_COL32(255, 210, 110, 200), 1.2f);
+		dl->AddPolyline(tpts.data(), int(tpts.size()), col(ImGuiCol_SliderGrabActive), 0, std::max(2.0f, fs * 0.14f));
+		// EQ の周波数の位置に ● 印（EQ だけの点線の上）。そのフェーダーを触っている間は大きく
+		const float fl = float(eq::HZ[std::clamp(int(all[18]), 0, 60)]);
+		const float fh = float(eq::HZ[std::clamp(int(all[19]), 0, 60)]);
+		const std::vector<shape::pt> at = shape::eq_response_vals(vr->data(), all[16], all[17], all[18], all[19], { fl, fh });
+		const float r0 = std::max(3.0f, fs * 0.26f);
+		for (int k = 0; k < 2 && k < int(at.size()); k++) {
+			const bool lit = focus == 4 + k * 2 || focus == 5 + k * 2;
+			const ImVec2 c(x_hz(at[size_t(k)].ms), y_db(at[size_t(k)].cents));
+			const float rr = lit ? r0 * 1.5f : r0;
+			dl->AddCircleFilled(c, rr, IM_COL32(255, 210, 110, 255));
+			dl->AddCircle(c, rr, IM_COL32(40, 30, 10, 255), 0, 1.5f);
+		}
+		// 切る高さ: いちばん大きい所から 3 dB 下がる所（山があれば山の頂）。filter_cell と同じ決め方
+		float peak = -1e9f, peak_hz = 20.0f;
+		for (const shape::pt &p : L.filter)
+			if (p.cents > peak) { peak = p.cents; peak_hz = p.ms; }
+		float lpf_hz = 0;
+		for (size_t i = L.filter.size(); i-- > 0;)
+			if (L.filter[i].cents >= peak - 3.0f) { lpf_hz = L.filter[i].ms; break; }
+		if (peak > 3.0f)
+			lpf_hz = peak_hz;
+		float hpf_hz = 0;
+		for (const shape::pt &p : L.filter)
+			if (p.cents >= peak - 3.0f) { hpf_hz = p.ms; break; }
+		auto hz_text = [](float f) {
+			char t[24];
+			if (f >= 19000.0f) std::snprintf(t, sizeof(t), "%s", UI_TEXT(ov_khz, "20 kHz or more"));
+			else if (f >= 1000.0f) std::snprintf(t, sizeof(t), "%.1f kHz", f / 1000.0f);
+			else std::snprintf(t, sizeof(t), "%.0f Hz", f);
+			return std::string(t);
+		};
+		auto mark = [&](float f, ImU32 c, const char *label, int row) {
+			if (f <= 0.0f || f >= 19000.0f)
+				return;
+			const float x = x_hz(f);
+			for (float y = top; y < bottom; y += fs * 0.4f)
+				dl->AddLine(ImVec2(x, y), ImVec2(x, std::min(bottom, y + fs * 0.2f)), c, 1.5f);
+			char t[40];
+			std::snprintf(t, sizeof(t), "%s %s", label, hz_text(f).c_str());
+			const float tfs = fs * 0.65f;
+			const ImVec2 ts = ImGui::GetFont()->CalcTextSizeA(tfs, FLT_MAX, 0.0f, t);
+			const float tx = std::min(x + 3.0f, x1 - ts.x - 2.0f);
+			const float ty = top + 2.0f + float(row) * (ts.y + 2.0f);
+			dl->AddRectFilled(ImVec2(tx - 2, ty - 1), ImVec2(tx + ts.x + 2, ty + ts.y + 1), IM_COL32(0, 0, 0, 140), 3.0f);
+			dl->AddText(ImGui::GetFont(), tfs, ImVec2(tx, ty), c, t);
+		};
+		mark(lpf_hz, IM_COL32(255, 170, 60, 230), "LPF", 0);
+		if (L.hpf)
+			mark(hpf_hz, IM_COL32(255, 120, 200, 230), "HPF", 1);
+		char s[96];
+		std::snprintf(s, sizeof(s), "Cutoff : %s (%s)", drum_value_text(11, all[11]).c_str(), hz_text(lpf_hz).c_str());
+		shape_value(s);
+		std::snprintf(s, sizeof(s), "Reso : %s", drum_value_text(12, all[12]).c_str());
+		shape_value(s);
+		// 凡例（右下に小さく）
+		const float lfs = fs * 0.6f;
+		const char *const items[3] = { UI_TEXT(ov_legend_combined, "Combined"), UI_TEXT(ov_legend_filter, "Filter"), "EQ" };
+		const ImU32 cols[3] = { col(ImGuiCol_SliderGrabActive), IM_COL32(150, 190, 255, 200), IM_COL32(255, 210, 110, 220) };
+		float ly = bottom - lfs * 4.2f;
+		for (int k = 0; k < 3; k++) {
+			const ImVec2 ts = ImGui::GetFont()->CalcTextSizeA(lfs, FLT_MAX, 0.0f, items[k]);
+			const float lx = x1 - ts.x - fs * 0.3f;
+			dl->AddLine(ImVec2(lx - fs * 0.9f, ly + ts.y * 0.5f), ImVec2(lx - fs * 0.2f, ly + ts.y * 0.5f), cols[k], k == 0 ? 2.0f : 1.2f);
+			dl->AddText(ImGui::GetFont(), lfs, ImVec2(lx, ly), col(ImGuiCol_TextDisabled, 0.9f), items[k]);
+			ly += ts.y + 1.0f;
+		}
+	} else {
+		center_text(dl, x0, x1, top, bottom, UI_TEXT(ps_drum_no_shape, "No picture for this key (no sound in this kit)"));
+	}
+	end_maison(mz, w);
+}
+
+// EG。上の段に音量の形（実際の時間。打ちっぱなしなら減衰 2 の終わりまで、離しを受けるなら 0.5 秒で離す）、
+// 下の段に立ち上がり・減衰 1・減衰 2
+void overview::drum_env_cell(int part, int set, int key, const xg_snapshot &ram, bridge &br, float w, float h)
+{
+	static const int IDX[3] = { 13, 14, 15 };
+	const float fs = ImGui::GetFontSize();
+	ImDrawList *dl = ImGui::GetWindowDrawList();
+	u8 all[XG_DRUM_PARAMS];
+	drum_vals(ram, set, key, all);
+	int vals[3];
+	for (int i = 0; i < 3; i++)
+		vals[i] = all[IDX[i]];
+	const maison mz = begin_maison("drumenv", w, h);
+	const int focus = drum_fader_row(IDX, 3, -1, set, key, br, ImVec2(mz.pos.x + mz.pad, mz.split + mz.pad),
+	                                 ImVec2(mz.pos.x + w - mz.pad, mz.pos.y + h - mz.pad), mz.hovered, mz.active, mz.id, vals,
+	                                 IM_COL32(150, 190, 255, 255));
+	for (int i = 0; i < 3; i++)
+		all[IDX[i]] = u8(vals[i]);
+	const float line = fs * 0.75f;
+	const float x0 = mz.pos.x + mz.pad + fs * 1.6f, x1 = mz.pos.x + w - mz.pad - fs * 0.6f;
+	const float top = mz.pos.y + mz.pad + line * 1.2f, bottom = mz.split - mz.pad;
+	spectrum_view(br, part, 0, -1, 4, ImVec2(mz.pos.x + mz.pad, top), ImVec2(mz.pos.x + w - mz.pad, bottom), nullptr, true);
+
+	const xg::voice_rom *vr = voices();
+	const shape::drum_line L = shape::drum_shape(vr ? vr->data() : nullptr, ram.kit[part], key, all,
+	                                             ram.parts[part]);
+	if (L.ok && !L.amp.pts.empty()) {
+		const shape::amp_line &A = L.amp;
+		float t_end = std::max(50.0f, A.pts.back().ms);
+		t_end = std::min(t_end, 6000.0f);
+		// 時間の目盛り（time_grid と同じ。離す時刻の線は、離しを受けるときだけ）
+		for (float t : { 10.0f, 100.0f, 1000.0f, 2000.0f, 4000.0f }) {
+			if (t > t_end)
+				break;
+			const float x = time_x(t, t_end, x0, x1);
+			dl->AddLine(ImVec2(x, top), ImVec2(x, bottom), col(ImGuiCol_TextDisabled, 0.15f));
+			char g[16];
+			if (t >= 1000.0f) std::snprintf(g, sizeof(g), "%.0fs", t / 1000.0f);
+			else              std::snprintf(g, sizeof(g), "%.0fms", t);
+			dl->AddText(ImGui::GetFont(), fs * 0.55f, ImVec2(x + 2.0f, bottom - fs * 0.6f), col(ImGuiCol_TextDisabled, 0.7f), g);
+		}
+		if (A.keyoff_ms >= 0) {
+			const float xo = time_x(A.keyoff_ms, t_end, x0, x1);
+			for (float y = top; y < bottom; y += fs * 0.5f)
+				dl->AddLine(ImVec2(xo, y), ImVec2(xo, std::min(bottom, y + fs * 0.25f)), col(ImGuiCol_TextDisabled, 0.5f));
+			dl->AddText(ImGui::GetFont(), fs * 0.55f, ImVec2(xo + 2.0f, bottom - fs * 1.2f), col(ImGuiCol_TextDisabled, 0.8f), UI_TEXT(ov_discrete, "Rel"));
+		}
+		auto y_db = [&](float db) { return top + (bottom - top) * std::clamp(-db / 60.0f, 0.0f, 1.0f); };
+		const float tfs = fs * 0.55f;
+		dl->AddText(ImGui::GetFont(), tfs, ImVec2(mz.pos.x + mz.pad, top - tfs * 0.5f), IM_COL32(120, 170, 255, 200), "0dB");
+		dl->AddText(ImGui::GetFont(), tfs, ImVec2(mz.pos.x + mz.pad, bottom - tfs), IM_COL32(120, 170, 255, 200), "-60");
+		std::vector<ImVec2> pts;
+		for (const shape::pt &p : A.pts)
+			if (p.ms <= t_end)
+				pts.push_back(ImVec2(time_x(p.ms, t_end, x0, x1), y_db(p.cents)));
+		if (pts.size() >= 2) {
+			dl->PathClear();
+			dl->PathLineTo(ImVec2(pts.front().x, bottom));
+			for (const ImVec2 &p : pts)
+				dl->PathLineTo(p);
+			dl->PathLineTo(ImVec2(pts.back().x, bottom));
+			dl->PathFillConcave(col(ImGuiCol_SliderGrab, 0.22f));
+			dl->AddPolyline(pts.data(), int(pts.size()), col(ImGuiCol_SliderGrabActive), 0, std::max(2.0f, fs * 0.12f));
+		}
+		// フェーダーに対応する点（触れない）。触っている間は大きく
+		auto amp_at = [&](float ms) {
+			float db = A.pts.front().cents;
+			for (const shape::pt &p : A.pts)
+				if (p.ms <= ms)
+					db = p.cents;
+			return db;
+		};
+		const float r0 = std::max(3.0f, fs * 0.26f);
+		auto dot = [&](float ms, const char *mark, bool lit) {
+			const ImVec2 c(time_x(ms, t_end, x0, x1), y_db(amp_at(ms)));
+			const float rr = lit ? r0 * 1.5f : r0;
+			const ImU32 fill = IM_COL32(150, 190, 255, 255);
+			dl->AddCircleFilled(c, rr, fill);
+			dl->AddCircle(c, rr, IM_COL32(20, 20, 30, 255), 0, 1.5f);
+			const ImVec2 ts = ImGui::GetFont()->CalcTextSizeA(fs * 0.6f, FLT_MAX, 0.0f, mark);
+			dl->AddText(ImGui::GetFont(), fs * 0.6f, ImVec2(std::clamp(c.x + rr + 1.0f, x0, x1 - ts.x), std::clamp(c.y - rr - ts.y, top, bottom - ts.y)), fill, mark);
+		};
+		// 減衰 2 の終わり: 形の最後（離しを受けるなら離す前の最後）
+		float d2_end = A.pts.back().ms;
+		if (A.keyoff_ms >= 0)
+			d2_end = std::min(d2_end, A.keyoff_ms);
+		dot(A.attack_ms, "A", focus == 0);
+		if (A.decay1_ms > 0)
+			dot(A.decay1_ms, "D1", focus == 1);
+		dot(d2_end, "D2", focus == 2);
+		char s[128];
+		std::snprintf(s, sizeof(s), UI_TEXT(ps_drum_env_fmt, "Attack %.0f ms   Decay 1 %.0f ms   Decay 2 to %.0f dB"),
+		              A.attack_ms, std::max(0.0f, A.decay1_ms - A.attack_ms), A.sustain_db);
+		dl->AddText(ImGui::GetFont(), line, ImVec2(mz.pos.x + mz.pad + 2.0f, mz.pos.y + mz.pad), IM_COL32(150, 190, 255, 255), s);
+		shape_value(s);
+	} else {
+		center_text(dl, x0, x1, top, bottom, UI_TEXT(ps_drum_no_shape, "No picture for this key (no sound in this kit)"));
+	}
+	end_maison(mz, w);
+}
+
+// 高さ・音量・パン・送り。上の段に、音の置き場所（左右がパン、点の大きさが音量、3 本の送りの棒）と高さの字。
+// 下の段に Pitch・Fine・VelPit と Level・Pan・Rev・Cho・Var
+void overview::drum_mix_cell(int part, int set, int key, const xg_snapshot &ram, bridge &br, float w, float h)
+{
+	(void)part;
+	static const int IDX[8] = { 0, 1, 21, 2, 4, 5, 6, 7 };
+	const float fs = ImGui::GetFontSize();
+	ImDrawList *dl = ImGui::GetWindowDrawList();
+	u8 all[XG_DRUM_PARAMS];
+	drum_vals(ram, set, key, all);
+	int vals[8];
+	for (int i = 0; i < 8; i++)
+		vals[i] = all[IDX[i]];
+	const maison mz = begin_maison("drummix", w, h);
+	const int focus = drum_fader_row(IDX, 8, 2, set, key, br, ImVec2(mz.pos.x + mz.pad, mz.split + mz.pad),
+	                                 ImVec2(mz.pos.x + w - mz.pad, mz.pos.y + h - mz.pad), mz.hovered, mz.active, mz.id, vals,
+	                                 IM_COL32(255, 170, 130, 255), IM_COL32(150, 220, 170, 255));
+	for (int i = 0; i < 8; i++)
+		all[IDX[i]] = u8(vals[i]);
+	const float x0 = mz.pos.x + mz.pad * 4, x1 = mz.pos.x + w - mz.pad * 4;
+	const float top = mz.pos.y + mz.pad, bottom = mz.split - mz.pad;
+	const float line = fs * 0.75f;
+	// 高さの字（半音とセント）
+	{
+		const xg::voice_rom *vr = voices();
+		const shape::drum_line L = shape::drum_shape(vr ? vr->data() : nullptr, ram.kit[part], key, all,
+		                                             ram.parts[part]);
+		char s[96];
+		std::snprintf(s, sizeof(s), UI_TEXT(ps_drum_pitch_fmt, "Pitch %+.2f semitones"), (L.ok ? L.cents : 0.0f) / 100.0f);
+		dl->AddText(ImGui::GetFont(), line, ImVec2(mz.pos.x + mz.pad + 2.0f, top), IM_COL32(255, 170, 130, 255), s);
+		shape_value(s);
+	}
+	// 左右の置き場所。横線の上に点（大きさが音量）。Rnd は点を並べて見せる
+	const float py = top + line * 2.6f;
+	dl->AddLine(ImVec2(x0, py), ImVec2(x1, py), col(ImGuiCol_TextDisabled, 0.5f), 1.0f);
+	dl->AddText(ImGui::GetFont(), fs * 0.55f, ImVec2(x0, py + 3.0f), col(ImGuiCol_TextDisabled, 0.8f), "L");
+	dl->AddText(ImGui::GetFont(), fs * 0.55f, ImVec2(x1 - fs * 0.4f, py + 3.0f), col(ImGuiCol_TextDisabled, 0.8f), "R");
+	dl->AddLine(ImVec2((x0 + x1) * 0.5f, py - fs * 0.3f), ImVec2((x0 + x1) * 0.5f, py + fs * 0.3f), col(ImGuiCol_TextDisabled, 0.6f), 1.0f);
+	const float rr = std::max(2.0f, fs * 0.2f + fs * 0.45f * float(all[2]) / 127.0f);
+	const bool lit = focus == 3 || focus == 4;
+	const ImU32 dotc = IM_COL32(150, 220, 170, lit ? 255 : 210);
+	if (all[4] == 0) {
+		for (int k = 0; k < 5; k++)
+			dl->AddCircle(ImVec2(x0 + (x1 - x0) * (0.1f + 0.2f * float(k)), py), rr, dotc, 0, 1.5f);
+	} else {
+		const float px = x0 + (x1 - x0) * float(all[4] - 1) / 126.0f;
+		dl->AddCircleFilled(ImVec2(px, py), rr, dotc);
+		dl->AddCircle(ImVec2(px, py), rr, IM_COL32(20, 30, 20, 255), 0, 1.5f);
+	}
+	// 送りの 3 本（横の棒）
+	const char *const names[3] = { "REV", "CHO", "VAR" };
+	const float by0 = py + fs * 1.2f;
+	const float bh = std::max(3.0f, std::min(fs * 0.5f, (bottom - by0) / 3.0f - 2.0f));
+	for (int k = 0; k < 3; k++) {
+		const float y = by0 + float(k) * (bh + fs * 0.25f);
+		if (y + bh > bottom)
+			break;
+		const float bx = x0 + fs * 1.6f;
+		dl->AddText(ImGui::GetFont(), fs * 0.55f, ImVec2(x0, y + (bh - fs * 0.55f) * 0.5f), col(ImGuiCol_TextDisabled, 0.9f), names[k]);
+		dl->AddRectFilled(ImVec2(bx, y), ImVec2(x1, y + bh), col(ImGuiCol_FrameBg), 2.0f);
+		dl->AddRectFilled(ImVec2(bx, y), ImVec2(bx + (x1 - bx) * float(all[5 + k]) / 127.0f, y + bh),
+		                  IM_COL32(150, 220, 170, focus == 5 + k ? 230 : 150), 2.0f);
+	}
+	end_maison(mz, w);
+}
+
 void overview::eg_cell(int part, xg::model &m, bridge &br, float w, float h, bool compact)
 {
 	if (compact)

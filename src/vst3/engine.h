@@ -242,6 +242,9 @@ private:
 
 	void boot();
 	void apply_deferred_state();   // 起動前に来た状態を戻す（m_machine を持って呼ぶ）
+	void silence_restored();       // 戻した状態で鳴っていた声を止める（m_machine を持って呼ぶ）
+	static bool load_state_allowed();   // plugin.ini の load_state（既定 1）
+	bool m_load_state_noted = false;
 	// 機械まるごとの状態を戻す。読めなければ XG の値の控えを流す（m_machine を持って呼ぶ）
 	bool restore(const uint8_t *p, size_t n, const std::vector<uint8_t> &setup);
 	void one_sample(float &l, float &r);

@@ -103,6 +103,34 @@ void set_shape_window_part(int part);
 void request_master();
 bool take_master_request();             // 頼みがあれば true（1 回だけ）
 
+// ---- ドラムセットアップ（XG の 3n rr pp）。エディタのドラムの面と、音色の窓のドラムのタブが使う
+// 並びはワーク RAM と同じ 23 個（xg::ram::drum_setup_index）
+enum class dshow { signed64, plain, alt, pan, assign, toggle, eq_gain, freq, vel };
+struct drum_param { u8 addr; const char *head; int lo, hi; dshow show; };
+const drum_param *drum_params();                // XG_DRUM_PARAMS 個
+int  drum_index(u8 addr);                       // XG の番地 → 並びの番号（無ければ -1）
+std::string drum_value_text(int idx, int v);
+std::string drum_key_text(int key);             // 「38 D1」（ヤマハの数え方で 60 = C3）
+const char *gm_drum_name(int key);              // GM の打楽器の並びの名前（鍵 35-81。ほかは ""）
+// そのパートの今のキットで、その鍵に割り当てられた楽器名（ROM の表。xg::voice_rom::drum_key_name）。
+// キットでなければ空。音の無い鍵も空
+std::string drum_key_name(xg::model &m, int part, int key);
+// そのパートのキットの名前（バンク 126・127 でなければ空）
+std::string drum_kit_name(xg::model &m, int part);
+int  drum_set_of(const xg_snapshot &ram, int part);   // パートモードが DRUMS1-4 なら 0-3、ほかは -1
+// 今の値。書いたばかりなら、firmware が RAM に入れるまで（長くて 0.5 秒）書いた値を返す
+// （返さないと、つまんで動かしている間に古い値へ跳ね戻る）
+int  drum_value(const xg_snapshot &ram, int set, int key, int idx);
+// 書く（F0 43 10 4C 3n rr pp vv F7）。drag なら drag_send で間引く
+void drum_write(bridge &br, int set, int key, int idx, int value, bool drag = false);
+
+// ---- 音色の窓のドラムのタブ。エディタのドラムの面で行をダブルクリックすると、
+// その組を使っているパートと、その鍵で開く
+int  shape_drum_key();                  // 見ている鍵（13-91）
+void set_shape_drum_key(int key);
+void request_drum(int part, int key);   // 音色の窓をドラムのタブで開く頼み（request_part と同じ道）
+bool take_drum_tab();                   // ドラムのタブを前に出すか（音色の窓が 1 回だけ取る）
+
 // ---- ファイルの窓（.syx の書き出し・読み込み）。
 // 描画の中からは開けない（窓が回っている間にタイマーが次のコマを描きに来て ImGui に入り直す）。
 // だから頼みだけ置き、窓の持ち主（pc_window）が描き終えてから開いて、読み書きもする。
@@ -180,6 +208,10 @@ void set_master_zoom(float zoom);
 // 今見ているのと違う分類を押すと、その分類の先頭の音色（キットなら先頭のキット）に替える。
 // 音色を替えたら、そのパートで 1 秒だけ音を鳴らして聴かせる
 void program_pane(int part, xg::model &m, const xg_snapshot *ram, bridge &br);
+// 音色の窓のドラムのタブのときの左の面。左の列にキット（ドラムキットと効果音キット）、
+// 右の列にいまのキットの鍵ごとの楽器名。キットを押すとパートの音色を替え、鍵を押すと
+// ドラムのタブの鍵（shape_drum_key）をその鍵にする。どちらも今の鍵を 1 回鳴らす
+void drum_pane(int part, xg::model &m, bridge &br);
 
 // 「ピッチベンド」の組の下に出す、いまのベンドの値。**ワーク RAM ではなく
 // 入ってきた MIDI から**取る（式だけの口では firmware にベンドを渡さないので、

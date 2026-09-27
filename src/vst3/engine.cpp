@@ -764,11 +764,34 @@ void engine::apply_deferred_state()
 	m_deferred_setup.shrink_to_fit();
 }
 
+// **状態を戻したら、鳴っていた声を止める**（issue #51）。曲を鳴らしている途中で
+// ホストを閉じると、鳴っている声ごと状態が保存され、次に開いたときにその音が
+// 鳴りっぱなしになる（離しはもう来ない）。設定は戻したまま、全部の口・全チャンネルへ
+// All Sound Off（CC120）と All Notes Off（CC123）を流して止める。firmware に
+// 読ませるので、firmware の「押している音」の記録も一緒に消える。
+// m_machine を持って呼ぶこと（midi() は取り直そうとするので使えない）
+void engine::silence_restored()
+{
+	// 鳴っている声が無ければ何もしない。流すと MIDI の直列に並んで、すぐ後ろの曲頭が
+	// 10ms ほど遅れる（止めてから保存した、ふつうの状態ではこうなる）
+	if (m_mu->swpm().sounding_voices() + m_mu->swps().sounding_voices() == 0)
+		return;
+	log_line("戻した状態で声が鳴っていたので止めた（All Sound Off・All Notes Off）");
+	for (int port = 0; port < mu2000::MIDI_PORTS; port++)
+		for (int ch = 0; ch < 16; ch++) {
+			const uint8_t msg[6] = { uint8_t(0xb0 | ch), 120, 0, uint8_t(0xb0 | ch), 123, 0 };
+			for (uint8_t b : msg)
+				m_drv.watch(b, m_mu->midi_in(b, port));
+		}
+}
+
 bool engine::restore(const uint8_t *p, size_t n, const std::vector<uint8_t> &setup)
 {
 	std::string err = "機械まるごとの状態が入っていない";
-	if (p && n && m_mu->load_state(p, n, err))
+	if (p && n && m_mu->load_state(p, n, err)) {
+		silence_restored();
 		return true;
+	}
 	if (p && n)
 		log_line(("状態を読み戻せない: " + err).c_str());
 	if (setup.empty())
@@ -780,6 +803,25 @@ bool engine::restore(const uint8_t *p, size_t n, const std::vector<uint8_t> &set
 	for (uint8_t b : setup)
 		m_drv.watch(b, m_mu->midi_in(b, 0));
 	return true;
+}
+
+// plugin.ini の load_state（既定 1）。状態はホストが起動より前に戻してくることがあり、
+// boot() が plugin.ini を読むより先なので、ここで読む（たまにしか呼ばれない）
+bool engine::load_state_allowed()
+{
+	const std::string local = smu2000::config_dir();
+	if (local.empty())
+		return true;
+	std::FILE *f = std::fopen(smu2000::join(local, "plugin.ini").c_str(), "rb");
+	if (!f)
+		return true;
+	bool allowed = true;
+	char line[256];
+	while (std::fgets(line, sizeof(line), f))
+		if (!std::strncmp(line, "load_state=", 11))
+			allowed = line[11] != '0';
+	std::fclose(f);
+	return allowed;
 }
 
 std::vector<uint8_t> engine::save_state()
@@ -809,6 +851,15 @@ bool engine::load_state(const uint8_t *p, size_t n, const uint8_t *setup, size_t
 {
 	if ((!p || !n) && (!setup || !setup_n))
 		return false;
+	// **plugin.ini の load_state=0** なら、ホストが戻してきた状態を使わない（issue #51）。
+	// 受け取ったことにして捨てる（断るとホストによっては何度も戻そうとする）
+	if (!load_state_allowed()) {
+		if (!m_load_state_noted) {
+			m_load_state_noted = true;
+			log_line("plugin.ini: load_state=0（ホストが戻した状態を使わず、まっさらから始める）");
+		}
+		return true;
+	}
 	std::lock_guard<std::mutex> lock(m_machine);
 	if (state() == status::failed)
 		return false;

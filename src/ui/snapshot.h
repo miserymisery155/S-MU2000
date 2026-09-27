@@ -52,6 +52,8 @@ constexpr int XG_PARTS = 64;   // 口 A-D。C・D は実機では USB だけの�
 constexpr int XG_PART_COPY = 0x100;     // xg::ram::PART_COPY
 constexpr int XG_SYSTEM_SIZE = 7;
 constexpr int XG_EFFECT_SIZE = 0x16b;   // xg::ram::EFFECT_SIZE
+// ドラムセットアップ（XG の 3n rr pp）。xg::ram::DRUM_SETUP_* と同じ大きさ
+constexpr int XG_DRUM_SETS = 4, XG_DRUM_KEYS = 79, XG_DRUM_PARAMS = 23, XG_DRUM_KEY0 = 13;
 
 struct xg_snapshot {
 	u64 serial = 0;                                  // 写すたびに増える
@@ -59,6 +61,10 @@ struct xg_snapshot {
 	u8  voice_mode = 1, voice_set = 1;               // 音色の引き方（xg/voices.h の lookup）
 	u8  effect[XG_EFFECT_SIZE] = {};                 // 02 01 00 からマスター EQ まで（RAM の並び）
 	u8  parts[XG_PARTS][XG_PART_COPY] = {};          // **XG のパート番号の順**に並べ直してある
+	// ドラムセットアップ 4 組 × 鍵 13-91 × 23 個（ワーク RAM の並び。ドラムの画面が読む）
+	u8  drum[XG_DRUM_SETS][XG_DRUM_KEYS][XG_DRUM_PARAMS] = {};
+	// パートのキットの番号（パートの塊の +0x110。xg::nv::PART_KIT）。ドラムの打の記録を引くのに使う
+	u8  kit[XG_PARTS] = {};
 	// 入ってきた MIDI から。口×チャンネル（口 * 16 + ch）ごと。パートとの対応は受信チャンネルで
 	u64 notes[XG_PARTS][2] = {};                     // 押さえている鍵
 	u8  velocity[XG_PARTS] = {};                     // 最後のノートオンの強さ

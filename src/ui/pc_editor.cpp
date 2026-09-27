@@ -1,6 +1,7 @@
 // license:BSD-3-Clause
 
 #include "pc_editor.h"
+#include "eq_curve.h"
 #include "ui/texts.h"
 #include "xg_ui.h"
 
@@ -10,6 +11,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <string>
 
 namespace ui {
@@ -363,6 +366,117 @@ void pc_editor::part_page(xg::model &m, bridge &br)
 }
 
 
+// ドラムセットアップの面。上に組（DRUMS1-4）の切り替えと、その組を使っているパート。
+// 表は行が鍵 13-91、列が 1 鍵ぶんの 23 個。値はつまんで上下・ホイールで動かし、
+// 書くのは XG のパラメータチェンジ（F0 43 10 4C 3n rr pp vv F7）
+void pc_editor::drum_page(xg::model &m, const xg_snapshot &ram, bridge &br)
+{
+	const float fs = ImGui::GetFontSize();
+	for (int s = 0; s < XG_DRUM_SETS; s++) {
+		char label[16];
+		std::snprintf(label, sizeof(label), "DRUMS%d", s + 1);
+		if (s)
+			ImGui::SameLine();
+		if (ImGui::RadioButton(label, m_drum_set == s))
+			m_drum_set = s;
+	}
+	// その組を使っているパート（パートモード 08 pp 07 が 2-5）
+	std::string users;
+	int first_user = -1;
+	bool plain = false;
+	for (int p = 0; p < XG_PARTS; p++) {
+		const int mode = ram.parts[p][0x07];
+		if (mode == m_drum_set + 2) {
+			users += (users.empty() ? "" : ", ") + part_name(p);
+			if (first_user < 0)
+				first_user = p;
+		}
+		if (mode == 1)
+			plain = true;
+	}
+	ImGui::SameLine(0, fs * 1.5f);
+	ImGui::Text("%s %s", UI_TEXT(drum_used_by, "Used by:"),
+	            users.empty() ? UI_TEXT(drum_none, "none") : users.c_str());
+	ImGui::SameLine(0, fs * 1.5f);
+	if (ImGui::SmallButton(UI_TEXT(drum_reset, "Reset this setup"))) {
+		const u8 msg[] = { 0xf0, 0x43, 0x10, 0x4c, 0x00, 0x00, 0x7d, u8(m_drum_set), 0xf7 };
+		br.send(msg, sizeof(msg));
+	}
+	// 楽器名は、その組を使う最初のパートのキットから（ROM の鍵ごとの名前）。使うパートが無ければ GM の並びを目安に
+	const std::string kit = first_user >= 0 ? drum_kit_name(m, first_user) : std::string();
+	if (!kit.empty())
+		ImGui::TextDisabled(UI_TEXT(drum_names_from_fmt, "Instrument names are from %s's kit (%s)"), part_name(first_user).c_str(), kit.c_str());
+	else
+		ImGui::TextDisabled("%s", UI_TEXT(drum_names_hint, "Names follow the GM percussion map as a guide; the actual sound depends on the kit"));
+	if (plain) {
+		ImGui::SameLine(0, fs);
+		ImGui::TextDisabled("/ %s", UI_TEXT(drum_plain_note, "Parts in mode DRUM (no number) ignore every drum setup"));
+	}
+	ImGui::TextDisabled("%s", first_user >= 0 ? UI_TEXT(drum_dblclick_hint, "Double-click a key or name to open it with graphs in the Voices window")
+	                                          : UI_TEXT(drum_no_user_hint, "No part uses this setup, so the Voices window cannot show it (set a part's mode to this DRUMS)"));
+
+	const ImGuiTableFlags flags = ImGuiTableFlags_ScrollY | ImGuiTableFlags_ScrollX | ImGuiTableFlags_RowBg |
+	                              ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_SizingFixedFit;
+	if (!ImGui::BeginTable("drum", 2 + XG_DRUM_PARAMS, flags))
+		return;
+	ImGui::TableSetupScrollFreeze(2, 1);
+	ImGui::TableSetupColumn("Key", ImGuiTableColumnFlags_WidthFixed, fs * 4.2f);
+	ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthFixed, fs * 9.5f);
+	const drum_param *dp = drum_params();
+	for (int i = 0; i < XG_DRUM_PARAMS; i++)
+		ImGui::TableSetupColumn(dp[i].head, ImGuiTableColumnFlags_WidthFixed, fs * 3.6f);
+	ImGui::TableHeadersRow();
+
+	ImGuiListClipper clip;
+	clip.Begin(XG_DRUM_KEYS);
+	while (clip.Step()) {
+		for (int r = clip.DisplayStart; r < clip.DisplayEnd; r++) {
+			const int key = XG_DRUM_KEY0 + r;
+			ImGui::TableNextRow();
+			ImGui::PushID(r);
+			// 鍵と名前の欄は、行を選ぶ部品にする（ダブルクリックで音色の窓のドラムのタブを開く）
+			ImGui::TableNextColumn();
+			const bool here = first_user >= 0 && shape_window_part() == first_user && shape_drum_key() == key;
+			ImGui::Selectable(drum_key_text(key).c_str(), here);
+			bool open = ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left);
+			ImGui::TableNextColumn();
+			ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetColorU32(ImGuiCol_TextDisabled));
+			ImGui::Selectable((kit.empty() ? std::string(gm_drum_name(key)) : drum_key_name(m, first_user, key)).c_str(), here);
+			ImGui::PopStyleColor();
+			open = open || (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left));
+			if (open && first_user >= 0)
+				request_drum(first_user, key);
+			for (int i = 0; i < XG_DRUM_PARAMS; i++) {
+				const drum_param &d = dp[i];
+				ImGui::TableNextColumn();
+				const int v = drum_value(ram, m_drum_set, key, i);
+				int nv = v;
+				ImGui::PushID(i);
+				ImGui::SetNextItemWidth(-FLT_MIN);
+				if (d.show == dshow::assign || d.show == dshow::toggle) {
+					bool on = v != 0;
+					if (ImGui::Checkbox(drum_value_text(i, v).c_str(), &on))
+						nv = on ? 1 : 0;
+				} else {
+					// 数の代わりに書式を渡す（% を含まないので、そのまま出る）
+					const std::string text = drum_value_text(i, v);
+					ImGui::DragInt("##v", &nv, 0.25f, d.lo, d.hi, text.c_str(), ImGuiSliderFlags_AlwaysClamp);
+					if (ImGui::IsItemHovered() && ImGui::GetIO().MouseWheel != 0.0f) {
+						nv = std::clamp(nv + (ImGui::GetIO().MouseWheel > 0 ? 1 : -1), d.lo, d.hi);
+						m_wheel_taken = true;
+					}
+				}
+				ImGui::PopID();
+				if (nv != v)
+					drum_write(br, m_drum_set, key, i, nv);
+			}
+			ImGui::PopID();
+		}
+	}
+	ImGui::EndTable();
+}
+
+
 void pc_editor::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 {
 	m_ram = &ram;
@@ -412,6 +526,28 @@ void pc_editor::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 			part_page(m, br);
 			ImGui::EndTabItem();
 		}
+		// 確かめ用: SMU2000_EDITOR_TAB=drum で最初からドラムの面を開く（画面を撮るため）。
+		// drum:鍵 なら、その行をダブルクリックしたのと同じく音色の窓のドラムのタブも開く
+		// （窓に送ったクリックは ImGui が本物のカーソルの位置で上書きするので、試しでは押せない）
+		static int open_drum = [] {
+			const char *e = std::getenv("SMU2000_EDITOR_TAB");
+			if (!e || std::strncmp(e, "drum", 4))
+				return -1;
+			return e[4] == ':' ? std::atoi(e + 5) : 0;
+		}();
+		const ImGuiTabItemFlags drum_flags = open_drum >= 0 ? ImGuiTabItemFlags_SetSelected : 0;
+		if (ImGui::BeginTabItem(UI_TEXT(ed_tab_drum, "Drum"), nullptr, drum_flags)) {
+			drum_page(m, ram, br);
+			ImGui::EndTabItem();
+		}
+		if (open_drum > 0) {
+			for (int p = 0; p < XG_PARTS; p++)
+				if (drum_set_of(ram, p) == m_drum_set) {
+					request_drum(p, open_drum);
+					break;
+				}
+		}
+		open_drum = -1;
 		ImGui::EndTabBar();
 	}
 	ImGui::EndChild();

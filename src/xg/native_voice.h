@@ -1938,6 +1938,21 @@ constexpr u32 SFX_VOICES      = 0x200ee0;   // xg::voice_rom::VOICES と同じ
 constexpr u32 SFX_VOICES_END  = 0x23cece;   // xg::voice_rom::VOICES_END と同じ
 constexpr int SFX_NOTE        = 64;         // 波形と音程を決める鍵（固定）
 
+// **SFX の打のドラムセットアップ**（6.236）。実機は打ごとの値を要素のバイトに足してから
+// 旋律の道で組む。firmware で 0-127 を振って合わせた: 切る高さの索引（byte37）に値 − 64、
+// 共振（byte35）に (値 − 64) >> 1、立ち上がり・減衰 1・減衰 2 の速さ（byte73・74・75）に値 − 64。
+// e は要素（84 バイト）の写し
+constexpr int ELEM_BYTES = 84;
+inline void sfx_setup_apply(u8 *e, int cut, int reso, int atk, int dec1, int dec2)
+{
+	auto add = [&](int i, int d, int hi) { e[i] = u8(std::clamp(int(e[i]) + d, 0, hi)); };
+	add(37, cut - 64, 127);
+	add(35, (reso - 64) >> 1, 63);
+	add(73, atk - 64, 63);
+	add(74, dec1 - 64, 63);
+	add(75, dec2 - 64, 63);
+}
+
 inline u32 sfx_voice_record(const u8 *rom, const u8 *drec)
 {
 	if (!rom || !drec || drec[24] == 0xff)
@@ -1966,10 +1981,15 @@ inline u16 drum_pitch_reg(const u8 *rom, const u8 *rec, int cents)
 	int c = cents < 0 ? -cents : cents;
 	if (c > 9600)
 		c = 9600;
-	const u16 t = rd16(rom, DRUM_PITCH_TAB + u32(c) * 2);
-	u16 v = cents < 0 ? u16((-int(t)) & 0x3fff) : u16(t & 0x3fff);
+	const int t = int(rd16(rom, DRUM_PITCH_TAB + u32(c) * 2) & 0x3fff);
 	const u32 addr = u32(rec[38]) << 24 | u32(rec[39]) << 16 | u32(rec[40]) << 8 | rec[41];
-	if (((addr >> 30) & 3) == 3)
+	const bool fmt3 = ((addr >> 30) & 3) == 3;
+	// **音程には上下の頭打ちがある**（6.236。打の粗調を 0-127 と振って確かめた）。
+	// 下は -0x1FFF（TknoKtLo の鍵 38 で `2001`）、上は 0x1BFF（7 オクターブ。SLatinKt の鍵 36 で
+	// `1bff`）、**形式 3 の波形は上が 0x7FF**（2 オクターブ。China Kit の鍵 38 で `47ff`）
+	const int sv = std::clamp(cents < 0 ? -t : t, -0x1fff, fmt3 ? 0x7ff : 0x1bff);
+	u16 v = u16(sv & 0x3fff);
+	if (fmt3)
 		v = u16(v | 0x4000);
 	return v;
 }
@@ -1999,10 +2019,11 @@ inline int drum_atk_idx(const u8 *rec, int atk) { return drum_rec_idx(rec, 13, a
 
 inline int drum_cut_idx(const u8 *rec, int cut) { return drum_rec_idx(rec, 11, cut); }
 
+// **減衰 1 と減衰 2 は別の値**（3n rr 0E・0F）。NRPN 17 は両方に同じ値を入れる
 inline slot_regs drum_note(const u8 *rom, const u8 *rec, int att,
                            const defaults &d = defaults(),
                            int coarse = 64, int fine = 64, int atk = 64,
-                           int cut = 64, int reso = 64, int dec = 64)
+                           int cut = 64, int reso = 64, int dec1 = 64, int dec2 = 64)
 {
 	slot_regs r;
 	if (!rom || !rec)
@@ -2025,8 +2046,8 @@ inline slot_regs drum_note(const u8 *rom, const u8 *rec, int att,
 		r.set(0x06, u16(u16(rom[ATTACK_TAB + u32(ai)]) << 8
 		                | (ai >= 126 ? 0x00 : 0x7e)));
 	}
-	r.set(0x07, u16(u16(rom[DECAY_TAB + u32(drum_rec_idx(rec, 14, dec))]) << 8 | 0x04));
-	r.set(0x08, u16(u16(rom[DECAY_TAB + u32(drum_rec_idx(rec, 15, dec))]) << 8
+	r.set(0x07, u16(u16(rom[DECAY_TAB + u32(drum_rec_idx(rec, 14, dec1))]) << 8 | 0x04));
+	r.set(0x08, u16(u16(rom[DECAY_TAB + u32(drum_rec_idx(rec, 15, dec2))]) << 8
 	                | u16(((0x7f - int(rec[10])) * 2) & 0xff)));
 	r.set(0x09, u16(att & 0xff));
 	r.set(0x0a, 0x7000);
@@ -2080,6 +2101,9 @@ inline int drum_att(const u8 *rom, const u8 *rec, int level, int vel,
 {
 	if (!rom)
 		return 0x40;
+	// **打の音量が 0 なら減衰をいっぱいにする**（実機は `0xFE`。StandKit の鍵 38 で確かめた。6.236）
+	if (level <= 0)
+		return 0xfe;
 	const int adj = rec ? int(s8(rec[29])) : 0;
 	int l = (level + adj + 1) * (gain > 128 ? 128 : (gain < 0 ? 0 : gain)) >> 7;
 	if (l < 1) l = 1;

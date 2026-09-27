@@ -1170,8 +1170,150 @@ void route_cell(int part, xg::model &m, bridge &br, float w, float h)
 	ImGui::Dummy(ImVec2(w, h));
 }
 
+// ---- ドラムのタブ。パートモードが DRUMS1-4 のパートで、鍵ごとのセットアップ（3n rr pp）を絵つきで触る。
+// エディタのドラムの面で行をダブルクリックすると、このタブがその鍵で開く
+int g_drum_held = -1, g_drum_held_slot = -1;   // 「鳴らす」で押さえている鍵と、送った口 × 16 + ch
+u64 g_drum_prev[2] = {};                       // 「弾いた鍵を追う」の前のコマの押さえ
+bool g_drum_follow = false;
+
+void drum_release(bridge &br)
+{
+	if (g_drum_held < 0)
+		return;
+	const u8 off[3] = { u8(0x80 | (g_drum_held_slot & 15)), u8(g_drum_held), 64 };
+	br.send_port(g_drum_held_slot / 16, off, 3);
+	g_drum_held = -1;
+}
+
+void drum_tab(int part, xg::model &m, const xg_snapshot &ram, bridge &br, float room_h)
+{
+	const float fs = ImGui::GetFontSize();
+	const ImGuiStyle &st = ImGui::GetStyle();
+	const int set = drum_set_of(ram, part);
+	if (set < 0) {
+		ImGui::Spacing();
+		ImGui::TextWrapped("%s", ram.parts[part][0x07] == 1
+		                             ? UI_TEXT(ps_drum_plain, "Part mode DRUM (no number) ignores every drum setup. Set it to DRUMS1-4 to edit its keys here")
+		                             : UI_TEXT(ps_drum_not, "This part is not a drum part (part mode DRUMS1-4). Choose a drum kit or set the part mode to DRUMS1-4 to edit its keys here"));
+		return;
+	}
+	const float y0 = ImGui::GetCursorScreenPos().y;
+	int key = shape_drum_key();
+	const int slot = ram.parts[part][0x04];            // 受信の口 × 16 + ch（127 は OFF）
+	// 弾いた鍵を追う: 新しく押さえた鍵のうち、セットアップのある鍵
+	if (slot < XG_PARTS) {
+		const u64 *now = ram.notes[slot];
+		if (g_drum_follow)
+			for (int k = XG_DRUM_KEY0; k < XG_DRUM_KEY0 + XG_DRUM_KEYS; k++) {
+				const u64 bit = u64(1) << (k & 63);
+				if ((now[k >> 6] & bit) && !(g_drum_prev[k >> 6] & bit) && k != g_drum_held) {
+					set_shape_drum_key(key = k);
+					break;
+				}
+			}
+		g_drum_prev[0] = now[0];
+		g_drum_prev[1] = now[1];
+	}
+	ImGui::AlignTextToFramePadding();
+	ImGui::Text("DRUMS%d  %s", set + 1, drum_kit_name(m, part).c_str());
+	ImGui::SameLine();
+	// 鍵の名前は今のキットの楽器名（ROM の表）。音の無い鍵は番号だけ
+	auto key_label = [&](int k) {
+		std::string s = drum_key_text(k);
+		const std::string g = drum_key_name(m, part, k);
+		if (!g.empty())
+			s += "  " + g;
+		return s;
+	};
+	ImGui::SetNextItemWidth(fs * 13);
+	if (ImGui::BeginCombo("##dkey", key_label(key).c_str(), ImGuiComboFlags_HeightLarge)) {
+		for (int k = XG_DRUM_KEY0; k < XG_DRUM_KEY0 + XG_DRUM_KEYS; k++) {
+			if (ImGui::Selectable(key_label(k).c_str(), k == key))
+				set_shape_drum_key(key = k);
+			if (k == key && ImGui::IsWindowAppearing())
+				ImGui::SetScrollHereY();
+		}
+		ImGui::EndCombo();
+	}
+	ImGui::SameLine();
+	if (ImGui::ArrowButton("##dprev", ImGuiDir_Left))
+		set_shape_drum_key(key = std::max(XG_DRUM_KEY0, key - 1));
+	ImGui::SameLine();
+	if (ImGui::ArrowButton("##dnext", ImGuiDir_Right))
+		set_shape_drum_key(key = std::min(XG_DRUM_KEY0 + XG_DRUM_KEYS - 1, key + 1));
+	ImGui::SameLine();
+	// 鳴らす（押している間）。受信チャンネルが OFF なら鳴らせない
+	ImGui::BeginDisabled(slot >= XG_PARTS);
+	ImGui::Button(UI_TEXT(ps_drum_play, "Play"));
+	if (ImGui::IsItemActivated() && slot < XG_PARTS) {
+		drum_release(br);
+		const u8 on[3] = { u8(0x90 | (slot & 15)), u8(key), 100 };
+		br.send_port(slot / 16, on, 3);
+		g_drum_held = key;
+		g_drum_held_slot = slot;
+	}
+	if (ImGui::IsItemDeactivated())
+		drum_release(br);
+	ImGui::EndDisabled();
+	ImGui::SameLine();
+	ImGui::Checkbox(UI_TEXT(ps_drum_follow, "Follow played keys"), &g_drum_follow);
+	// 鳴らし方の 4 つ（組・重ね方・離し・押し）は数が少ないので、ここに並べる
+	{
+		const drum_param *dp = drum_params();
+		ImGui::SameLine(0, fs * 1.2f);
+		int alt = drum_value(ram, set, key, 3);
+		ImGui::SetNextItemWidth(fs * 4.5f);
+		const std::string at = std::string("Alt ") + drum_value_text(3, alt);
+		if (ImGui::DragInt("##alt", &alt, 0.2f, dp[3].lo, dp[3].hi, at.c_str(), ImGuiSliderFlags_AlwaysClamp))
+			drum_write(br, set, key, 3, alt);
+		if (ImGui::IsItemHovered())
+			hint("Alt  %s\n%s", drum_value_text(3, alt).c_str(), help_for("drum.Alt") ? help_for("drum.Alt") : "");
+		for (int i : { 8, 9, 10 }) {
+			ImGui::SameLine();
+			bool on = drum_value(ram, set, key, i) != 0;
+			const std::string label = std::string(dp[i].head) + "##t" + std::to_string(i);
+			if (ImGui::Checkbox(label.c_str(), &on))
+				drum_write(br, set, key, i, on ? 1 : 0);
+			if (ImGui::IsItemHovered()) {
+				const std::string hk = std::string("drum.") + dp[i].head;
+				hint("%s  %s\n%s", dp[i].head, drum_value_text(i, on ? 1 : 0).c_str(), help_for(hk.c_str()) ? help_for(hk.c_str()) : "");
+			}
+		}
+	}
+
+	const float h = std::max(fs * 8.0f, room_h - (ImGui::GetCursorScreenPos().y - y0));
+	const float w = (ImGui::GetContentRegionAvail().x - st.ItemSpacing.x * 2.0f) / 3.0f;
+	auto box = [&](const char *id, const char *title, auto draw_cell) {
+		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(st.WindowPadding.x, fs * 0.1f));
+		const bool open = ImGui::BeginChild(id, ImVec2(w, h), ImGuiChildFlags_Borders,
+		                                    ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+		ImGui::PopStyleVar();
+		if (open) {
+			ImGui::PushFont(nullptr, fs * 0.8f);
+			ImGui::TextUnformatted(title);
+			ImGui::PopFont();
+			const ImVec2 r = ImGui::GetContentRegionAvail();
+			draw_cell(r.x, std::max(fs * 4.0f, r.y));
+		}
+		ImGui::EndChild();
+	};
+	box("dmix", UI_TEXT(ps_drum_title_mix, "Pitch, level, pan and sends"),
+	    [&](float cw, float ch) { overview::drum_mix_cell(part, set, key, ram, br, cw, ch); });
+	ImGui::SameLine();
+	box("dfilter", UI_TEXT(ps_drum_title_filter, "Filter and EQ (this key)"),
+	    [&](float cw, float ch) { overview::drum_filter_cell(part, set, key, ram, br, cw, ch); });
+	ImGui::SameLine();
+	box("denv", UI_TEXT(ps_drum_title_env, "EG (this key)"),
+	    [&](float cw, float ch) { overview::drum_env_cell(part, set, key, ram, br, cw, ch); });
+}
+
 } // namespace
 
+
+void part_shapes::drum_hidden(bridge &br)
+{
+	drum_release(br);
+}
 
 void part_shapes::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 {
@@ -1255,7 +1397,8 @@ void part_shapes::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 	// ---- 左に音色を選ぶ面、右はタブ: 「形」は 4 つの区画（2 × 2）、「すべて」はパートのパラメータ全部
 	const ImVec2 avail = ImGui::GetContentRegionAvail();
 	// 音色を選ぶ面は、左に分類・右に音色とバンク違いの 2 列（xgui::program_pane）
-	const float pane_w = std::min(fs * 15.6f, avail.x * 0.3f);     // 前の 6 割
+	// 前の 6 割。ドラムのタブのとき（キットと 12 文字の楽器名）は少し広く
+	const float pane_w = m_drum_tab ? std::min(fs * 18.0f, avail.x * 0.34f) : std::min(fs * 15.6f, avail.x * 0.3f);
 	// 下の説明の帯（小さめの字で 3 行）。「説明を出す」を切っていれば帯ごと出さず、その高さを絵に回す
 	const bool show_bar = help_on();
 	ImGui::PushFont(nullptr, fs * BAR_SCALE);
@@ -1270,7 +1413,11 @@ void part_shapes::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 		if (ImGui::BeginChild("voicepane", ImVec2(pane_w, body_h)))
 		{
 			ImGui::PushFont(nullptr, fs * 0.85f);   // 分類・音色・バンク違いの 3 つは小さめの字で
-			program_pane(part, m, &ram, br);
+			// ドラムのタブのときは、左にキット・右にいまのキットの鍵ごとの楽器名
+			if (m_drum_tab)
+				drum_pane(part, m, br);
+			else
+				program_pane(part, m, &ram, br);
 			ImGui::PopFont();
 		}
 		ImGui::EndChild();
@@ -1311,6 +1458,8 @@ void part_shapes::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 
 	ImGui::BeginGroup();
 	const float top_y = ImGui::GetCursorScreenPos().y;
+	const bool was_drum = m_drum_tab;
+	m_drum_tab = false;
 	if (ImGui::BeginTabBar("right")) {
 		if (ImGui::BeginTabItem(UI_TEXT(ps_tab_shape, "Shape"))) {
 			scope = part;
@@ -1391,6 +1540,14 @@ void part_shapes::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 			ImGui::EndChild();
 			ImGui::EndTabItem();
 		}
+		// ドラムのタブ。エディタのドラムの面からの頼みなら前に出す
+		const ImGuiTabItemFlags drum_flags = take_drum_tab() ? ImGuiTabItemFlags_SetSelected : 0;
+		if (ImGui::BeginTabItem(UI_TEXT(ps_tab_drum, "Drum"), nullptr, drum_flags)) {
+			scope = part;
+			m_drum_tab = true;
+			drum_tab(part, m, ram, br, body_h - (ImGui::GetCursorScreenPos().y - top_y));
+			ImGui::EndTabItem();
+		}
 		if (ImGui::BeginTabItem(UI_TEXT(ps_tab_matrix, "Matrix"))) {
 			// 操作子 6 つ × 行き先 6 つ（モジュレーションのマトリクス）
 			const float room_h = body_h - (ImGui::GetCursorScreenPos().y - top_y);
@@ -1430,6 +1587,8 @@ void part_shapes::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 			ImGui::EndTabItem();
 		}
 		ImGui::EndTabBar();
+	} else {
+		m_drum_tab = was_drum;
 	}
 	ImGui::EndGroup();
 

@@ -1771,6 +1771,29 @@ def case_headrace():
     return [track(seq(ev))], 6.0
 
 
+def case_drumsetup():
+    """**パートモードとドラムセットアップ**（08 pp 07・3n rr pp）。
+
+    ドラムセットアップは DRUMS1-4 の 4 組で、パートモードが DRUMS1-4 のパートだけが
+    編集を受ける。「DRUM」（番号なし、08 pp 07 = 1）のパートはどの組の編集も効かず、
+    キットの既定値のまま鳴る。Bank 127 でドラムにしただけのパートには空いている組が
+    割り当てられる（10 番が DRUMS1 を使っていれば DRUMS2）。firmware で確かめた。
+    native は DRUM を DRUMS1 と同じに扱っていて、DRUMS1 の編集が効いてしまっていた。
+    DRUMS1 と DRUMS2 のスネア（鍵 38）の音量をそれぞれ 0 にして、4 つのパートで鳴らす"""
+    ev = head()
+    ev += [(0.3, bytes([0xb0, 0, 127])), (0.3, bytes([0xb0, 32, 0])), (0.3, b'\xc0\x00')]   # 1: Bank 127 だけ
+    ev += [(0.3, xg([0x08, 0x01, 0x07, 0x01])), (0.32, bytes([0xb1, 0, 127])), (0.32, b'\xc1\x00')]   # 2: DRUM
+    ev += [(0.3, xg([0x08, 0x02, 0x07, 0x03])), (0.32, bytes([0xb2, 0, 127])), (0.32, b'\xc2\x00')]   # 3: DRUMS2
+    for k, setup in enumerate((0, 1)):
+        base = 1.0 + k * 2.5
+        if setup == 1:
+            ev.append((base - 0.4, xg([0x30, 38, 0x02, 0x7f])))                # DRUMS1 を戻す
+        ev.append((base - 0.3, xg([0x30 + setup, 38, 0x02, 0x00])))             # その組のスネアを 0 に
+        for i, ch in enumerate((9, 0, 1, 2)):
+            ev += note(ch, 38, 110, base + i * 0.5, 0.1)
+    return [track(seq(ev))], 7.0
+
+
 def case_calshort():
     """**写し取りが足りないまま鳴らす**（doc/native-engine.md の 6.219）。
 
@@ -1805,6 +1828,7 @@ CASES = {
     "piano":   case_piano,
     "calshort": case_calshort,
     "headrace": case_headrace,
+    "drumsetup": case_drumsetup,
     "chord":   case_chord,
     "drums":   case_drums,
     "effects": case_effects,

@@ -68,6 +68,29 @@ inline u32 drum_setup(int set, int note, int param)
 	     + u32(note - DRUM_SETUP_NOTE0) * DRUM_SETUP_PARAM + u32(param);
 }
 
+// XG の番地（3n rr pp の pp）→ 上の並びの番号（0-22）。無い番地は -1。
+// 00-0F はそのまま、あとは 20・21・24・25・50・60・61（xgtest --drumprobe で割り出した）
+inline int drum_setup_index(int addr)
+{
+	if (addr >= 0 && addr < 16)
+		return addr;
+	switch (addr) {
+	case 0x20: return 16;   // EQ 低音の量
+	case 0x21: return 17;   // EQ 高音の量
+	case 0x24: return 18;   // EQ 低音の周波数
+	case 0x25: return 19;   // EQ 高音の周波数
+	case 0x50: return 20;   // HPF
+	case 0x60: return 21;   // 強さで音程
+	case 0x61: return 22;   // 強さで切る高さ
+	default:   return -1;
+	}
+}
+// その番号の既定値（リセットした直後のワーク RAM。EQ の周波数のほかは 64）
+inline int drum_setup_default(int index)
+{
+	return index == 18 ? 0x0c : index == 19 ? 0x36 : 64;
+}
+
 constexpr u32 VOICE_MODE = 0x226bc; // 音色の引き方（1 が XG）。xg/voices.h の lookup に渡す
 constexpr u32 VOICE_SET  = 0x226de; // 音色の組の選び方（MU2000 の音色なら 1）
 constexpr u32 EFFECT   = 0x0cad8;   // 02 01 00 から。下の EFFECTS の並び

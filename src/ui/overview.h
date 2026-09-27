@@ -54,6 +54,14 @@ public:
 	static void peg_small(int part, xg::model &m, bridge &br, float w, float h, bool compact);
 	// EG とピッチ EG を 1 枚に（同じ時間の目盛り）。上の段に絵、下の段に 7 本のフェーダー（音色の窓の右の列）
 	static void env_cell(int part, xg::model &m, bridge &br, float w, float h);
+	// ---- ドラムの 1 打（音色の窓のドラムのタブ）。set は DRUMS の組（0-3）、key は鍵（13-91）。
+	// 値は xgui::drum_value で読み、フェーダーを動かすと drum_write（3n rr pp）で書く。どれも上下 2 段の区画
+	// フィルタと EQ: 打のフィルタと打ごとの EQ を合わせた実際の特性。下に Cutoff・Reso・VelCut・HPF と EQ の 4 本
+	static void drum_filter_cell(int part, int set, int key, const xg_snapshot &ram, bridge &br, float w, float h);
+	// EG: 音量の形を実際の時間で。下に立ち上がり・減衰 1・減衰 2
+	static void drum_env_cell(int part, int set, int key, const xg_snapshot &ram, bridge &br, float w, float h);
+	// 高さ・音量・パン・送り: 上に置き場所の絵と高さの字、下に 8 本
+	static void drum_mix_cell(int part, int set, int key, const xg_snapshot &ram, bridge &br, float w, float h);
 	// 音色の窓の縦 2 段つなぎの区画（フィルタと EQ、EG とピッチ EG）で、絵の段が占める割合
 	static constexpr float MAISON_SPLIT = 0.5f;
 	// パートの音のスペクトラムを a-b の四角に描く。横は実際の周波数（20 Hz-20 kHz の対数）、縦は出す線の

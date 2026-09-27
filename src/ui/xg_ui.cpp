@@ -342,6 +342,174 @@ bool g_master_request = false;
 void request_master() { g_master_request = true; }
 bool take_master_request() { const bool r = g_master_request; g_master_request = false; return r; }
 
+// ---- ドラムセットアップ
+// RAM の 23 個と XG の番地の対応は、firmware に 1 つずつ書かせて割り出した
+// （xgtest --drumprobe。0-15 が 00-0F、あと 20・21・24・25・50・60・61）
+namespace {
+constexpr drum_param DRUM_PARAMS[XG_DRUM_PARAMS] = {
+	{ 0x00, "Pitch",  0, 127, dshow::signed64 }, { 0x01, "Fine",   0, 127, dshow::signed64 },
+	{ 0x02, "Level",  0, 127, dshow::plain },    { 0x03, "Alt",    0, 127, dshow::alt },
+	{ 0x04, "Pan",    0, 127, dshow::pan },      { 0x05, "Rev",    0, 127, dshow::plain },
+	{ 0x06, "Cho",    0, 127, dshow::plain },    { 0x07, "Var",    0, 127, dshow::plain },
+	{ 0x08, "Assign", 0, 1,   dshow::assign },   { 0x09, "RcvOff", 0, 1,   dshow::toggle },
+	{ 0x0a, "RcvOn",  0, 1,   dshow::toggle },   { 0x0b, "Cutoff", 0, 127, dshow::signed64 },
+	{ 0x0c, "Reso",   0, 127, dshow::signed64 }, { 0x0d, "Atk",    0, 127, dshow::signed64 },
+	{ 0x0e, "Dcy1",   0, 127, dshow::signed64 }, { 0x0f, "Dcy2",   0, 127, dshow::signed64 },
+	{ 0x20, "EQ Lo",  0x34, 0x4c, dshow::eq_gain }, { 0x21, "EQ Hi", 0x34, 0x4c, dshow::eq_gain },
+	{ 0x24, "Lo Hz",  4, 40,  dshow::freq },     { 0x25, "Hi Hz",  28, 58, dshow::freq },
+	{ 0x50, "HPF",    0, 127, dshow::signed64 }, { 0x60, "VelPit", 0x30, 0x50, dshow::vel },
+	{ 0x61, "VelCut", 0x30, 0x50, dshow::vel },
+};
+
+// 書いたばかりの値（組・鍵・番号ごとに最後の 1 つ）
+struct drum_pending { int set, key, idx, value; double at; };
+std::vector<drum_pending> g_drum_pending;
+
+int  g_drum_key = 36;
+bool g_drum_tab = false;
+}
+
+const drum_param *drum_params() { return DRUM_PARAMS; }
+
+int drum_index(u8 addr)
+{
+	for (int i = 0; i < XG_DRUM_PARAMS; i++)
+		if (DRUM_PARAMS[i].addr == addr)
+			return i;
+	return -1;
+}
+
+std::string drum_value_text(int idx, int v)
+{
+	if (idx < 0 || idx >= XG_DRUM_PARAMS)
+		return "--";
+	const drum_param &d = DRUM_PARAMS[idx];
+	char buf[16];
+	switch (d.show) {
+	case dshow::signed64:
+	case dshow::vel:     std::snprintf(buf, sizeof(buf), "%+d", v - 64); break;
+	case dshow::eq_gain: std::snprintf(buf, sizeof(buf), "%+ddB", v - 64); break;
+	case dshow::alt:     if (v) std::snprintf(buf, sizeof(buf), "%d", v); else std::snprintf(buf, sizeof(buf), "Off"); break;
+	case dshow::pan:
+		if (v == 0)       std::snprintf(buf, sizeof(buf), "Rnd");
+		else if (v == 64) std::snprintf(buf, sizeof(buf), "C");
+		else if (v < 64)  std::snprintf(buf, sizeof(buf), "L%d", 64 - v);
+		else              std::snprintf(buf, sizeof(buf), "R%d", v - 64);
+		break;
+	case dshow::assign:  std::snprintf(buf, sizeof(buf), "%s", v ? "Multi" : "Single"); break;
+	case dshow::toggle:  std::snprintf(buf, sizeof(buf), "%s", v ? "On" : "Off"); break;
+	case dshow::freq:    return eq::hz_text(v);
+	default:             std::snprintf(buf, sizeof(buf), "%d", v); break;
+	}
+	return buf;
+}
+
+std::string drum_key_text(int key)
+{
+	static const char *const N[12] = { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" };
+	char buf[16];
+	std::snprintf(buf, sizeof(buf), "%d %s%d", key, N[key % 12], key / 12 - 2);
+	return buf;
+}
+
+// **GM の打楽器の並び**（鍵 35-81）。キットで実際の音は違うので目安。
+// ROM のドラムの記録から名前を引く道はまだ解けていない（voices.h の drum_record）
+const char *gm_drum_name(int key)
+{
+	static const char *const GM[47] = {
+		"Acoustic Bass Drum", "Bass Drum 1", "Side Stick", "Acoustic Snare", "Hand Clap",
+		"Electric Snare", "Low Floor Tom", "Closed Hi-Hat", "High Floor Tom", "Pedal Hi-Hat",
+		"Low Tom", "Open Hi-Hat", "Low-Mid Tom", "Hi-Mid Tom", "Crash Cymbal 1",
+		"High Tom", "Ride Cymbal 1", "Chinese Cymbal", "Ride Bell", "Tambourine",
+		"Splash Cymbal", "Cowbell", "Crash Cymbal 2", "Vibraslap", "Ride Cymbal 2",
+		"Hi Bongo", "Low Bongo", "Mute Hi Conga", "Open Hi Conga", "Low Conga",
+		"High Timbale", "Low Timbale", "High Agogo", "Low Agogo", "Cabasa",
+		"Maracas", "Short Whistle", "Long Whistle", "Short Guiro", "Long Guiro",
+		"Claves", "Hi Wood Block", "Low Wood Block", "Mute Cuica", "Open Cuica",
+		"Mute Triangle", "Open Triangle" };
+	return key >= 35 && key <= 81 ? GM[key - 35] : "";
+}
+
+namespace {
+bool kit_of(xg::model &m, int part, int &msb, int &prog)
+{
+	int lsb = 0;
+	if (!m.get(P("part.bank_msb"), part, msb) || !m.get(P("part.bank_lsb"), part, lsb) || !m.get(P("part.program"), part, prog))
+		return false;
+	msb = shown_bank_msb(part, m, msb);      // GS のドラム（issue #52）
+	return msb == 126 || msb == 127;
+}
+}
+
+std::string drum_key_name(xg::model &m, int part, int key)
+{
+	int msb = 0, prog = 0;
+	const xg::voice_rom *vr = voices();
+	return vr && kit_of(m, part, msb, prog) ? vr->drum_key_name(msb, prog, key) : std::string();
+}
+
+std::string drum_kit_name(xg::model &m, int part)
+{
+	int msb = 0, prog = 0;
+	const xg::voice_rom *vr = voices();
+	return vr && kit_of(m, part, msb, prog) ? vr->kit_name(msb, prog) : std::string();
+}
+
+int drum_set_of(const xg_snapshot &ram, int part)
+{
+	if (part < 0 || part >= XG_PARTS)
+		return -1;
+	const int mode = ram.parts[part][0x07];
+	return mode >= 2 && mode - 2 < XG_DRUM_SETS ? mode - 2 : -1;
+}
+
+int drum_value(const xg_snapshot &ram, int set, int key, int idx)
+{
+	if (set < 0 || set >= XG_DRUM_SETS || key < XG_DRUM_KEY0 || key >= XG_DRUM_KEY0 + XG_DRUM_KEYS ||
+	    idx < 0 || idx >= XG_DRUM_PARAMS)
+		return 64;
+	int v = ram.drum[set][key - XG_DRUM_KEY0][idx];
+	const double now = ImGui::GetTime();
+	for (const drum_pending &e : g_drum_pending)
+		if (e.set == set && e.key == key && e.idx == idx && now - e.at < 0.5 && v != e.value)
+			v = e.value;
+	return std::clamp(v, DRUM_PARAMS[idx].lo, DRUM_PARAMS[idx].hi);
+}
+
+void drum_write(bridge &br, int set, int key, int idx, int value, bool drag)
+{
+	if (set < 0 || set >= XG_DRUM_SETS || idx < 0 || idx >= XG_DRUM_PARAMS)
+		return;
+	const drum_param &d = DRUM_PARAMS[idx];
+	value = std::clamp(value, d.lo, d.hi);
+	std::vector<u8> msg = { 0xf0, 0x43, 0x10, 0x4c, u8(0x30 + set), u8(key & 0x7f), d.addr, u8(value & 0x7f), 0xf7 };
+	if (drag)
+		drag_send(br, std::move(msg));
+	else
+		br.send(std::move(msg));
+	const double now = ImGui::GetTime();
+	auto it = std::find_if(g_drum_pending.begin(), g_drum_pending.end(),
+	                       [&](const drum_pending &e) { return e.set == set && e.key == key && e.idx == idx; });
+	if (it != g_drum_pending.end())
+		*it = { set, key, idx, value, now };
+	else
+		g_drum_pending.push_back({ set, key, idx, value, now });
+	// 古いものは捨てる
+	g_drum_pending.erase(std::remove_if(g_drum_pending.begin(), g_drum_pending.end(),
+	                                    [&](const drum_pending &e) { return now - e.at > 1.0; }),
+	                     g_drum_pending.end());
+}
+
+int  shape_drum_key() { return g_drum_key; }
+void set_shape_drum_key(int key) { g_drum_key = std::clamp(key, XG_DRUM_KEY0, XG_DRUM_KEY0 + XG_DRUM_KEYS - 1); }
+void request_drum(int part, int key)
+{
+	set_shape_drum_key(key);
+	g_drum_tab = true;
+	request_part(part);
+}
+bool take_drum_tab() { const bool r = g_drum_tab; g_drum_tab = false; return r; }
+
 namespace {
 bool g_file_dialogs = false;
 file_ask g_file_ask = file_ask::none;
@@ -578,6 +746,21 @@ void audition_start(int part, int msb, xg::model &m, bridge &br)
 	audition &a = g_audition;
 	a.slot = rcv;
 	a.notes.assign(keys, keys + n);
+	const double t = now_seconds();
+	a.on_at = t + 0.06;
+	a.off_at = a.on_at + 1.0;
+}
+
+// 鍵を 1 つ指定して鳴らす（ドラムのタブの左の面）。印の付いた鍵とは別
+void audition_note(int part, int key, xg::model &m, bridge &br)
+{
+	audition_off(br);
+	int rcv = 127;
+	if (!m.get(P("part.rcv_channel"), part, rcv) || rcv < 0 || rcv > 63)
+		return;
+	audition &a = g_audition;
+	a.slot = rcv;
+	a.notes.assign(1, key);
 	const double t = now_seconds();
 	a.on_at = t + 0.06;
 	a.off_at = a.on_at + 1.0;
@@ -902,6 +1085,75 @@ void program_pane(int part, xg::model &m, const xg_snapshot *ram, bridge &br)
 
 
 
+void drum_pane(int part, xg::model &m, bridge &br)
+{
+	int msb = 0, lsb = 0, prog = 0;
+	const bool known = m.get(P("part.bank_msb"), part, msb) && m.get(P("part.bank_lsb"), part, lsb) &&
+	                   m.get(P("part.program"), part, prog);
+	msb = shown_bank_msb(part, m, msb);          // GS のドラム（issue #52）
+	const bool kit = known && (msb == 127 || msb == 126);
+	const xg::voice_rom *vr = voices();
+	const int key = shape_drum_key();
+
+	audition_tick(br);
+
+	const ImVec2 avail = ImGui::GetContentRegionAvail();
+	const float fs = ImGui::GetFontSize();
+
+	// ---- 左: キット。ドラムキット（バンク 127）の下に効果音キット（バンク 126）
+	const float kit_w = std::min(fs * 8.5f, avail.x * 0.45f);
+	if (ImGui::BeginChild("kits", ImVec2(kit_w, 0), ImGuiChildFlags_Borders)) {
+		for (int kmsb : { 127, 126 }) {
+			ImGui::SeparatorText(kmsb == 127 ? UI_TEXT(xgui_kit_drum, "Drum kit") : UI_TEXT(xgui_kit_sfx, "SFX kit"));
+			for (int i = 0; i < 128; i++) {
+				const std::string name = vr ? vr->kit_name(kmsb, i) : std::string();
+				if (name.empty())
+					continue;
+				char label[48];
+				std::snprintf(label, sizeof(label), "%3d %s##k%d_%d", i + 1, name.c_str(), kmsb, i);
+				const bool here = kit && msb == kmsb && prog == i;
+				if (ImGui::Selectable(label, here) && !here) {
+					select_voice(part, kmsb, 0, i, m, br);
+					audition_note(part, key, m, br);
+				}
+				if (here && ImGui::IsWindowAppearing())
+					ImGui::SetScrollHereY();
+			}
+		}
+	}
+	ImGui::EndChild();
+	ImGui::SameLine();
+
+	// ---- 右: いまのキットの鍵ごとの楽器名。音の無い鍵は薄く番号だけ
+	if (ImGui::BeginChild("keys", ImVec2(0, 0), ImGuiChildFlags_Borders)) {
+		if (!kit || !vr) {
+			ImGui::TextWrapped("%s", UI_TEXT(xgui_drum_pick_kit, "Choose a kit on the left to list the instrument of each key here"));
+		} else {
+			// ドラムのタブで鍵が替わったら、その行まで送る
+			static int shown_key = -1;
+			const bool follow = key != shown_key || ImGui::IsWindowAppearing();
+			shown_key = key;
+			for (int k = XG_DRUM_KEY0; k < XG_DRUM_KEY0 + XG_DRUM_KEYS; k++) {
+				const std::string name = vr->drum_key_name(msb, prog, k);
+				char label[48];
+				std::snprintf(label, sizeof(label), "%-3d %s##n%d", k, name.c_str(), k);
+				if (name.empty())
+					ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetColorU32(ImGuiCol_TextDisabled));
+				if (ImGui::Selectable(label, k == key)) {
+					set_shape_drum_key(k);
+					shown_key = k;
+					audition_note(part, k, m, br);
+				}
+				if (name.empty())
+					ImGui::PopStyleColor();
+				if (k == key && follow)
+					ImGui::SetScrollHereY();
+			}
+		}
+	}
+	ImGui::EndChild();
+}
+
 // ---- 説明（ヘルプ）と言語
 //
 // 文は「キー → 言語ごとの文」の表で持つ。言語を足すときは ui/lang.h の
@@ -1080,6 +1332,29 @@ const help_text HELP[] = {
 	{ "part.variation_send", {
 		"バリエーションへの送り量（CC94）。接続が SYSTEM のときだけ効く",
 		"Variation send (CC94). Only used when the variation is connected as SYSTEM." } },
+	{ "drum.Pitch", { "打の高さ（粗）。半音ずつ。0 が元の高さ", "The key's pitch, coarse, in semitones. 0 is the original pitch" } },
+	{ "drum.Fine", { "打の高さ（細）。セントずつ", "The key's pitch, fine, in cents" } },
+	{ "drum.Level", { "打の音量", "The key's level" } },
+	{ "drum.Alt", { "オルタネートグループ。同じ番号の打は互いを止める（ハイハットの開閉など）。Off は組なし", "Alternate group. Keys with the same number cut each other off (open and closed hi-hat). Off means none" } },
+	{ "drum.Pan", { "打のパン。Rnd は打つたびに位置が変わる", "The key's pan. Rnd moves it on every hit" } },
+	{ "drum.Rev", { "リバーブへの送り。パートの送り（CC91）と掛け合わせる", "Send to reverb, multiplied by the part's send (CC91)" } },
+	{ "drum.Cho", { "コーラスへの送り。パートの送り（CC93）と掛け合わせる", "Send to chorus, multiplied by the part's send (CC93)" } },
+	{ "drum.Var", { "バリエーションへの送り", "Send to variation" } },
+	{ "drum.Assign", { "Single は同じ打が重なると前の音を止める。Multi は重ねて鳴らす", "Single stops the previous hit of the same key; Multi lets hits overlap" } },
+	{ "drum.RcvOff", { "ノートオフを受けるか。Off なら打ったら鳴りきる", "Whether note-off is received. Off lets each hit ring out" } },
+	{ "drum.RcvOn", { "ノートオンを受けるか。Off ならこの鍵は鳴らない", "Whether note-on is received. Off silences this key" } },
+	{ "drum.Cutoff", { "フィルタの切る高さ。この鍵の元の値からずらす（− で暗く）", "Filter cutoff, shifted from the key's own value (minus is darker)" } },
+	{ "drum.Reso", { "フィルタの共振。この鍵の元の値からずらす", "Filter resonance, shifted from the key's own value" } },
+	{ "drum.Atk", { "EG の立ち上がりの速さ（− でゆっくり）", "EG attack rate (minus is slower)" } },
+	{ "drum.Dcy1", { "EG の減衰 1 の速さ（− で長く伸びる）", "EG decay 1 rate (minus rings longer)" } },
+	{ "drum.Dcy2", { "EG の減衰 2 の速さ（− で長く伸びる）", "EG decay 2 rate (minus rings longer)" } },
+	{ "drum.EQ Lo", { "この鍵の EQ の低音の量。パートの EQ はドラムに掛からない", "This key's EQ low gain. The part EQ does not apply to drums" } },
+	{ "drum.EQ Hi", { "この鍵の EQ の高音の量", "This key's EQ high gain" } },
+	{ "drum.Lo Hz", { "この鍵の EQ の低音の周波数", "This key's EQ low frequency" } },
+	{ "drum.Hi Hz", { "この鍵の EQ の高音の周波数", "This key's EQ high frequency" } },
+	{ "drum.HPF", { "ハイパスの切る高さ。パートの HPF に足される", "High-pass cutoff, added to the part's HPF" } },
+	{ "drum.VelPit", { "強さで高さを変える深さ（絵には入らない）", "How much velocity changes the pitch (not in the picture)" } },
+	{ "drum.VelCut", { "強さで切る高さを変える深さ（絵には入らない）", "How much velocity changes the cutoff (not in the picture)" } },
 	{ "part.cutoff", { "フィルタのカットオフ（CC74）。音の明るさ", "Filter cutoff (CC74). Brightness." } },
 	{ "part.resonance", {
 		"フィルタのレゾナンス（CC71）。カットオフのあたりを強調する",

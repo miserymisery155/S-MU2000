@@ -85,10 +85,13 @@ int main(int argc, char **argv)
 		return 2;
 	}
 	const std::string dir = argv[1];
-	bool verbose = false, usb_host = false;
+	bool verbose = false, usb_host = false, drumprobe = false;
 	for (int i = 2; i < argc; i++) {
 		if (!std::strcmp(argv[i], "-v"))    verbose = true;
 		if (!std::strcmp(argv[i], "--usb")) usb_host = true;
+		// **ドラムセットアップの番地 → ワーク RAM の並び**を割り出す（ドラムの画面用）。
+		// 組 0・鍵 36 の番地 00-7F に 1 つずつ書き、23 バイトのどこが変わるかを出す
+		if (!std::strcmp(argv[i], "--drumprobe")) drumprobe = true;
 	}
 
 	rig g;
@@ -109,6 +112,37 @@ int main(int argc, char **argv)
 		for (; g.samples < 10 * RATE; g.samples++)
 			g.mu.run_sample(l, r);
 	g.pump(500);
+
+	if (drumprobe) {
+		const u8 key = 36;
+		auto row = [&]() {
+			std::vector<u8> v(xg::ram::DRUM_SETUP_PARAM);
+			for (u32 k = 0; k < xg::ram::DRUM_SETUP_PARAM; k++)
+				v[k] = g.mu.nvram()[xg::ram::drum_setup(0, key, int(k))];
+			return v;
+		};
+		std::printf("組 0・鍵 %d の既定: ", key);
+		for (u8 x : row())
+			std::printf("%02x ", x);
+		std::printf("\n");
+		for (int addr = 0; addr < 0x80; addr++) {
+			const std::vector<u8> before = row();
+			for (u8 val : { u8(0x01), u8(0x22), u8(0x33) }) {
+				g.send({ 0xf0, 0x43, 0x10, 0x4c, 0x30, key, u8(addr), val, 0xf7 });
+				g.pump(40);
+				const std::vector<u8> after = row();
+				for (u32 k = 0; k < after.size(); k++)
+					if (after[k] != before[k])
+						std::printf("番地 %02x -> RAM の %2u 番目（%02x を書いて %02x）\n", addr, k, val, after[k]);
+				if (after != before)
+					break;
+			}
+			// 戻す（ドラムセットアップのリセット）
+			g.send({ 0xf0, 0x43, 0x10, 0x4c, 0x00, 0x00, 0x7d, 0x00, 0xf7 });
+			g.pump(60);
+		}
+		return 0;
+	}
 
 	int checked = 0, bad = 0;
 	std::vector<std::string> problems;

@@ -175,17 +175,11 @@ struct amp_line {
 
 inline float att_db(double level) { return float(-level * 6.0206 / 1024.0); }
 
-// 1 要素ぶんを進める。keyoff_ms が負なら離さない（減衰 2 の終わりまで、上限 limit_ms）
-inline amp_line amp_run(const u8 *rom, const u8 *el, const u8 *part, float keyoff_ms, float limit_ms)
+// レジスタ（0x06 立ち上がり・0x07 減衰 1・0x08 減衰 2・離し）から進める。
+// keyoff_ms が負なら離さない（減衰 2 の終わりまで、上限 limit_ms）
+inline amp_line amp_regs_run(u16 atk, u16 dc1, u16 dc2, u16 rel, float keyoff_ms, float limit_ms)
 {
-	namespace nv = xg::nv;
 	amp_line line;
-	line.active = nv::element_active(el, NOTE, VEL);
-	const int cc_atk = part[0x1a], cc_dec = part[0x1b], cc_rel = part[0x1c];
-	const nv::slot_regs sr = nv::build_note(rom, el, NOTE, 0, nullptr, nv::defaults(), 0, VEL, cc_atk, cc_dec,
-	                                        64, 64, -1, NOTE, false, part[0x62], part[0x63]);
-	const u16 atk = sr.v[0x06], dc1 = sr.v[0x07], dc2 = sr.v[0x08];
-	const u16 rel = nv::release_reg(rom, el, NOTE, 0, cc_rel);
 	constexpr int CHUNK = 128;
 	const double chunk_ms = CHUNK / RATE * 1000.0;
 	double level = (atk & 0xff) ? double((atk & 0xff) << 6) : 0.0;
@@ -261,6 +255,19 @@ inline amp_line amp_run(const u8 *rom, const u8 *el, const u8 *part, float keyof
 	}
 	line.sustain_db = att_db(double((dc2 & 0xff) << 6));
 	line.keyoff_ms = keyoff_ms;
+	return line;
+}
+
+// 1 要素ぶんを進める。keyoff_ms が負なら離さない（減衰 2 の終わりまで、上限 limit_ms）
+inline amp_line amp_run(const u8 *rom, const u8 *el, const u8 *part, float keyoff_ms, float limit_ms)
+{
+	namespace nv = xg::nv;
+	const int cc_atk = part[0x1a], cc_dec = part[0x1b], cc_rel = part[0x1c];
+	const nv::slot_regs sr = nv::build_note(rom, el, NOTE, 0, nullptr, nv::defaults(), 0, VEL, cc_atk, cc_dec,
+	                                        64, 64, -1, NOTE, false, part[0x62], part[0x63]);
+	amp_line line = amp_regs_run(sr.v[0x06], sr.v[0x07], sr.v[0x08], nv::release_reg(rom, el, NOTE, 0, cc_rel),
+	                             keyoff_ms, limit_ms);
+	line.active = nv::element_active(el, NOTE, VEL);
 	return line;
 }
 
@@ -554,15 +561,15 @@ inline std::vector<filter_line> filter_lines(const u8 *rom, u32 rec, const u8 *p
 // firmware は声ごとのレジスタ 0x20-0x2B に、低音と高音の 1 次の IIR を 1 つずつ書く（native の eq_set と同じ表）。
 // チップ（swp30 の iir1_block::step）は y = (a0·x + a1·x[-1] + b1·y[-1]) >> 13 を 2 段。
 // だから 1 段の特性は H(z) = (a0 + a1·z⁻¹) / (8192 − b1·z⁻¹)。フィルタのすぐ後ろ、声ごとに掛かる
-inline std::vector<pt> eq_response(const u8 *rom, const u8 *part, const std::vector<float> &hz)
+// 低音・高音の量と周波数（XG の値）から。ドラムの打ごとの EQ（3n rr 20・21・24・25）も同じ表
+inline std::vector<pt> eq_response_vals(const u8 *rom, int lgain, int hgain, int lfreq, int hfreq, const std::vector<float> &hz)
 {
 	namespace nv = xg::nv;
 	std::vector<pt> out;
 	if (!rom)
 		return out;
 	nv::slot_regs r{};
-	nv::eq_set(rom, r, part[xg::ram::PART_EQ_LGAIN], part[xg::ram::PART_EQ_HGAIN],
-	           part[xg::ram::PART_EQ_LFREQ], part[xg::ram::PART_EQ_HFREQ]);
+	nv::eq_set(rom, r, lgain, hgain, lfreq, hfreq);
 	// 段 0（低音）: 0x20 a1・0x22 b1・0x24 a0。段 1（高音）: 0x26 b1・0x28 a1・0x2A a0（swp30 の書き込みの割り当て）
 	const double a0[2] = { double(s16(r.v[0x24])), double(s16(r.v[0x2a])) };
 	const double a1[2] = { double(s16(r.v[0x20])), double(s16(r.v[0x28])) };
@@ -575,6 +582,93 @@ inline std::vector<pt> eq_response(const u8 *rom, const u8 *part, const std::vec
 			h *= (a0[k] + a1[k] * z1) / (8192.0 - b1[k] * z1);
 		out.push_back({ f, float(20.0 * std::log10(std::max(std::abs(h), 1e-6))) });
 	}
+	return out;
+}
+
+inline std::vector<pt> eq_response(const u8 *rom, const u8 *part, const std::vector<float> &hz)
+{
+	return eq_response_vals(rom, part[xg::ram::PART_EQ_LGAIN], part[xg::ram::PART_EQ_HGAIN],
+	                        part[xg::ram::PART_EQ_LFREQ], part[xg::ram::PART_EQ_HFREQ], hz);
+}
+
+// ---- ドラムの 1 打（ドラムセットアップ 3n rr pp）
+//
+// native の口のドラムの道（xg/native_driver.h の note_on のドラム、xg/native_voice.h の drum_note）と
+// 同じ式でレジスタを組む。どれも firmware の書くレジスタと突き合わせてある（2026-09-28。
+// 切る高さ・共振・EG・EQ・HPF を SysEx でも NRPN でも振って一致）。
+//   * 切る高さ・共振・立ち上がり・減衰 1・減衰 2 は、打の記録のバイトを「値 − 64」ずらす
+//   * EQ は**打ごとの EQ だけ**（パートの EQ はドラムに掛からない）
+//   * HPF は**パートの HPF と打ごとの HPF の足し算**
+// 値はワーク RAM の並び（xgui::drum_params と同じ 23 個）で渡す
+struct drum_line {
+	std::vector<pt> filter;       // Hz と dB（フィルタだけ）
+	std::vector<pt> eq;           // Hz と dB（打ごとの EQ だけ）
+	bool hpf = false;             // 第 2 段がハイパスで効いているか
+	amp_line amp;                 // 音量の形（ms と dB）
+	float cents = 0;              // 素の高さからのずれ（粗調・微調。セント）
+	bool ok = false;
+};
+
+// part はパートの塊（xg_snapshot::parts の 1 つ）。SFX の打（波形の埋まっていない記録）は、
+// 実機と同じく旋律の音色記録の要素に打の値を足して組む（nv::sfx_setup_apply。鍵 64 で組むが、
+// 絵の式は鍵 60・強さ 100 の決め打ちなので、鍵で動く分はわずかにずれる）
+inline drum_line drum_shape(const u8 *rom, int kit, int key, const u8 *vals, const u8 *part, int points = 160)
+{
+	namespace nv = xg::nv;
+	drum_line out;
+	const u8 *rec = rom ? nv::drum_record(rom, kit, key) : nullptr;
+	if (!rec)
+		return out;                   // 記録の無い鍵
+	const int part_hpf = part[xg::ram::PART_HPF_RAM];
+	if (!nv::drum_rec_has_wave(rec)) {
+		const u32 vrec = nv::sfx_voice_record(rom, rec);
+		if (!vrec)
+			return out;
+		// 鳴る要素のうち最初のもの
+		const u8 *el = nullptr;
+		for (int k = 0; k < nv::element_count(rom, vrec) && !el; k++)
+			if (nv::element_active(nv::element(rom, vrec, k), nv::SFX_NOTE, VEL))
+				el = nv::element(rom, vrec, k);
+		if (!el)
+			el = nv::element(rom, vrec, 0);
+		u8 e[nv::ELEM_BYTES];
+		std::memcpy(e, el, sizeof(e));
+		nv::sfx_setup_apply(e, vals[11], vals[12], vals[13], vals[14], vals[15]);
+		u16 regs[5];
+		filter_regs(rom, e, part, regs);
+		regs[2] = nv::filter2_reg(e[82], part_hpf + int(vals[20]) - 64);
+		out.hpf = (regs[2] & 0x7ff) != 0;
+		const std::vector<float> hz = log_hz(points);
+		out.filter = filter_response(regs, hz);
+		out.eq = eq_response_vals(rom, vals[16], vals[17], vals[18], vals[19], hz);
+		const float off = vals[9] ? 500.0f : -1.0f;
+		const nv::slot_regs sr = nv::build_note(rom, e, NOTE, 0, nullptr, nv::defaults(), 0, VEL, part[0x1a], part[0x1b],
+		                                        64, 64, -1, NOTE, false, part[0x62], part[0x63]);
+		out.amp = amp_regs_run(sr.v[0x06], sr.v[0x07], sr.v[0x08], 0xcf00, off, off < 0 ? 6000.0f : off + 6000.0f);
+		// 粗調は鍵をずらす（要素の追従が掛かる）、微調はそのままセント
+		out.cents = float((int(vals[0]) - 64) * nv::key_follow(rom, e) + (int(vals[1]) - 64));
+		out.ok = true;
+		return out;
+	}
+	const nv::slot_regs r = nv::drum_note(rom, rec, 0, nv::defaults(), vals[0], vals[1], vals[13],
+	                                      vals[11], vals[12], vals[14], vals[15]);
+	u16 regs[5];
+	regs[0] = r.v[0x00];
+	regs[1] = 0xffff;
+	regs[2] = nv::filter2_reg(rec[20], part_hpf + int(vals[20]) - 64);
+	regs[3] = r.v[0x03];
+	regs[4] = r.v[0x04];
+	out.hpf = (regs[2] & 0x7ff) != 0;
+	const std::vector<float> hz = log_hz(points);
+	out.filter = filter_response(regs, hz);
+	out.eq = eq_response_vals(rom, vals[16], vals[17], vals[18], vals[19], hz);
+	// 打ちっぱなし（RcvOff が Off）なら減衰 2 の終わりまで。離しを受けるなら 0.5 秒で離す
+	// （離しの速さは音色によらず 0xCF。native_driver の DRUM_OFF_RATE）
+	const float off = vals[9] ? 500.0f : -1.0f;
+	out.amp = amp_regs_run(r.v[0x06], r.v[0x07], r.v[0x08], 0xcf00, off, off < 0 ? 6000.0f : off + 6000.0f);
+	// 高さ: 粗調（半音）と微調（セント）。記録そのもののずれ（rec[1] と基準の半音）は引く
+	out.cents = float(nv::drum_cents(rec, vals[0], vals[1]) - nv::drum_cents(rec));
+	out.ok = true;
 	return out;
 }
 
