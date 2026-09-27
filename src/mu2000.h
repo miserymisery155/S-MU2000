@@ -905,6 +905,11 @@ private:
 	// 記録に入れるサンプル番号（0 起点。run_sample の頭で進めるので 1 引く）
 	u64 trace_sample() const { return m_sample_count ? m_sample_count - 1 : 0; }
 	u64         m_sample_count = 0;  // 電源投入から数えたサンプル数（記録と再生の目印）
+	// **MU の表示灯の点滅**（native の口。leds()）。firmware は MIDI を受けると MU の灯を
+	// 一瞬消すが、native の口では firmware を間引いて回すので点いたままになる。
+	// 受けた時刻から、消す区間を m_ne_clock の目盛りで持つ
+	u64         m_led_off_from = 0, m_led_off_until = 0;
+	void        led_blink(u64 at);
 	swp_watch_fn m_swp_watch;
 	std::FILE  *m_swp_trace = nullptr;
 	bool        m_swp_trace_reads = false;

@@ -43,6 +43,8 @@ public:
 	// レジスタの番地は `スロット * 64 + reg` のままで、0x1000 から上がスレーブ
 	static constexpr int SLOTS = 128;
 	static constexpr int CHIP_SLOTS = 64;
+	// スレーブの声の出口（0x35-0x37）の値。書き込みの最後（mu2000 の m_poke）で使う
+	static u16 slave_mixer(u16 master) { return slave_route(master); }
 
 	// スロットの印（128 ビット）。32 ビットの Windows でも作れるように 64 ビット 2 つで持つ
 	struct slot_bits
@@ -92,6 +94,15 @@ public:
 	}
 
 	// SMU2000_NATIVE_DEBUG が立っていれば、鳴らすたびに値を出す（調べもの用）
+	// **ドラムの打だけを見る調べ用**（`SMU2000_DRUM_DEBUG=1`）。打ごとに、受けたとき・鍵を押したとき・
+	// 押して 441 サンプル（10ms）後にチップでその声が鳴っているかを 1 行ずつ出す。
+	// SMU2000_NATIVE_DEBUG は量が多くて gui の音が途切れるので、こちらは打のことだけ
+	static bool drum_debug_on()
+	{
+		static const bool on = std::getenv("SMU2000_DRUM_DEBUG") != nullptr;
+		return on;
+	}
+
 	static bool debug_on()
 	{
 		static const bool on = std::getenv("SMU2000_NATIVE_DEBUG") != nullptr;
@@ -110,6 +121,13 @@ public:
 	// スロット 1 つの使われ方
 	struct slot_use {
 		bool on = false;
+		// **鍵をもう押したか**。要素を書き終えてから押すので、混んでいると押すのが
+		// 数十 ms 遅れる（write_done）。その間に届いた離しは off_wait に預けて、
+		// 押した直後に効かせる（実機は MIDI を順に処理するので、押しを終えてから
+		// 離しを読む）。先に離していたので、ゲートの短いドラムが混んだ所で
+		// 鳴らなかった（離した印の付いたスロットへ遅れて鍵が押されていた）
+		bool keyed = false;
+		bool off_wait = false;
 		u32 tpos = 0;                   // フィルタの包絡線の、つぎに書く段
 		u64 tstart = 0;                 // 鳴らし始めた時刻
 		bool held = false;              // ダンパーで離しを待たせている
@@ -543,6 +561,8 @@ public:
 			if (now)
 				key_on(now);
 		}
+		if (drum_debug_on() && !m_drum_watch.empty())
+			drum_watch_check(clock);
 		// **オルタネートグループで切った打に止めを刺す**（6.151）
 		if (clock >= m_alt_kill_next) {
 			u64 next3 = ~u64(0);
@@ -2528,7 +2548,10 @@ private:
 	// MELO の線でマスタのミキサへ入るので、同じ行き先でも値が違う。firmware が
 	// 同じ音をマスタとスレーブで鳴らしたときの値（素通し・バリエーション・
 	// インサーション 1-4。パートの Dry Level では変わらない）。
-	// 前はマスタの値のまま書いていて、スレーブに置いた声は**どこにも出ていなかった**
+	// 前はマスタの値のまま書いていて、スレーブに置いた声は**どこにも出ていなかった**。
+	// **書き込みの最後（mu2000 の m_poke）で置き換える**。途中の write_slot で
+	// 置き換えていたときは、自分で書くドラムの道が漏れていて、インサーションを掛けた
+	// ドラムがスレーブに置かれると別のインサーションへ流れていた
 	static u16 slave_route(u16 master)
 	{
 		switch (master) {
@@ -3199,15 +3222,34 @@ public:
 				continue;
 			if (!all && s.inst != want)
 				continue;
+			if (debug_on())
+				std::fprintf(stderr, "off part=%d note=%d slot=%d clock=%llu%s\n", part, note, i,
+				             (unsigned long long)m_clock, s.keyed ? "" : "（押す前。押してから離す）");
+			// **まだ鍵を押していない音の離しは、押した直後まで待たせる**（key_on）
+			if (!s.keyed) {
+				s.off_wait = true;
+				any = true;
+				continue;
+			}
+			release_slot(i);
+			any = true;
+		}
+		return any;
+	}
+
+	// スロット 1 つを離す（note_off の中身。鍵を押す前に届いた離しは key_on から）
+	void release_slot(int i)
+	{
+		slot_use &s = m_slot[i];
+		const int part = s.part;
+		const int note = s.keynote;
+		{
 			if (m_cc[part].damper) {       // ダンパーを踏んでいる間は切らない
 				s.held = true;
-				any = true;
-				continue;
+				return;
 			}
-			if (s.sost) {                  // ソステヌートで待たせている音
-				any = true;
-				continue;
-			}
+			if (s.sost)                    // ソステヌートで待たせている音
+				return;
 			// 減衰は**いまのつまみで**出す。s.att は鳴らし始めたときの値なので、
 			// 途中で音量を絞られた音を離すと、絞る前の大きさで鳴り終わってしまう
 			// **SFX の打**（6.234）は要素を持つが、離しを受けるかはドラムの決まり
@@ -3238,9 +3280,7 @@ public:
 				m_traj = true;
 				m_traj_next = 0;
 			}
-			any = true;
 		}
-		return any;
 	}
 
 	// そのパートの音を全部止める
@@ -3468,8 +3508,8 @@ public:
 			if (busy() > m_peak)
 				m_peak = busy();
 			if (debug_on())
-				std::fprintf(stderr, "drum part=%d note=%d vel=%d/%d att=%d->%d 段 %d 写し %016llx%s",
-				             part, note, vel, c.cal_vel, att0, att,
+				std::fprintf(stderr, "drum part=%d note=%d slot=%d clock=%llu vel=%d/%d att=%d->%d 段 %d 写し %016llx%s",
+				             part, note, slot, (unsigned long long)m_clock, vel, c.cal_vel, att0, att,
 				             int(c.filter_env.size()), (unsigned long long)c.mask, "\n");
 			keymask.set(slot);
 			nwrote++;
@@ -3615,11 +3655,11 @@ private:
 
 	void write_slot(int slot, const nv::slot_regs &r)
 	{
-		const bool slave = slot >= CHIP_SLOTS;
+		// スレーブの出口（0x35-0x37）の置き換えは m_poke の先（mu2000）でやる。
+		// ドラムは write_slot を通らずに直接書くので、ここでは漏れていた
 		for (int i = 0; i < 0x40; i++)
 			if (r.write & (u64(1) << i))
-				m_poke(u32(slot) * 64 + u32(i),
-				       slave && i >= 0x35 && i <= 0x37 ? slave_route(r.v[i]) : r.v[i]);
+				m_poke(u32(slot) * 64 + u32(i), r.v[i]);
 	}
 
 	// **音程の包絡線の段を進める**。チップが行き先に着いていたら、
@@ -3745,7 +3785,8 @@ private:
 	void key_on(const slot_bits &mask)
 	{
 		if (debug_on())
-			std::fprintf(stderr, "keyon clock=%llu\n", (unsigned long long)m_clock);
+			std::fprintf(stderr, "keyon clock=%llu mask=%016llx:%016llx\n", (unsigned long long)m_clock,
+			             (unsigned long long)mask.w[1], (unsigned long long)mask.w[0]);
 		static const u32 MASK_REG[4] = { 0x1cf, 0x1ce, 0x18f, 0x18e };
 		// チップごとに押す。押す声の無いチップには触らない
 		for (int chip = 0; chip < 2; chip++) {
@@ -3766,7 +3807,47 @@ private:
 			if (m_slot[i].peg_tgt != 0xffff)
 				m_poke(u32(i) * 64 + 0x10, m_slot[i].peg_tgt);
 			m_slot[i].peg_tgt = 0xffff;
+			m_slot[i].keyed = true;
+			if (drum_debug_on() && !m_slot[i].elem) {
+				const slot_use &d = m_slot[i];
+				std::fprintf(stderr, "[drum] keyon part=%d note=%d slot=%d clock=%llu（受けてから %llu）\n",
+				             d.part, d.keynote, i, (unsigned long long)m_clock,
+				             (unsigned long long)(m_clock - d.tstart));
+				m_drum_watch.push_back({ i, d.inst, d.part, d.keynote, m_clock + 441 });
+			}
 		}
+		// 押す前に届いていた離しを、いま効かせる（slot_use::keyed）
+		for (int i = 0; i < SLOTS; i++) {
+			if (!mask.test(i) || !m_slot[i].off_wait)
+				continue;
+			m_slot[i].off_wait = false;
+			if (m_slot[i].on)
+				release_slot(i);
+		}
+	}
+
+	// 調べ用（drum_debug_on）: 押した打を 10ms 後に確かめる
+	struct drum_watch { int slot; u32 inst; int part; int note; u64 due; };
+	std::vector<drum_watch> m_drum_watch;
+	void drum_watch_check(u64 clock)
+	{
+		size_t w = 0;
+		for (size_t k = 0; k < m_drum_watch.size(); k++) {
+			const drum_watch &d = m_drum_watch[k];
+			if (d.due > clock) {
+				m_drum_watch[w++] = d;
+				continue;
+			}
+			const slot_use &s = m_slot[size_t(d.slot)];
+			const bool same = s.inst == d.inst && s.part == d.part && s.keynote == d.note;
+			const bool active = m_slot_peek ? m_slot_peek(d.slot) : true;
+			const bool held = m_slot_held ? m_slot_held(d.slot) : true;
+			std::fprintf(stderr, "[drum] +10ms part=%d note=%d slot=%d チップ %s / 空き扱い %s / %s\n",
+			             d.part, d.note, d.slot, active ? "鳴っている" : "**鳴っていない**",
+			             held ? "いいえ" : "はい",
+			             same ? "まだこの打" : "**別の音に取られた**");
+		}
+		m_drum_watch.resize(w);
 	}
 
 	poke_fn m_poke;
