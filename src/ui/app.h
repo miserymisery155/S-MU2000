@@ -824,6 +824,7 @@ public:
 		// Decided before booting: reset() learns here whether to queue the
 		// "a host is here" notice
 		eng.mu.set_usb_host(a.usb_host);
+		play.set_usb_ports(a.usb_host);        // ファイルの口 3・4 を C・D へ送るか
 		std::printf(a.usb_host ? "MIDI は USB の口（A-D の 64 パート）\n"
 		                     : "--host-midi: DIN の口 A・B だけ（パート 1-32）\n");
 		return true;
