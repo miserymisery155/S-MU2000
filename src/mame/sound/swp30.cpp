@@ -2329,8 +2329,13 @@ template<int Sel> void swp30_device::meg_prg_w(u16 data)
 	const u32 a = m_meg->m_program_address;
 	const u64 before = a < 0x180 ? m_meg->m_program[a] : 0;
 	m_meg->prg_w<Sel>(data);
-	if(a >= 0x180 || m_meg->m_program[a] != before)
+	if(a >= 0x180) {
 		m_meg_program_changed = true;
+		m_meg_map_dirty = true;
+	} else if(m_meg->m_program[a] != before) {
+		m_meg_program_changed = true;
+		m_meg_prg_dirty[a >> 6] |= u64(1) << (a & 63);
+	}
 }
 
 
@@ -2342,8 +2347,10 @@ template<int Sel> u16 swp30_device::meg_map_r()
 template<int Sel> void swp30_device::meg_map_w(u16 data)
 {
 	// S-MU2000: 番地の解き方は解いた命令表に焼いてあるので、作り直させる（中身が変わったときだけ）
-	if(m_meg->map_r<Sel>() != data)
+	if(m_meg->map_r<Sel>() != data) {
 		m_meg_program_changed = true;
+		m_meg_map_dirty = true;
+	}
 	m_meg->map_w<Sel>(data);
 }
 
@@ -4237,8 +4244,11 @@ void swp30_device::meg_regions_rebuild(bool keep_quiet)
 void swp30_device::meg_ops_rebuild()
 {
 	m_meg->build_ops(m_meg_ops.data());
-	if(!m_meg_skip_mask)
+	m_meg_idle_primed = false;
+	if(!m_meg_skip_mask) {
+		m_meg_idle_all = false;
 		return;
+	}
 	for(u32 pc = 0; pc != 0x180; pc++) {
 		meg_state::op &o = m_meg_ops[pc];
 		if(BIT(m_meg_skip_mask, o.region & 7)) {
@@ -4269,6 +4279,17 @@ void swp30_device::meg_ops_rebuild()
 	}
 	if(carry)
 		m_meg_ops[0x17f].rand_n = u16(carry);
+	// 全部の命令が空か（空にした区画のほかに、何かする命令が残っていないか）
+	m_meg_idle_all = true;
+	m_meg_idle_rand = 0;
+	for(const meg_state::op &o : m_meg_ops) {
+		if(o.alu || o.dm || o.dr || o.memw || o.memop || o.index || o.index2 || o.t_write || o.jump) {
+			m_meg_idle_all = false;
+			break;
+		}
+		m_meg_idle_rand += o.rand_n;
+	}
+	m_meg_idle_primed = false;
 }
 
 void swp30_device::meg_skip_before()
@@ -4345,10 +4366,24 @@ void swp30_device::run_sample(s32 &left, s32 &right)
 	if(m_meg_program_changed || m_meg_ops_stale) {
 		m_meg->decode_program();
 		// S-MU2000: プログラムか地図が変わったら、区画を数え直して全部回すところから
-		// （状態を読み戻しただけなら、飛ばしている区画は保存に入っているのでそのまま）
-		if(m_meg_program_changed)
-			m_meg_skip_mask = 0;
-		meg_regions_rebuild(!m_meg_program_changed);
+		// （状態を読み戻しただけなら、飛ばしている区画は保存に入っているのでそのまま）。
+		// 書き換わった命令のある区画だけ戻す。地図が変わったら区画の境目が動くので全部
+		if(m_meg_program_changed) {
+			u32 dirty = 0;
+			if(m_meg_map_dirty)
+				dirty = 0xff;
+			else
+				for(u32 w = 0; w != 6; w++)
+					for(u64 b = m_meg_prg_dirty[w]; b; b &= b - 1)
+						dirty |= 1u << (m_meg->region_of(u16(w * 64 + std::countr_zero(b))) & 7);
+			m_meg_skip_mask &= ~dirty;
+			for(u32 k = 0; k != 8; k++)
+				if(BIT(dirty, k))
+					m_meg_regions[k].quiet = 0;
+			m_meg_prg_dirty.fill(0);
+			m_meg_map_dirty = false;
+		}
+		meg_regions_rebuild(true);
 		meg_ops_rebuild();
 		m_meg_program_changed = false;
 		m_meg_ops_stale = false;
@@ -4371,6 +4406,12 @@ void swp30_device::run_sample(s32 &left, s32 &right)
 		std::copy(m_meg->m_m.begin() + 0x20, m_meg->m_m.begin() + 0x30, meg_in.begin());
 	if(m_native && m_native_full) {
 		// S-MU2000: 完全な軽量モード。MEG の 384 段は回さない（doc/native-dsp.md）
+	} else if(m_meg_idle_primed && !m_dbg_meg) {
+		// S-MU2000: 全部の区画が空で、状態はもう動かない。空の命令が引くはずの乱数だけ進める
+		if(m_meg_idle_rand)
+			rand_skip(m_meg_idle_rand);
+		m_meg->m_pc = 0;
+		m_meg->m_icount -= 0x180;
 	} else if(m_dbg_meg) {
 		// S-MU2000: 1 命令ずつ追うときは元の step() で回す
 		for(int i = 0; i != 384; i++)
@@ -4384,6 +4425,9 @@ void swp30_device::run_sample(s32 &left, s32 &right)
 	} else if(!meg_jit_run())
 		// S-MU2000: 機械語にできていれば、そちらで回す（swp30_jit.cpp）
 		m_meg->run_program(m_meg_ops.data());
+	// S-MU2000: 空の 1 サンプルを回し終えたら、次からは回さない
+	if(!(m_native && m_native_full) && !m_dbg_meg)
+		m_meg_idle_primed = m_meg_idle_all;
 	// S-MU2000: 静まった区画を数える（MEG を回したときだけ）
 	if(m_meg_skip_on && !(m_native && m_native_full) && !m_dbg_meg)
 		meg_skip_after();
@@ -4641,5 +4685,13 @@ void swp30_device::state(state_io &s)
 		m_meg_skip_mask = 0;
 		for(meg_region &g : m_meg_regions)
 			g.quiet = 0;
+	}
+	// 版 15 から: 書き換わった命令と地図（書き換えの途中で保存しても、戻す区画が同じになるように）
+	if(s.version() >= 15) {
+		s.stdarr(m_meg_prg_dirty);
+		s.v(m_meg_map_dirty);
+	} else if(!s.writing()) {
+		m_meg_prg_dirty.fill(0);
+		m_meg_map_dirty = true;
 	}
 }
