@@ -159,6 +159,9 @@ void out_hover_live(int slot, bool bend, int value);
 void out_hover_group(const std::vector<const char *> &keys, int part);   // 区画ごと（見出しの上。何も名乗っていなければ）
 // Ctrl＋右クリックが来ていれば、名乗られたものを送る。窓の最後に呼ぶ
 void out_end_frame(xg::model &m, const xg_snapshot &ram, bridge &br);
+// 送り先へ 1 通送る（Ctrl＋右クリックと同じ道）。port はチャンネルのメッセージの口（0-3）
+bool out_send(bridge &br, std::vector<u8> msg, int port = 0);
+void out_note(const std::string &text);      // 送り先の品書きの横に出すひとこと
 
 // ---- ファイルの窓（.syx の書き出し・読み込み）。
 // 描画の中からは開けない（窓が回っている間にタイマーが次のコマを描きに来て ImGui に入り直す）。

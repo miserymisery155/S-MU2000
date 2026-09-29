@@ -625,6 +625,19 @@ void out_port_combo()
 	}
 }
 
+bool out_send(bridge &br, std::vector<u8> msg, int port)
+{
+	if (!out_ready())
+		return false;
+	return br.send_out(g_out.dest(port), std::move(msg));
+}
+
+void out_note(const std::string &text)
+{
+	g_out_note = text;
+	g_out_note_at = ImGui::GetTime();
+}
+
 void out_end_frame(xg::model &m, const xg_snapshot &ram, bridge &br)
 {
 	if (!out_ready() || g_hover.k == out_kind::none)

@@ -206,6 +206,15 @@ struct ui_texts {
 	const char *ed_tab_sysex;
 	const char *sxd_hint;
 	const char *sxd_clear;
+	const char *sxd_send_all_out;
+	const char *sxd_send_all_in;
+	const char *sxd_sent_fmt;
+	const char *sxd_send_out;
+	const char *sxd_send_out_tip;
+	const char *sxd_send_in;
+	const char *sxd_send_in_tip;
+	const char *sxd_sent_line;
+	const char *sxd_played_line;
 	const char *drum_used_by;
 	const char *drum_none;
 	const char *drum_reset;
