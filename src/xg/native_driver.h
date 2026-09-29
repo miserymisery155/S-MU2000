@@ -930,6 +930,7 @@ public:
 		case 0x0e: p.pan = dd; break;
 		case 0x12: p.cho = dd; break;
 		case 0x13: p.rev = dd; break;
+		case 0x14: p.var = dd; break;          // Var Send（SysEx で書いたとき）
 		case 0x18: p.bri = dd; break;
 		case 0x15: p.vrate = dd; break;
 		case 0x16: p.vdep = dd; break;
@@ -2632,8 +2633,38 @@ private:
 		// ここを下位で書いていたので、コーラスを使う曲で送りが丸ごと狂っていた
 		const int v = nv::send_level_att(m_rom, now < 0 ? (cho ? 0 : 40) : now,
 		                                 extra, pan);
-		return cho ? u16(u16(v) << 8 | (base & 0x00ff))
-		           : u16((base & 0xff00) | u16(v));
+		if (!cho)
+			return u16((base & 0xff00) | u16(v));
+		// **バリエーション（システム接続）への送りは 0x34 の下位**（issue #3。Children.mid の
+		// ピアノのディレイ）。CC94 = 30 / 60 / 127 で firmware は 31 / 21 / 10 を書いた
+		// （リバーブ・コーラスと同じ送りの表）。ここを 0xFF のままにしていたので、
+		// native の口ではバリエーションに何も送っていなかった
+		return u16(u16(v) << 8 | u16(var_send_att(s, part, base)));
+	}
+
+	// 0x34 の下位（バリエーションへの送り）。システム接続のときだけ組む。
+	// インサーション接続のパート（ins_mixer）と、ほかの接続のときは base のまま
+	u8 var_send_att(const slot_use &s, int part, u16 base) const
+	{
+		if (!m_ram || m_ram[ram::VAR_BLOCK + ram::VAR_CONNECT] != 1)
+			return u8(base & 0xff);
+		const int now = m_cc[part].var < 0 ? 0 : m_cc[part].var;
+		int pan = 64;
+		if (s.elem && !s.sfx) {
+			pan = nv::voice_pan_pos(m_rom, s.elem, s.note);
+		} else {
+			// **ドラムの打（SFX の打も）は掛け算が >> 7 で、パンの目減りが無い**。CC94 を 8-120 と
+			// 振って、鍵 36・38・42（42 はパンが寄っている）と SFXKit1 の鍵 36 で firmware は同じ値だった。
+			// リバーブ・コーラスの送り（/ 127 とパンの目減り）とは違う式
+			const int d = drum_setup_of(part, s.keynote, 0x07);
+			const int ds = d < 0 ? 127 : d;
+			const int eff = (now * ds) >> 7;
+			const int v = 16 + nv::send_att(m_rom, eff);
+			return u8(v > 255 ? 255 : v);
+		}
+		if (s.rnd_pan >= 0)
+			pan = 0;
+		return u8(nv::send_level_att(m_rom, now, 127, pan));
 	}
 
 	u16 pan_reg(const nv::voice_cal &c, int part, int rnd, u16 base) const

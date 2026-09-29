@@ -3071,6 +3071,16 @@ int ins_wide(const std::vector<u8> &ram, int n, int addr)
 	return ram[off] << 8 | ram[off + 1];
 }
 
+// バリエーションのパラメータ 1-10（02 01 42-55）。塊の +0x02 から 16bit の数が 10 個並ぶ
+// （xg::ram::VAR_WIDE）。7bit ずつの番地の表（locate）には無いので、xg_read では読めない
+int var_wide(const std::vector<u8> &ram, int index)
+{
+	const u32 off = xg::ram::VAR_BLOCK + xg::ram::VAR_WIDE + u32(index) * 2;
+	if (off + 1 >= ram.size())
+		return -1;
+	return ram[off] << 8 | ram[off + 1];
+}
+
 } // namespace
 
 // RAM に入っている XG の設定を読んで、C++ のエフェクトに渡す。
@@ -3099,8 +3109,11 @@ void mu2000::native_fx_update()
 			return p.addr >= 0x30 ? ins_wide(ram, s.ins, p.addr)
 			                      : xg_read(ram, s.hi, s.mid, s.base + p.addr, p.size);
 		if (s.id == nfx::VARIATION) {
+			// **1-10 は RAM に 16bit の数で並ぶ**（issue #3）。xg_read で 02 01 42 を引いていたが、
+			// その番地は RAM の表に無いので -1 になり、どのパラメータも下限（ディレイ 0.1ms など）で
+			// 鳴っていた。Children.mid のピアノのディレイが native fx で消えていた
 			if (p.addr >= 0x30 || index < 10)
-				return xg_read(ram, s.hi, s.mid, 0x42 + 2 * index, 2);
+				return var_wide(ram, index);
 			return xg_read(ram, s.hi, s.mid, 0x70 + (p.addr - 0x20), 1);
 		}
 		if (p.addr >= 0x20)
@@ -3468,7 +3481,7 @@ namespace {
 
 // 保存の形。中身の並びを変えたら上げる
 constexpr u32 STATE_MAGIC   = 0x554d3253;   // "S2MU"
-constexpr u32 STATE_VERSION = 13;  // 13: d80000（LCD のコントラスト） / 2: MIDI の入口が A/B の 2 口になった / 3: SWP30 のピッチ EG / 4: サンプリングの録音の位置 / 5: SmartMedia の命令の途中 / 6: MEG の印と 2 つ目の idx / 7: USB の口（C・D）の受け取り途中 / 8: 2 つ目の A/D 変換器（AN4 = HOST SELECT） / 9: SWP30 の書き込みの待ち / 10: USB のコマンド（M37640 からの知らせ） / 11: 液晶の「native の持ち物」（6.188） / 12: 外字の「native の持ち物」（6.190）
+constexpr u32 STATE_VERSION = 14;  // 14: MEG の静まった区画（6.237） / 13: d80000（LCD のコントラスト） / 2: MIDI の入口が A/B の 2 口になった / 3: SWP30 のピッチ EG / 4: サンプリングの録音の位置 / 5: SmartMedia の命令の途中 / 6: MEG の印と 2 つ目の idx / 7: USB の口（C・D）の受け取り途中 / 8: 2 つ目の A/D 変換器（AN4 = HOST SELECT） / 9: SWP30 の書き込みの待ち / 10: USB のコマンド（M37640 からの知らせ） / 11: 液晶の「native の持ち物」（6.188） / 12: 外字の「native の持ち物」（6.190）
 constexpr u32 STATE_VERSION_OLDEST = 2;
 
 } // namespace

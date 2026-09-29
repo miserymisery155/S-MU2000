@@ -775,6 +775,15 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 		a.store32(FM(F_SEED), RAX);
 		a.rol32(RAX, 16);
 	};
+	// 乱数を n 回引いたのと同じだけ種を進める（値は使わない）
+	const auto rnd_skip = [&](u32 n) {
+		u32 mul, add;
+		swp30_device::rand_jump(n, mul, add);
+		a.load32(RAX, FM(F_SEED));
+		a.imul32i(RAX, RAX, mul);
+		a.add32i(RAX, add);
+		a.store32(FM(F_SEED), RAX);
+	};
 	// p に雑音を足して詰める（dm の 6 番、dr の p）。出力 eax（acc=(eax,edx)）
 	const auto p_packed = [&](bool noise) {
 		if (noise) {
@@ -845,6 +854,14 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 		a.add32i(RAX, 1013904223);
 		a.mov32(SEED, RAX);
 		a.rol32(RAX, 16);
+	};
+	// 乱数を n 回引いたのと同じだけ種を進める（値は使わない）
+	const auto rnd_skip = [&](u32 n) {
+		u32 mul, add;
+		swp30_device::rand_jump(n, mul, add);
+		a.imul32i(RAX, SEED, mul);
+		a.add32i(RAX, add);
+		a.mov32(SEED, RAX);
 	};
 	// p に雑音を足して詰める（dm の 6 番、dr の p）。出力 eax
 	const auto p_packed = [&](bool noise) {
@@ -1450,6 +1467,8 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 		sz_mark = a.code.size();
 
 		// ---- dr ----
+		if (o.rand_n)                                       // 飛ばした区画: 乱数の種だけ進める
+			rnd_skip(o.rand_n);
 		if (o.dr) {
 			if (o.dr_from_r)
 				a.load32(RAX, M(o_r + 4 * o.sr));
@@ -1978,6 +1997,15 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 		a.mov_reg(SEED, A);
 		a.ror_imm(A, A, 16);
 	};
+	// advance the seed as if rand() had been called n times (the value is unused)
+	const auto rnd_skip = [&](u32 n) {
+		u32 mul, add;
+		swp30_device::rand_jump(n, mul, add);
+		a.mov_imm32(T, mul);
+		a.mul(A, SEED, T);
+		a.mov_imm32(D, add);
+		a.add_reg(SEED, A, D);
+	};
 	// p plus noise, packed (dm 6, and dr's p). Output A
 	const auto p_packed = [&](bool noise) {
 		if (noise) {
@@ -2319,6 +2347,8 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 		}
 
 		// ---- dr ----
+		if (o.rand_n)                                       // skipped region: advance the seed only
+			rnd_skip(o.rand_n);
 		if (o.dr) {
 			if (o.dr_from_r)
 				ldw(A, MS, o_r + 4 * o.sr);

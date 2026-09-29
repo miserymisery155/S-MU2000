@@ -76,6 +76,21 @@ public:
 		// 下位ビットは周期が短くよく使われるので 16bit 回転して返す
 		return (m_rand_seed >> 16) | (m_rand_seed << 16);
 	}
+	// rand() を n 回呼んだのと同じだけ種を進める掛け数と足し数（seed = mul * seed + add）
+	static constexpr void rand_jump(u32 n, u32 &mul, u32 &add)
+	{
+		mul = 1; add = 0;
+		for(u32 i = 0; i != n; i++) {
+			add = 1664525 * add + 1013904223;
+			mul = 1664525 * mul;
+		}
+	}
+	void rand_skip(u32 n)
+	{
+		u32 mul, add;
+		rand_jump(n, mul, add);
+		m_rand_seed = mul * m_rand_seed + add;
+	}
 	void set_rand_seed(u32 seed) { m_rand_seed_base = seed; m_rand_seed = seed; }
 
 	running_machine &machine() { return m_machine; }
@@ -372,6 +387,7 @@ private:
 			u8  jump;                 // bit 0x3f: 条件つきで先へ飛ぶ（ALU もレジスタも使わない）
 			u8  cond;                 // bit 0x18-0x1f
 			u16 target;               // 飛び先の番地
+			u16 rand_n;               // 飛ばした区画の命令: 乱数をこの回数ぶん進める（ほかの区画のディザの並びを崩さない）
 		};
 		void build_ops(op *ops) const;
 		void run_program(const op *ops);
@@ -529,6 +545,27 @@ private:
 	// S-MU2000: 判定を済ませた命令表。保存しないので、読み戻したら作り直す
 	std::array<meg_state::op, 0x180> m_meg_ops = {};
 	bool m_meg_ops_stale = true;
+	// S-MU2000: **静まった区画を回さない**（doc/native-engine.md の 6.237）。MEG のプログラムは
+	// 地図（m_map）で区画に分かれていて、区画どうしはミキサを通してしかやり取りしない。
+	// 入口（m20-m2f のうちその区画が読むもの）と出口（その区画が書く m20-m3f）が区画の窓の長さ
+	// より長く 0 のままなら、その区画の命令を空にして回す（命令表の中で何もしない命令に替える）。
+	// 入口に音が来たら、そのサンプルから元に戻す。ディザの乱数を引く回数が減るので、ほかの区画の
+	// 下の桁はビット単位では変わる（聞こえない大きさ）。SMU2000_MEG_SKIP=0 で使わない。保存しない
+	struct meg_region {
+		u32 in_mask = 0;          // 入口（m20-m2f。ビット = 番号 - 0x20）
+		u64 out_mask = 0;         // 出口（m00-m3f のうち 0x20 から上）
+		u32 hold = 0;             // 静まってから空にするまでのサンプル数（区画の窓の長さ + 余裕）
+		u32 quiet = 0;            // 入口と出口が 0 のまま続いたサンプル数
+		bool used = false;
+	};
+	std::array<meg_region, 8> m_meg_regions = {};
+	u32  m_meg_skip_mask = 0;     // 空にしている区画（ビット = 区画の番号）
+	bool m_meg_skip_on = true;
+	bool m_meg_skip_debug = false;   // SMU2000_MEG_SKIP_DEBUG で、区画と空にしたり戻したりを出す
+	void meg_regions_rebuild(bool keep_quiet);
+	void meg_ops_rebuild();       // 命令表を作り直し、空にしている区画を何もしない命令に替える
+	void meg_skip_before();       // ミキサのあと、MEG を回す前（入口に音が来た区画を戻す）
+	void meg_skip_after();        // MEG を回したあと（静まった区画を数える）
 	// S-MU2000: MEG の分岐の状態（doc/upstream.md の 11）。飛び越しは 1 サンプルの中で終わり、
 	// 覚えた符号も次の比較で上書きされるので、状態の保存には入れない
 	bool m_meg_flag_n = false, m_meg_flag_z = false;

@@ -7,6 +7,7 @@
 #include "swp30.h"
 
 #include <algorithm>
+#include <bit>
 #include <chrono>
 #include <sstream>
 #include <cmath>
@@ -1891,6 +1892,10 @@ swp30_device::swp30_device()
 	m_meg->m_swp = this;
 	m_meg->reset();
 	m_meg_program_changed = true;
+	// 静まった区画を回さない（SMU2000_MEG_SKIP=0 で切る）。毎サンプル読むので、ここで 1 回だけ
+	if (const char *e = std::getenv("SMU2000_MEG_SKIP"))
+		m_meg_skip_on = e[0] != '0';
+	m_meg_skip_debug = std::getenv("SMU2000_MEG_SKIP_DEBUG") != nullptr;
 
 	// MEG のプログラム空間(9bit, 64bit幅)とリバーブ RAM(18bit, 16bit幅)は
 	// もとは address_map で組まれていた。ここでは実体を直に指す。
@@ -2319,8 +2324,13 @@ template<int Sel> u16 swp30_device::meg_prg_r()
 
 template<int Sel> void swp30_device::meg_prg_w(u16 data)
 {
+	// S-MU2000: **中身が変わったときだけ**作り直させる。firmware は同じ語を書き直すことがあり、
+	// そのたびに命令表と JIT を作り直していた（静まった区画を数え直すことにもなる。6.237）
+	const u32 a = m_meg->m_program_address;
+	const u64 before = a < 0x180 ? m_meg->m_program[a] : 0;
 	m_meg->prg_w<Sel>(data);
-	m_meg_program_changed = true;
+	if(a >= 0x180 || m_meg->m_program[a] != before)
+		m_meg_program_changed = true;
 }
 
 
@@ -2331,8 +2341,9 @@ template<int Sel> u16 swp30_device::meg_map_r()
 
 template<int Sel> void swp30_device::meg_map_w(u16 data)
 {
-	// S-MU2000: 番地の解き方は解いた命令表に焼いてあるので、作り直させる
-	m_meg_program_changed = true;
+	// S-MU2000: 番地の解き方は解いた命令表に焼いてあるので、作り直させる（中身が変わったときだけ）
+	if(m_meg->map_r<Sel>() != data)
+		m_meg_program_changed = true;
 	m_meg->map_w<Sel>(data);
 }
 
@@ -4112,6 +4123,8 @@ void swp30_device::meg_state::run_program(const op *ops)
 			}
 			m_rw_value[d3] = v;
 		}
+		if(o.rand_n)
+			m_swp->rand_skip(o.rand_n);
 
 		m_memw_active[d2] = o.memw;
 		if(o.memw)
@@ -4171,6 +4184,157 @@ void swp30_device::meg_state::run_program(const op *ops)
 	m_icount -= 0x180;
 }
 
+// S-MU2000: 区画ごとの入口と出口を数える（プログラムか地図が変わったとき）。
+// 入口は、その区画の中で書くより先に読む m20-m2f（ミキサが毎サンプル書く送り）。
+// 出口は、その区画が書く m20-m3f（ミキサへ戻る音と DAC）
+void swp30_device::meg_regions_rebuild(bool keep_quiet)
+{
+	m_meg->build_ops(m_meg_ops.data());
+	// 状態を読み戻したあと（プログラムは同じ）は、数えていた静かな長さを引き継ぐ
+	for(meg_region &g : m_meg_regions) {
+		const u32 quiet = keep_quiet ? g.quiet : 0;
+		g = meg_region{};
+		g.quiet = quiet;
+	}
+	u64 written[8] = {};
+	for(u32 pc = 0; pc != 0x180; pc++) {
+		const meg_state::op &o = m_meg_ops[pc];
+		const u32 k = o.region & 7;
+		meg_region &g = m_meg_regions[k];
+		const bool real = o.alu || o.dm || o.dr || o.memw || o.memop || o.index || o.index2 || o.t_write || o.jump;
+		if(!real)
+			continue;
+		g.used = true;
+		auto read_m = [&](u32 x) {
+			if(x >= 0x20 && x < 0x30 && !(written[k] & (u64(1) << x)))
+				g.in_mask |= 1u << (x - 0x20);
+		};
+		if(o.alu && (o.mmode == 2 || o.mmode == 3) && o.m2_from_m && o.sm)
+			read_m(o.sm);
+		if(o.alu && o.asel == 2 && o.sm)
+			read_m(o.sm);
+		if(o.dm && o.dm_src == 7 && o.sm)
+			read_m(o.sm);
+		if(o.dm) {
+			written[k] |= u64(1) << o.dm;
+			if(o.dm >= 0x20)
+				g.out_mask |= u64(1) << o.dm;
+		}
+	}
+	// 静まってから空にするまで: 区画の窓（遅延メモリ）の長さに、0.1 秒の余裕
+	for(u32 k = 0; k != 8; k++) {
+		const u32 size = 1u << (10 + BIT(m_meg->m_map[k], 8, 3));
+		m_meg_regions[k].hold = size + 4410;
+		if(m_meg_skip_debug && m_meg_regions[k].used)
+			std::fprintf(stderr, "meg-region %p %u in %04x out %016llx hold %u\n", (void *)this, k,
+			             m_meg_regions[k].in_mask, (unsigned long long)m_meg_regions[k].out_mask, m_meg_regions[k].hold);
+	}
+}
+
+// 命令表を作り直し、空にしている区画の命令を「何もしない命令」に替える。
+// 何もしない命令も、前の命令が遅れて書くもの（3 命令遅れ）は受け取り、自分では何も書かない。
+// 分岐で飛び越した命令と同じ扱い（run_program の skip_to）で、JIT もそのまま訳せる
+void swp30_device::meg_ops_rebuild()
+{
+	m_meg->build_ops(m_meg_ops.data());
+	if(!m_meg_skip_mask)
+		return;
+	for(u32 pc = 0; pc != 0x180; pc++) {
+		meg_state::op &o = m_meg_ops[pc];
+		if(BIT(m_meg_skip_mask, o.region & 7)) {
+			// 乱数は全部の区画で 1 本の並びを分け合う。引く回数と位置をそのままにしておけば、
+			// 回している区画のディザは飛ばさないときとビット単位で同じになる
+			const u8 n = u8(o.dm && (o.dm_src == 5 || (o.dm_src == 6 && !o.no_noise)))
+				+ u8(o.dr && !o.dr_from_r && !o.no_noise);
+			const u8 region = o.region;
+			o = meg_state::op{};
+			o.region = region;
+			o.rand_n = n;
+		}
+	}
+	// 続けて飛ばす命令の引く回数は、続きの最後の命令にまとめる（種の掛け算が 1 回で済む）。
+	// あいだに乱数を引く命令は無いので、あとの命令が受け取る値は同じ
+	u32 carry = 0;
+	for(u32 pc = 0; pc != 0x180; pc++) {
+		meg_state::op &o = m_meg_ops[pc];
+		const bool skipped = BIT(m_meg_skip_mask, o.region & 7);
+		if(!skipped) {
+			if(carry)
+				m_meg_ops[pc - 1].rand_n = u16(carry);
+			carry = 0;
+			continue;
+		}
+		carry += o.rand_n;
+		o.rand_n = 0;
+	}
+	if(carry)
+		m_meg_ops[0x17f].rand_n = u16(carry);
+}
+
+void swp30_device::meg_skip_before()
+{
+	u32 wake = 0;
+	for(u32 k = 0; k != 8; k++) {
+		if(!BIT(m_meg_skip_mask, k))
+			continue;
+		for(u32 in = m_meg_regions[k].in_mask; in; in &= in - 1)
+			if(m_meg->m_m[0x20 + std::countr_zero(in)]) {
+				wake |= 1u << k;
+				break;
+			}
+	}
+	if(!wake)
+		return;
+	m_meg_skip_mask &= ~wake;
+	if(m_meg_skip_debug)
+		std::fprintf(stderr, "meg-skip %p wake %02x -> %02x at %u\n", (void *)this, wake, m_meg_skip_mask, m_meg->m_sample_counter);
+	for(u32 k = 0; k != 8; k++)
+		if(BIT(wake, k))
+			m_meg_regions[k].quiet = 0;
+	meg_ops_rebuild();
+	// 訳し直すまでは解釈実行（命令表と同じ結果）。書き込みが落ち着くまで待つのはプログラムを
+	// 替えたときと同じ
+	meg_jit_invalidate();
+	m_meg_jit_wait = 1;
+}
+
+void swp30_device::meg_skip_after()
+{
+	u32 add = 0;
+	for(u32 k = 0; k != 8; k++) {
+		meg_region &g = m_meg_regions[k];
+		if(!g.used || !g.in_mask || BIT(m_meg_skip_mask, k))
+			continue;
+		bool silent = true;
+		for(u32 in = g.in_mask; in && silent; in &= in - 1)
+			if(m_meg->m_m[0x20 + std::countr_zero(in)])
+				silent = false;
+		for(u64 out = g.out_mask; out && silent; out &= out - 1)
+			if(m_meg->m_m[std::countr_zero(out)])
+				silent = false;
+		// 3 命令遅れで、まだ入っていない書き込みも見る（区画の終わりで書いたもの）
+		for(u32 d = 0; d != 3 && silent; d++) {
+			const u32 x = m_meg->m_mw_reg[d];
+			if(x && BIT(g.out_mask, x) && m_meg->m_mw_value[d])
+				silent = false;
+		}
+		if(!silent) {
+			g.quiet = 0;
+			continue;
+		}
+		if(++g.quiet >= g.hold)
+			add |= 1u << k;
+	}
+	if(!add)
+		return;
+	m_meg_skip_mask |= add;
+	if(m_meg_skip_debug)
+		std::fprintf(stderr, "meg-skip %p quiet %02x -> %02x at %u\n", (void *)this, add, m_meg_skip_mask, m_meg->m_sample_counter);
+	meg_ops_rebuild();
+	meg_jit_invalidate();
+	m_meg_jit_wait = 1;
+}
+
 // S-MU2000: execute_run() を run_sample() に置き換えた。
 // もとは MAME のスケジューラが m_icount 分だけ回す作りだった。
 // ここではホストが「1 サンプルくれ」と呼ぶ形にする。DRC は使わない。
@@ -4180,7 +4344,12 @@ void swp30_device::run_sample(s32 &left, s32 &right)
 {
 	if(m_meg_program_changed || m_meg_ops_stale) {
 		m_meg->decode_program();
-		m_meg->build_ops(m_meg_ops.data());
+		// S-MU2000: プログラムか地図が変わったら、区画を数え直して全部回すところから
+		// （状態を読み戻しただけなら、飛ばしている区画は保存に入っているのでそのまま）
+		if(m_meg_program_changed)
+			m_meg_skip_mask = 0;
+		meg_regions_rebuild(!m_meg_program_changed);
+		meg_ops_rebuild();
 		m_meg_program_changed = false;
 		m_meg_ops_stale = false;
 		// S-MU2000: JIT はすぐには作り直さない。firmware はエフェクトを組むとき、プログラムと番地を
@@ -4194,6 +4363,9 @@ void swp30_device::run_sample(s32 &left, s32 &right)
 	}
 
 	sample_step();
+	// S-MU2000: 空にしている区画の入口に音が来たら、このサンプルから元に戻す
+	if(m_meg_skip_mask)
+		meg_skip_before();
 	std::array<s32, 16> meg_in;
 	if(m_meg_tap)
 		std::copy(m_meg->m_m.begin() + 0x20, m_meg->m_m.begin() + 0x30, meg_in.begin());
@@ -4212,6 +4384,9 @@ void swp30_device::run_sample(s32 &left, s32 &right)
 	} else if(!meg_jit_run())
 		// S-MU2000: 機械語にできていれば、そちらで回す（swp30_jit.cpp）
 		m_meg->run_program(m_meg_ops.data());
+	// S-MU2000: 静まった区画を数える（MEG を回したときだけ）
+	if(m_meg_skip_on && !(m_native && m_native_full) && !m_dbg_meg)
+		meg_skip_after();
 	if(m_meg_tap)
 		m_meg_tap(m_meg_tap_ctx, meg_in.data(), &m_meg->m_m[0x20]);
 
@@ -4455,5 +4630,16 @@ void swp30_device::state(state_io &s)
 		m_peg_rate.fill(0);
 		m_peg_cur.fill(0);
 		m_peg_reached.fill(0);
+	}
+	// 版 14 から: MEG の静まった区画（飛ばしている区画と、静かになってからの長さ）。
+	// 入れないと、読み戻した側だけ全部の区画を回し、止めていた区画のレジスタがずれる
+	if(s.version() >= 14) {
+		s.v(m_meg_skip_mask);
+		for(meg_region &g : m_meg_regions)
+			s.v(g.quiet);
+	} else if(!s.writing()) {
+		m_meg_skip_mask = 0;
+		for(meg_region &g : m_meg_regions)
+			g.quiet = 0;
 	}
 }
