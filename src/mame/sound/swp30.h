@@ -41,7 +41,7 @@ public:
 	// S-MU2000: エフェクトを C++ で鳴らす軽量モード（doc/native-dsp.md）。nullptr で切。
 	// full なら MEG そのものを回さず、乾いた音も C++ 側で混ぜる（そのぶん軽い）
 	void set_native_fx(smu2000::dsp::native_fx *fx, bool full = false, int mask = 15)
-	{ m_native = fx; m_native_full = full; m_native_mask = mask; }
+	{ m_native = fx; m_native_full = full; m_native_mask = mask; m_mfx_seen = ~0u; }
 
 	// S-MU2000: address_map の代わり。レジスタは 64ch x 64 スロットの格子
 	u16  read16(offs_t addr);
@@ -599,11 +599,16 @@ private:
 	// S-MU2000: MEG の定数の値が変わるたびに 1 増える（JIT の定数を焼き込んだ版を捨てる印）。
 	// 状態の保存には入れない（meg_state の並びを変えると、前の版で保存した状態が読めなくなる）
 	u32 m_meg_const_gen = 0;
-	// S-MU2000: 区画 0 が firmware のリバーブのプログラム（18 種類とも同じ形）か。軽量モードのリバーブは、
-	// そのときだけ MEG と同じ作りの C++（dsp/meg_reverb.h）で鳴らし、戻りを MEG の出口 m24/m25 に書く
-	bool m_rev_template = false;
-	u32  m_rev_cfg_wait = 0;      // 係数と番地を読み直すまでのサンプル数
-	s32  m_rev_out[2] = {};       // C++ のリバーブの戻り（MEG の m24/m25 と同じ目盛り）
+	// S-MU2000: 軽量モードの口を MEG と同じ作りの C++（dsp/meg_fx.h）で鳴らすための控え。
+	// プログラムが変わるたびに m_mfx_gen を進め、軽量モードの側で形を見分け直す
+	u32  m_mfx_gen = 0, m_mfx_seen = ~0u;
+	u32  m_mfx_cfg_gen[4] = {};   // 係数と番地を読んだときの書き換えの回数（違えば読み直す）
+	u32  m_mfx_quiet[4] = {};     // 送りも戻りも 0 のまま続いたサンプル数
+	u32  m_mfx_hold[4] = {};      // これだけ静かなら回さない（遅延の窓 + 0.1 秒）
+	u32  m_meg_off_gen = 0;       // 番地表の書き換えの回数
+	s32  m_mfx_out[4][8] = {};    // 戻り（MEG のレジスタと同じ目盛り）
+	int  m_mfx_reg[4][8] = {};    // 戻りを書くレジスタ（m の番号）
+	int  m_mfx_nout[4] = {};      // 戻りの数（0 なら MEG と同じ作りでは鳴らしていない）
 	// S-MU2000: 分岐のあるプログラムを JIT で回すときの「この命令の手前まで飛ばす」位置（0 なら飛ばさない）。
 	// 1 サンプルの中だけで使う。保存しない
 	u32 m_meg_jit_skip = 0;

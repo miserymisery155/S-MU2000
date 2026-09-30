@@ -49,6 +49,20 @@ public:
 		m_s = {};
 	}
 
+	// 鳴らし始めに、MEG の遅延メモリの中身を写す（meg_fx_common.h の load_ram と同じ）
+	void load_ram(const uint16_t *revram, uint32_t base, uint32_t counter)
+	{
+		m_n = counter - 1;
+		for (uint32_t i = 0; i != m_ram.size(); i++) {
+			const uint16_t v = revram[(base + i) & 0x3ffff];
+			const uint32_t e = (v >> 12) & 15, s = (v >> 11) & 1, m = v & 0x7ff;
+			uint32_t vb = e ? (m | 0x800) << (e - 1) : m;
+			if (s)
+				vb ^= e ? (0xffffffffu << (e - 1)) : 0xffffffffu;
+			m_ram[i] = float(int32_t(vb)) * (1.0f / 8388608.0f);
+		}
+	}
+
 	// l, r: リバーブへの送り（MEG の m24 / m25）。ol, orr: 戻り（MEG が m24 / m25 に書く値）
 	void process(float l, float r, float &ol, float &orr)
 	{

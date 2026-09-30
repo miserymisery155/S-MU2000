@@ -3389,6 +3389,9 @@ u16 swp30_device::meg_state::offset_r(offs_t offset)
 
 void swp30_device::meg_state::offset_w(offs_t offset, u16 data)
 {
+	// S-MU2000: 軽量モードの MEG と同じ作りの口が、番地表を読み直すのに使う
+	if(m_offset[offset] != data)
+		m_swp->m_meg_off_gen++;
 	m_offset[offset] =  data;
 }
 
@@ -4395,16 +4398,8 @@ void swp30_device::run_sample(s32 &left, s32 &right)
 		meg_regions_rebuild(true);
 		meg_ops_rebuild();
 		m_meg_program_changed = false;
-		// S-MU2000: リバーブのプログラムかどうか。命令の形（係数と番地を除く）で見分ける。
-		// MU2000 EX（firmware v2.01）のリバーブ 18 種類はどれもこの形（doc/native-dsp.md）
-		{
-			u64 h = 0xcbf29ce484222325ull;
-			for(u32 pc = 0; pc != 0x98; pc++)
-				for(u32 i = 0; i != 8; i++)
-					h = (h ^ ((m_meg->m_program[pc] >> (8 * i)) & 0xff)) * 0x100000001b3ull;
-			m_rev_template = h == 0xb5dbe418ddc66749ull;
-			m_rev_cfg_wait = 0;
-		}
+		// S-MU2000: 軽量モードの口は、形を見分け直す（dsp/meg_fx.h）
+		m_mfx_gen++;
 		m_meg_ops_stale = false;
 		// S-MU2000: JIT はすぐには作り直さない。firmware はエフェクトを組むとき、プログラムと番地を
 		// 何百サンプルにもわたって少しずつ書くので、毎サンプル訳し直すと訳すほうが重くなる。
@@ -4463,27 +4458,79 @@ void swp30_device::run_sample(s32 &left, s32 &right)
 		constexpr float SCALE = 131072.0f;      // m_adc の全振幅（0x20000）
 		using nfx = smu2000::dsp::native_fx;
 		static const nfx::slot_id ID[4] = { nfx::REVERB, nfx::CHORUS, nfx::VARIATION, nfx::INS1 };
+		// MEG と同じ作りで鳴らせる口を見分ける（プログラムが変わったとき）。命令の範囲はマスタの
+		// firmware の置き方（リバーブ 0x00-0x97、コーラス 0x98-0xbf、インサーション 1 は区画 2、バリエーションは区画 3）
+		static const int LO[4] = { 0x000, 0x098, 0x120, 0x0c0 }, HI[4] = { 0x098, 0x0c0, 0x180, 0x120 };
+		static const int SEND[4] = { 0x24, 0x26, 0x2c, 0x28 };   // 送りのレジスタ（m_nsend に控えてある）
+		if(m_mfx_seen != m_mfx_gen) {
+			m_mfx_seen = m_mfx_gen;
+			for(int i = 0; i != 4; i++) {
+				m_native->mfx(ID[i]).identify(m_meg->m_program.data(), LO[i], HI[i]);
+				m_mfx_cfg_gen[i] = ~0u;
+				m_mfx_quiet[i] = 0;
+				m_mfx_nout[i] = 0;
+			}
+		}
 		float wl = 0.0f, wr = 0.0f;
 		for(int i = 0; i != 4; i++) {
 			if(!(m_native_mask & (1 << i)))
 				continue;
-			if(i == 0 && m_rev_template) {
-				// MEG と同じ作りのリバーブ。係数と番地は firmware が MEG に書いた値をそのまま読む
-				// （書き換えを拾うため 32 サンプルごと）。戻りは MEG と同じく m24/m25 に書き、
+			auto &s = m_native->mfx(ID[i]);
+			if(s.active()) {
+				// MEG と同じ作り。係数と番地は firmware が MEG に書いた値をそのまま読む
+				// （書き換えを拾うため 32 サンプルごと）。戻りは MEG と同じレジスタに書き、
 				// 次のサンプルのミキサが戻りのレベルとパンを掛ける
-				auto &rv = m_native->mrev();
-				if(m_rev_cfg_wait == 0) {
-					rv.resize(1u << (10 + BIT(m_meg->m_map[0], 8, 3)));
-					rv.configure(m_meg->m_const.data(), m_meg->m_offset.data());
-					m_rev_cfg_wait = 32;
+				auto &fx = s.fx();
+				// 係数と番地は、firmware が書き換えたときだけ読み直す
+				const u32 gen = m_meg_const_gen + (m_meg_off_gen << 16);
+				if(m_mfx_cfg_gen[i] != gen) {
+					m_mfx_cfg_gen[i] = gen;
+					// 窓の長さは地図から（命令表は、静まった区画を空の命令に替えていることがある）
+					fx.resize(1u << (10 + BIT(m_meg->m_map[m_meg->region_of(HI[i] - 1)], 8, 3)));
+					fx.configure(m_meg->m_const.data(), m_meg->m_offset.data(), LO[i]);
+					fx.set_table(m_reverb_ram.size() >= 0x40000 ? m_reverb_ram.data() : nullptr);
+					if(s.fresh() && m_reverb_ram.size() >= 0x40000) {
+						fx.load_ram(m_reverb_ram.data(), BIT(m_meg->m_map[m_meg->region_of(HI[i] - 1)], 0, 8) << 10, m_meg->m_sample_counter);
+						s.mark_loaded();
+					}
+					m_mfx_hold[i] = (1u << (10 + BIT(m_meg->m_map[m_meg->region_of(HI[i] - 1)], 8, 3))) + 4410;
 				}
-				m_rev_cfg_wait--;
-				float ol, orr;
-				rv.process(float(m_nsend[0][0]) * (1.0f / 8388608.0f), float(m_nsend[0][1]) * (1.0f / 8388608.0f), ol, orr);
-				m_rev_out[0] = s32(ol * 8388607.0f);
-				m_rev_out[1] = s32(orr * 8388607.0f);
+				// 静まった口は回さない（MEG の区画飛ばしと同じ決まり）。送りが 0 で、戻りが 1 LSB に
+				// 満たないまま、遅延の窓の長さ + 0.1 秒たったら、送りが来るまで止める。戻りは 0
+				const bool silent_in = m_nsend[i][0] == 0 && m_nsend[i][1] == 0;
+				if(!silent_in)
+					m_mfx_quiet[i] = 0;
+				else if(m_mfx_quiet[i] >= m_mfx_hold[i]) {
+					for(int j = 0; j != m_mfx_nout[i]; j++)
+						m_mfx_out[i][j] = 0;
+					continue;
+				}
+				float lfo[24];
+				for(u32 used = fx.lfo_used(); used; used &= used - 1) {
+					const int n = std::countr_zero(used);
+					lfo[n] = float(m_meg->get_lfo(n)) * (1.0f / 8388608.0f);
+				}
+				float in[8], out[8];
+				for(int j = 0; j != fx.n_in(); j++) {
+					const int reg = fx.in_reg(j);
+					const s32 v = reg == SEND[i] ? m_nsend[i][0] : reg == SEND[i] + 1 ? m_nsend[i][1] : m_meg->m_m[reg];
+					in[j] = float(v) * (1.0f / 8388608.0f);
+				}
+				fx.process(in, out, lfo);
+				m_mfx_nout[i] = fx.n_out();
+				bool silent_out = true;
+				for(int j = 0; j != fx.n_out(); j++) {
+					m_mfx_reg[i][j] = fx.out_reg(j);
+					m_mfx_out[i][j] = s32(std::clamp(out[j], -1.0f, 1.0f) * 8388607.0f);
+					silent_out = silent_out && m_mfx_out[i][j] == 0;
+				}
+				if(silent_in && silent_out)
+					m_mfx_quiet[i]++;
+				else
+					m_mfx_quiet[i] = 0;
 				continue;
 			}
+			m_mfx_nout[i] = 0;
 			const float il = float(m_nsend[i][0]) / SCALE, ir = float(m_nsend[i][1]) / SCALE;
 			float ol = 0.0f, orr = 0.0f;
 			m_native->process(ID[i], il, ir, ol, orr);
@@ -4491,11 +4538,18 @@ void swp30_device::run_sample(s32 &left, s32 &right)
 			wl += ol * g;
 			wr += orr * g;
 		}
-		// MEG と同じ作りのリバーブの戻りは、MEG が書くのと同じ m24/m25 へ（MEG を回したあとなので上書きになる）
-		if((m_native_mask & 1) && m_rev_template) {
-			m_meg->m_m[0x24] = m_rev_out[0];
-			m_meg->m_m[0x25] = m_rev_out[1];
-		}
+		// MEG と同じ作りの口の戻りは、MEG が書くのと同じレジスタへ（MEG を回したあとなので上書きになる）。
+		// 区画の最後の 3 命令で書く戻り（バリエーションのリバーブなど）は、MEG ではまだ遅れの輪にいて、
+		// 次のサンプルの頭（flush_writes）で入る。送りの無い MEG のその書き込みは取り消す
+		for(int i = 0; i != 4; i++)
+			if(m_native_mask & (1 << i))
+				for(int j = 0; j != m_mfx_nout[i]; j++) {
+					const int reg = m_mfx_reg[i][j];
+					m_meg->m_m[reg] = m_mfx_out[i][j];
+					for(int k = 0; k != 3; k++)
+						if(m_meg->m_mw_reg[k] == reg)
+							m_meg->m_mw_reg[k] = 0;
+				}
 		// MEG を通る道で減るぶん（実測で合わせた）。乾いた音も送りも同じ目盛りなので、
 		// どちらのモードでもこれを掛ける
 		constexpr float DRY_GAIN = 0.1767f;
