@@ -665,14 +665,20 @@ std::string layout::find_default()
 				return q;
 		}
 	}
-	// 4. 付属の写真調の絵（art/real）。exe の横、build/ から見た上、いまいる場所
+	// 4. 付属の写真調の絵（art/real）。exe の横、build/ から見た上、いまいる場所。
+	//    プラグインでは exe はホスト（DAW）なので、この関数が入っている DLL / .so の横とその上も見る。
+	//    ホストがいまいる場所をプラグインの場所にしてくれるとは限らない（issue #67）
 	{
-		const std::string dir = smu2000::exe_dir();
-		for (const std::string &q : { dir.empty() ? std::string() : dir + "art/real/panel.txt",
-		                              dir.empty() ? std::string() : dir + "../art/real/panel.txt",
-		                              std::string("art/real/panel.txt") })
-			if (!q.empty() && exists(q))
-				return q;
+		std::string mod = smu2000::module_dir(reinterpret_cast<const void *>(&layout::find_default));
+		if (!mod.empty())
+			mod += '/';
+		for (const std::string &dir : { smu2000::exe_dir(), mod })
+			for (const char *rel : { "art/real/panel.txt", "../art/real/panel.txt",
+			                         "../../art/real/panel.txt", "../../../art/real/panel.txt" })
+				if (!dir.empty() && exists(dir + rel))
+					return dir + rel;
+		if (exists("art/real/panel.txt"))
+			return "art/real/panel.txt";
 	}
 	// 5. プラグインの束の中（S-MU2000.vst3/Contents/Resources/panel/）。
 	//    ホストの exe ではなく、この関数が入っている DLL / .so の場所から探す

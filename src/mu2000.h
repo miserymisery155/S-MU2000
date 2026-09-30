@@ -63,6 +63,13 @@ public:
 	bool load_wave(const std::string &dir);
 	// MEG が使う sin 表。まだ実機から取れていないので代用品でもよい
 	bool load_sintab(const std::string &path);
+	// 同じものを**メモリから**（ファイルの無いところ、WASM など。PR #65）。中身はファイルと同じ並び。
+	// ファイル版もこれを呼ぶので、組み方（波形 ROM の 4 つの並べ方、sin 表の作り直し）はここにしか無い
+	bool load_program_data(const u8 *data, size_t size);                    // 4MB
+	bool load_wave_data(const u8 *const part[4], const size_t size[4]);     // ic49 / ic50 / ic53 / ic54 の順、各 8MB
+	bool load_sintab_data(const u8 *data, size_t size);                     // 64KB
+	// 波形 ROM のファイル名（dir の中。load_wave が読む順）
+	static const char *const WAVE_ROM_NAMES[4];
 	// LCD の文字の絵（HD44780U B04 の CGROM 4KB）。無くても音は出る
 	bool load_lcd_font(const std::string &path);
 

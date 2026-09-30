@@ -375,12 +375,21 @@ void mu2000::slave_loop(u64 seen)
 
 bool mu2000::load_program(const std::string &path)
 {
-	auto rom = std::make_shared<std::vector<u8>>();
-	if (!read_file(path, *rom, 0x400000)) {
+	std::vector<u8> raw;
+	if (!read_file(path, raw, 0x400000)) {
 		m_error = "プログラム ROM を読めない（4MB でないか、見つからない）: " + path;
 		return false;
 	}
-	set_program_rom(std::move(rom));
+	return load_program_data(raw.data(), raw.size());
+}
+
+bool mu2000::load_program_data(const u8 *data, size_t size)
+{
+	if (!data || size != 0x400000) {
+		m_error = "プログラム ROM の大きさが 4MB でない";
+		return false;
+	}
+	set_program_rom(std::make_shared<std::vector<u8>>(data, data + size));
 	return true;
 }
 
@@ -411,30 +420,44 @@ void mu2000::set_sintab_rom(u16rom p)
 }
 
 
+const char *const mu2000::WAVE_ROM_NAMES[4] = {
+	"xv364a0.ic49", "xv365a0.ic50", "xw848a0.ic53", "xw849a0.ic54"
+};
+
 bool mu2000::load_wave(const std::string &dir)
+{
+	std::vector<u8> parts[4];
+	for (int i = 0; i < 4; i++) {
+		const std::string path = dir + "/" + WAVE_ROM_NAMES[i];
+		if (!read_file(path, parts[i], 0x800000)) {
+			m_error = "波形 ROM を読めない（8MB でないか、見つからない）: " + path;
+			return false;
+		}
+	}
+	const u8 *const data[4] = { parts[0].data(), parts[1].data(), parts[2].data(), parts[3].data() };
+	const size_t size[4] = { parts[0].size(), parts[1].size(), parts[2].size(), parts[3].size() };
+	return load_wave_data(data, size);
+}
+
+bool mu2000::load_wave_data(const u8 *const part[4], const size_t size[4])
 {
 	// MAME は 4 つの 8MB を 32bit 語に交互に置いている。
 	//   ic49 -> 語の下位 16bit（0x0000000 から）
 	//   ic50 -> 語の上位 16bit
 	//   ic53 / ic54 -> 0x1000000 語目から同じ形で
-	static const char *names[4] = {
-		"xv364a0.ic49", "xv365a0.ic50", "xw848a0.ic53", "xw849a0.ic54"
-	};
-
-	auto rom = std::make_shared<std::vector<u8>>(0x2000000, 0);   // 32MB
-	for (int i = 0; i < 4; i++) {
-		std::vector<u8> part;
-		const std::string path = dir + "/" + names[i];
-		if (!read_file(path, part, 0x800000)) {
-			m_error = "波形 ROM を読めない（8MB でないか、見つからない）: " + path;
+	for (int i = 0; i < 4; i++)
+		if (!part[i] || size[i] != 0x800000) {
+			m_error = std::string("波形 ROM の大きさが 8MB でない: ") + WAVE_ROM_NAMES[i];
 			return false;
 		}
+	auto rom = std::make_shared<std::vector<u8>>(0x2000000, 0);   // 32MB
+	for (int i = 0; i < 4; i++) {
 		const size_t base = (i >= 2) ? 0x1000000 : 0;
 		const size_t off  = (i & 1) ? 2 : 0;
-		for (size_t j = 0; j < part.size(); j += 2) {
+		for (size_t j = 0; j < size[i]; j += 2) {
 			const size_t dst = base + j * 2 + off;
-			(*rom)[dst + 0] = part[j + 0];
-			(*rom)[dst + 1] = part[j + 1];
+			(*rom)[dst + 0] = part[i][j + 0];
+			(*rom)[dst + 1] = part[i][j + 1];
 		}
 	}
 
@@ -450,9 +473,18 @@ bool mu2000::load_sintab(const std::string &path)
 		m_error = "sin 表を読めない（64KB でないか、見つからない）: " + path;
 		return false;
 	}
-	auto rom = std::make_shared<std::vector<u16>>(raw.size() / 2);
+	return load_sintab_data(raw.data(), raw.size());
+}
+
+bool mu2000::load_sintab_data(const u8 *data, size_t size)
+{
+	if (!data || size != 0x10000) {
+		m_error = "sin 表の大きさが 64KB でない";
+		return false;
+	}
+	auto rom = std::make_shared<std::vector<u16>>(size / 2);
 	for (size_t i = 0; i < rom->size(); i++)
-		(*rom)[i] = u16(raw[i * 2] | (raw[i * 2 + 1] << 8));
+		(*rom)[i] = u16(data[i * 2] | (data[i * 2 + 1] << 8));
 	// 表は 1/4 周期を 0x8000（中心）から 0xffff（山）まで持つ形。MEG は後ろ半周期を ^0xffff で作るので、
 	// 0 から始まる表だと山と谷の境目で値が 0 と 0xffff の間を跳び、深いコーラス（CELESTE・SYMPHONIC・CHORUS 3）に
 	// 雑音が乗っていた。前の make_standins.py が作った 0 始まりの代替品は、ここで中心から始まる形に作り直す
