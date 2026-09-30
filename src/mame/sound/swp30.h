@@ -616,6 +616,9 @@ private:
 	u16 m_wave_access = 0, m_revram_enable = 0;
 
 	u64 m_keyon_mask = 0;
+	// S-MU2000: 鳴っておらず、ピッチ EG も着いている声（awm2_step が回さない）。その声に何か書かれたら
+	// （write16）・キーオンしたら外す。リセットと状態の読み戻しで全部外す（保存しない）
+	u64 m_awm_idle = 0;
 	u16 m_internal_adr = 0;
 
 	// Streaming block trampolines

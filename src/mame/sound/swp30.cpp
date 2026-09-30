@@ -1835,14 +1835,19 @@ s32 swp30_device::volume_apply(s32 level, s32 sample)
 
 void swp30_device::awm2_step(std::array<s32, 0x40> &samples_per_chan)
 {
-	for(int chan = 0; chan != 0x40; chan++) {
+	// S-MU2000: 休んでいる声（鳴っておらずピッチ EG も着いた声）は回さない。回しても印を立て直すだけで
+	// 何も変わらない。回す順（番号の小さい順）は同じなので、LFO が引く乱数の並びも同じ
+	samples_per_chan.fill(0);
+	for(u64 live = ~m_awm_idle; live; live &= live - 1) {
+		const int chan = std::countr_zero(live);
 		// S-MU2000: 着いている声（ほとんど全部）は印を立てるだけで済ませる。peg_step の頭と同じ
 		if(m_peg_cur[chan] == s32(util::sext(u32(m_pitch_offset[chan] & 0x3fff), 14)))
 			m_peg_reached[chan] = 1;
 		else
 			peg_step(chan);
 		if(!m_envelope[chan].active()) {
-			samples_per_chan[chan] = 0;
+			if(m_peg_reached[chan] && m_peg_cur[chan] == s32(util::sext(u32(m_pitch_offset[chan] & 0x3fff), 14)))
+				m_awm_idle |= u64(1) << chan;
 			continue;
 		}
 
@@ -1964,6 +1969,7 @@ void swp30_device::reset()
 {
 	m_rand_seed = m_rand_seed_base;
 	m_keyon_mask = 0;
+	m_awm_idle = 0;
 	m_meg_flag_n = m_meg_flag_z = false;
 	m_meg_ix2_value.fill(0); m_meg_ix2_act.fill(0); m_meg_ram_index2 = 0;
 
@@ -2115,6 +2121,8 @@ void swp30_device::write16(offs_t addr, u16 data)
 	addr &= 0xfff;
 	const u32 slot = addr & 0x3f;
 	const u32 chan = (addr >> 6) & 0x3f;
+	// S-MU2000: 書かれた声は休みから戻す（どのレジスタでも。全体のレジスタで余計に戻しても害は無い）
+	m_awm_idle &= ~(u64(1) << chan);
 
 	// S-MU2000: 環境の読み取りは 1 回だけ。レジスタ書き込みは演奏中に何千回も
 	// 通るので、毎回 getenv を呼ぶとそれだけで目に見えて遅くなる
@@ -2240,6 +2248,7 @@ u16 swp30_device::keyon_r()
 
 void swp30_device::keyon_w(u16)
 {
+	m_awm_idle &= ~m_keyon_mask;
 	for(int chan=0; chan<64; chan++) {
 		u64 mask = u64(1) << chan;
 		if(m_keyon_mask & mask) {
@@ -4675,6 +4684,9 @@ void swp30_device::state(state_io &s)
 		m_peg_cur.fill(0);
 		m_peg_reached.fill(0);
 	}
+	// S-MU2000: 休んでいる声の印は保存しない。読み戻したら全部回すところから（回しても変わらない）
+	if(!s.writing())
+		m_awm_idle = 0;
 	// 版 14 から: MEG の静まった区画（飛ばしている区画と、静かになってからの長さ）。
 	// 入れないと、読み戻した側だけ全部の区画を回し、止めていた区画のレジスタがずれる
 	if(s.version() >= 14) {
