@@ -4395,6 +4395,16 @@ void swp30_device::run_sample(s32 &left, s32 &right)
 		meg_regions_rebuild(true);
 		meg_ops_rebuild();
 		m_meg_program_changed = false;
+		// S-MU2000: リバーブのプログラムかどうか。命令の形（係数と番地を除く）で見分ける。
+		// MU2000 EX（firmware v2.01）のリバーブ 18 種類はどれもこの形（doc/native-dsp.md）
+		{
+			u64 h = 0xcbf29ce484222325ull;
+			for(u32 pc = 0; pc != 0x98; pc++)
+				for(u32 i = 0; i != 8; i++)
+					h = (h ^ ((m_meg->m_program[pc] >> (8 * i)) & 0xff)) * 0x100000001b3ull;
+			m_rev_template = h == 0xb5dbe418ddc66749ull;
+			m_rev_cfg_wait = 0;
+		}
 		m_meg_ops_stale = false;
 		// S-MU2000: JIT はすぐには作り直さない。firmware はエフェクトを組むとき、プログラムと番地を
 		// 何百サンプルにもわたって少しずつ書くので、毎サンプル訳し直すと訳すほうが重くなる。
@@ -4457,12 +4467,34 @@ void swp30_device::run_sample(s32 &left, s32 &right)
 		for(int i = 0; i != 4; i++) {
 			if(!(m_native_mask & (1 << i)))
 				continue;
+			if(i == 0 && m_rev_template) {
+				// MEG と同じ作りのリバーブ。係数と番地は firmware が MEG に書いた値をそのまま読む
+				// （書き換えを拾うため 32 サンプルごと）。戻りは MEG と同じく m24/m25 に書き、
+				// 次のサンプルのミキサが戻りのレベルとパンを掛ける
+				auto &rv = m_native->mrev();
+				if(m_rev_cfg_wait == 0) {
+					rv.resize(1u << (10 + BIT(m_meg->m_map[0], 8, 3)));
+					rv.configure(m_meg->m_const.data(), m_meg->m_offset.data());
+					m_rev_cfg_wait = 32;
+				}
+				m_rev_cfg_wait--;
+				float ol, orr;
+				rv.process(float(m_nsend[0][0]) * (1.0f / 8388608.0f), float(m_nsend[0][1]) * (1.0f / 8388608.0f), ol, orr);
+				m_rev_out[0] = s32(ol * 8388607.0f);
+				m_rev_out[1] = s32(orr * 8388607.0f);
+				continue;
+			}
 			const float il = float(m_nsend[i][0]) / SCALE, ir = float(m_nsend[i][1]) / SCALE;
 			float ol = 0.0f, orr = 0.0f;
 			m_native->process(ID[i], il, ir, ol, orr);
 			const float g = m_native->ret(ID[i]);
 			wl += ol * g;
 			wr += orr * g;
+		}
+		// MEG と同じ作りのリバーブの戻りは、MEG が書くのと同じ m24/m25 へ（MEG を回したあとなので上書きになる）
+		if((m_native_mask & 1) && m_rev_template) {
+			m_meg->m_m[0x24] = m_rev_out[0];
+			m_meg->m_m[0x25] = m_rev_out[1];
 		}
 		// MEG を通る道で減るぶん（実測で合わせた）。乾いた音も送りも同じ目盛りなので、
 		// どちらのモードでもこれを掛ける
