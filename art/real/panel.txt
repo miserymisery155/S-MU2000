@@ -16,7 +16,7 @@ mode.util      740.6 110.91
 mode.effect    784.35 110.91
 mode.sampling  740.6 156.5
 mode.seq       784.35 156.5
-mode.r 9.24 5.55
+mode.r 11.09 5.55
 
 nav.mute_solo  823.78 49.91 46.83 33.27
 nav.part-      885.4 49.91 46.83 33.27

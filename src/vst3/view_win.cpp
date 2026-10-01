@@ -11,6 +11,11 @@
 #include "plug_window.h"
 #include "view.h"
 
+#include "ui/imgui_shell.h"
+
+#include "imgui.h"
+#include "backends/imgui_impl_win32.h"
+
 #include "ui/fx_editor.h"
 #include "ui/master_editor.h"
 #include "ui/keymap.h"
@@ -28,7 +33,10 @@
 #include <windowsx.h>
 #include <commdlg.h>
 #include <cwchar>
+#include <d3d11.h>
 #include <string>
+
+extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 namespace smu2000 {
 namespace vst3 {
@@ -113,6 +121,11 @@ private:
 	plug_view &m_owner;
 	HWND m_hwnd = nullptr;
 
+	// Direct3D 11 + Dear ImGui, shared with the GUI front end's window
+	// (ui/imgui_shell.h). A failed start fails attach (the host falls
+	// back to generic UI).
+	ui::imshell::dx11_state m_im{};
+
 	// PC で触る窓。gui.exe と同じ中身（ui::overview など）を、同じ ui::pc_window に
 	// 載せる。**プラグインなので自分の窓を持つ**: ホストがくれた親の中には
 	// パネルしか入らない。閉じても消さずに隠すだけなので、開き直すと同じ姿で出る
@@ -138,6 +151,13 @@ bool win_window::attach(void *parent, int w, int h)
 	// The window procedure has to find its way back to this object
 	SetWindowLongPtrA(m_hwnd, GWLP_USERDATA, LONG_PTR(this));
 	SetTimer(m_hwnd, 1, 33, nullptr);        // 30 コマ／秒
+	// No device, no custom view: the host falls back to generic parameters,
+	// the way the headless Linux build answers
+	if (!ui::imshell::dx11_start(m_im, m_hwnd)) {
+		detach();
+		return false;
+	}
+	m_owner.fonts_ready();   // the context is up and no frame is open
 	return true;
 }
 
@@ -146,6 +166,7 @@ void win_window::detach()
 	if (!m_hwnd)
 		return;
 	KillTimer(m_hwnd, 1);
+	ui::imshell::dx11_stop(m_im);
 	SetWindowLongPtrA(m_hwnd, GWLP_USERDATA, 0);
 	DestroyWindow(m_hwnd);
 	m_hwnd = nullptr;
@@ -265,12 +286,24 @@ void win_window::pc_frame(::xg::model &m, const ::ui::xg_snapshot &ram, ::ui::br
 	                 [this](ui::pc_window &w) { open_pc(w); });
 }
 
+// Direct3D 11 + Dear ImGui on the host's child window. Mirrors the GUI
+// front end's main window (ui/window_win.cpp); the editor windows
+// (ui/pc_window.cpp) are the same pair again.
 LRESULT win_window::handle(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 {
+	if (m_im.imgui) {
+		ImGui::SetCurrentContext(m_im.imgui);
+		ImGui_ImplWin32_WndProcHandler(h, msg, wp, lp);
+	}
 	switch (msg) {
-	case WM_TIMER:
-		InvalidateRect(h, nullptr, FALSE);
+	case WM_TIMER: {
+		RECT cr;
+		GetClientRect(h, &cr);
+		ui::imshell::dx11_paint(m_im, cr.right, cr.bottom, [&](ImDrawList *dl) {
+			m_owner.repaint(dl, m_im.fonts, cr.right, cr.bottom);
+		});
 		return 0;
+	}
 
 	case WM_COMMAND:
 		card_command(LOWORD(wp));
@@ -280,17 +313,15 @@ LRESULT win_window::handle(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 		return 1;                        // 全部自分で描く
 
 	case WM_PAINT: {
-		PAINTSTRUCT ps;
-		HDC dc = BeginPaint(h, &ps);
-		RECT cr;
-		GetClientRect(h, &cr);
-		m_owner.repaint(dc, cr.right, cr.bottom);
+		PAINTSTRUCT ps;   // Direct3D が出す。validate のためだけに閉じる
+		BeginPaint(h, &ps);
 		EndPaint(h, &ps);
 		return 0;
 	}
 
 	case WM_SIZE:
-		InvalidateRect(h, nullptr, FALSE);
+		m_im.resize_w = LOWORD(lp);
+		m_im.resize_h = HIWORD(lp);
 		return 0;
 
 	case WM_LBUTTONDOWN:

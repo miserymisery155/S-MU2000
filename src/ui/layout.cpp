@@ -1,7 +1,7 @@
 // license:BSD-3-Clause
 
 #include "layout.h"
-#include "draw.h"
+#include "compat/gdi.h"
 #include "texts.h"
 #include "compat/paths.h"
 
@@ -656,13 +656,22 @@ std::string layout::find_default()
 				return q;
 		}
 	}
-	// 3. 設定の置き場
+	// 3. The per-user data directory, which is where roms/ and the .ini files
+	//    already live, so it is the most natural place to keep a panel: a
+	//    panel.txt of its own, plus panel/ (the same name the bundles use under
+	//    Resources) and art/real/ with the pictures beside it. It sits above
+	//    the bundle art on purpose, so a copy kept here overrides what shipped.
+	//    It is also the only place a **one-file** plug-in format can keep
+	//    artwork at all: a lone .clap or .dll has no bundle to put
+	//    Resources/panel in, so step 5 below can never reach it.
 	{
 		const std::string dir = smu2000::config_dir();
 		if (!dir.empty()) {
-			const std::string q = dir + "panel.txt";
-			if (exists(q))
-				return q;
+			for (const std::string &n : { std::string("panel.txt"),
+			                              std::string("panel/panel.txt"),
+			                              std::string("art/real/panel.txt") })
+				if (exists(dir + n))
+					return dir + n;
 		}
 	}
 	// 4. 付属の写真調の絵（art/real）。exe の横、build/ から見た上、いまいる場所。

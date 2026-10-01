@@ -12,7 +12,7 @@
 #include "backends/imgui_impl_sdl3.h"
 #include "backends/imgui_impl_sdlrenderer3.h"
 
-#include <fontconfig/fontconfig.h>
+#include "ui/font_file.h"   // the fontconfig lookup lives in there
 
 #include <mutex>
 #include <vector>
@@ -67,32 +67,6 @@ std::string title_of(const imgui_view &view)
 		}
 	}
 	return utf8;
-}
-
-// A CJK-capable font for the views, found by family (same idea as the other
-// platforms: Windows loads Yu Gothic, macOS asks CoreText). Noto Sans CJK
-// covers the Latin labels too, so one font serves both languages. Empty when
-// nothing matched, and then ImGui's embedded font stands in (English only).
-std::string cjk_font_file()
-{
-	FcPattern *pat = FcPatternCreate();
-	if (!pat)
-		return {};
-	FcPatternAddString(pat, FC_FAMILY, reinterpret_cast<const FcChar8 *>("Noto Sans CJK JP"));
-	FcPatternAddDouble(pat, FC_SIZE, 16.0);
-	FcConfigSubstitute(nullptr, pat, FcMatchPattern);
-	FcDefaultSubstitute(pat);
-	FcResult res = FcResultNoMatch;
-	FcPattern *m = FcFontMatch(nullptr, pat, &res);
-	std::string file;
-	if (m) {
-		FcChar8 *f = nullptr;
-		if (FcPatternGetString(m, FC_FILE, 0, &f) == FcResultMatch && f)
-			file = reinterpret_cast<const char *>(f);
-		FcPatternDestroy(m);
-	}
-	FcPatternDestroy(pat);
-	return file;
 }
 
 } // namespace
@@ -168,10 +142,18 @@ bool pc_window::create(std::string &err)
 	ImGui::SetCurrentContext(m_imgui);
 	ImGuiIO &io = ImGui::GetIO();
 	io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+	io.IniFilename = nullptr;       // no imgui.ini littered into the working folder
 
-	const std::string font = cjk_font_file();
-	if (!font.empty())
-		io.Fonts->AddFontFromFileTTF(font.c_str(), 16.0f);
+	// The same look the other four windows get (pc_window.cpp, pc_window_mac.mm).
+	// This copy of the setup was missing it, so the editor windows were the only
+	// ones in ImGui's default light style with square frames.
+	ImGui::StyleColorsDark();
+	ImGuiStyle &st = ImGui::GetStyle();
+	st.FrameRounding = 3;
+
+	// The one shared font setup: ui/font_file.h asks fontconfig for a face,
+	// checks it can draw what the panel writes, and reads it once.
+	add_cjk_font(io.Fonts);
 
 	if (!ImGui_ImplSDL3_InitForSDLRenderer(m_win, m_ren)) {
 		err = "ImGui SDL3 backend failed to start";

@@ -803,6 +803,13 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 	// p を acc=(eax,edx) へ／acc を n 右（算術）。結果の下 32bit は eax（この先は 32bit に収まる値）
 	const auto AccFromP = [&]() { a.load32(RAX, FM(F_PLO)); a.load32(RDX, FM(F_PHI)); };
 	const auto ShrAcc = [&](u8 n) { a.sar64(RAX, RDX, n); };
+	const auto ShrAccTZ15 = [&]() {                    // 0 の側へ切り捨てる >> 15
+		a.mov32(RCX, RAX); a.mov32(RSI, RDX);
+		a.sar64(RCX, RSI, 63);
+		a.and32i(RCX, 0x7fff); a.xor32(RSI, RSI);
+		a.add64(RAX, RDX, RCX, RSI);
+		a.sar64(RAX, RDX, 15);
+	};
 #else
 	const u8 MS = RBX, SWP = R12, P = R13, SC = R14, RAM = R15, SEED = RSI, K_MAX = RDI, K_MIN = RBP;
 	// LFO の値を 1 サンプルに 1 回だけ作って置いておく枠（24 個 × 4 バイト。下の emit_lfo）
@@ -876,6 +883,10 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 	// p を acc(rax) へ／acc を n 右（算術）
 	const auto AccFromP = [&]() { a.mov64(RAX, P); };
 	const auto ShrAcc = [&](u8 n) { a.sar64(RAX, n); };
+	const auto ShrAccTZ15 = [&]() {                    // 0 の側へ切り捨てる >> 15
+		a.mov64(RCX, RAX); a.sar64(RCX, 63); a.and32i(RCX, 0x7fff);
+		a.add64(RAX, RCX); a.sar64(RAX, 15);
+	};
 #endif
 
 	// **LFO の値はプログラムを回している間ずっと変わらない**。数えるのを進める
@@ -1489,8 +1500,9 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 
 		// ---- メモリへの書き値 ----
 		if (o.memw) {
+			// meg_mem_value と同じく 0 の側へ切り捨てる（upstream.md の 39）
 			AccFromP();
-			ShrAcc(15);
+			ShrAccTZ15();
 			a.store32(M(o_memw_val + 4 * slot2(k)), RAX);
 		}
 		if (k >= 0x17e || branchy)
@@ -2368,7 +2380,11 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 
 		// ---- value to write to memory ----
 		if (o.memw) {
+			// toward zero, like meg_mem_value (doc/upstream.md #39)
 			a.mov_x(A, P);
+			a.asr_imm_x(C, A, 63);
+			a.and_imm(C, C, 0x7fff);
+			a.add_x(A, A, C);
 			a.asr_imm_x(A, A, 15);
 			stw(A, MS, o_memw_val + 4 * slot2(k));
 		}

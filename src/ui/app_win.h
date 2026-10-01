@@ -2,8 +2,6 @@
 //
 // The Windows front end's app: ui::app answering the Win32 window (ui/
 // window_win.cpp). gui.cpp keeps main(); the Mac's twin is ui/app_mac.h.
-// Unlike the Mac, the Win32 headers tolerate the GDI shim, so this class
-// can be a plain C++ header.
 
 #ifndef S_MU2000_UI_APP_WIN_H
 #define S_MU2000_UI_APP_WIN_H
@@ -36,10 +34,6 @@ public:
 	    : app(b, mi, tha, thb, muo) {}
 
 	HWND hwnd = nullptr;             // set at WM_CREATE, for message boxes
-	// Double buffering: repainting straight into the window would flicker
-	HDC     mem_dc = nullptr;
-	HBITMAP mem_bmp = nullptr;
-	int     mem_w = 0, mem_h = 0;
 	// Choosing from a menu failed: shown at the end of the command
 	std::string last_error;
 

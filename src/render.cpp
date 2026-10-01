@@ -50,6 +50,25 @@ void write_wav(const std::string &path, const std::vector<s16> &pcm, u32 rate)
 	std::fclose(f);
 }
 
+// 32bit 浮動小数の WAV（--float）。全振幅を 1.0 とする
+void write_wav_float(const std::string &path, const std::vector<float> &pcm, u32 rate)
+{
+	std::FILE *f = std::fopen(path.c_str(), "wb");
+	if (!f) return;
+	const unsigned bytes = unsigned(pcm.size() * 4);
+	auto u32w = [&](unsigned v) { unsigned char b[4] = { (unsigned char)v, (unsigned char)(v >> 8),
+	                                                     (unsigned char)(v >> 16), (unsigned char)(v >> 24) };
+	                              std::fwrite(b, 1, 4, f); };
+	auto u16w = [&](unsigned v) { unsigned char b[2] = { (unsigned char)v, (unsigned char)(v >> 8) };
+	                              std::fwrite(b, 1, 2, f); };
+	std::fwrite("RIFF", 1, 4, f); u32w(36 + bytes); std::fwrite("WAVE", 1, 4, f);
+	std::fwrite("fmt ", 1, 4, f); u32w(16); u16w(3); u16w(2);
+	u32w(rate); u32w(rate * 8); u16w(8); u16w(32);
+	std::fwrite("data", 1, 4, f); u32w(bytes);
+	std::fwrite(pcm.data(), 1, bytes, f);
+	std::fclose(f);
+}
+
 // 16bit PCM の WAV を読む。左右に分けて返す。読めなければ false
 bool read_wav16(const std::string &path, std::vector<s16> &l, std::vector<s16> &r, std::string &err)
 {
@@ -189,6 +208,7 @@ int main(int argc, char **argv)
 	const char *mu_dac_path = nullptr;
 	u32 mu_dac_from = 0, mu_dac_count = 0;
 	const char *meg_path = nullptr;    // MEG の中身を書き出す先
+	bool want_float = false;           // --float: 32bit 浮動小数の WAV で書く（DAC の 18bit を落とさない）
 	const char *meg_trace = nullptr;   // MEG を 1 命令ずつ追う
 	u32 meg_tr_from = 0, meg_tr_count = 0, meg_tr_pc0 = 0, meg_tr_pc1 = 0x180;
 	const char *adc_path = nullptr;    // A/D INPUT に流す WAV
@@ -223,6 +243,8 @@ int main(int argc, char **argv)
 			mu_dac_from = u32(std::strtoul(argv[++i], nullptr, 0));
 			mu_dac_count = u32(std::strtoul(argv[++i], nullptr, 0));
 		}
+		else if (!std::strcmp(argv[i], "--float"))
+			want_float = true;
 		else if (!std::strcmp(argv[i], "--dump-meg") && i + 1 < argc)
 			meg_path = argv[++i];
 		else if (!std::strcmp(argv[i], "--trace-meg") && i + 5 < argc) {
@@ -360,6 +382,7 @@ int main(int argc, char **argv)
 
 	const u32 rate = 44100;
 	std::vector<s16> pcm;
+	std::vector<float> fpcm;           // --float のとき
 
 	// 起動を待つ。実機も電源投入から数秒は MIDI を受け付けない。
 	// 待たずに流すと曲頭のリセットや音色指定が捨てられ、全パートが
@@ -381,6 +404,10 @@ int main(int argc, char **argv)
 			mu.run_sample(l, r);
 			pcm.push_back(s16(std::clamp(l * 32768 / mu2000::DAC_FULL_SCALE, -32768, 32767)));
 			pcm.push_back(s16(std::clamp(r * 32768 / mu2000::DAC_FULL_SCALE, -32768, 32767)));
+			if (want_float) {
+				fpcm.push_back(float(l) / float(mu2000::DAC_FULL_SCALE));
+				fpcm.push_back(float(r) / float(mu2000::DAC_FULL_SCALE));
+			}
 		}
 		boot = double(i) / rate;
 		if (use_bootcache && i < limit)
@@ -570,6 +597,10 @@ int main(int argc, char **argv)
 		}
 		s32 l = 0, r = 0;
 		mu.run_sample(l, r);
+		if (want_float) {
+			fpcm.push_back(float(l) / float(mu2000::DAC_FULL_SCALE));
+			fpcm.push_back(float(r) / float(mu2000::DAC_FULL_SCALE));
+		}
 		// DAC の全振幅は 1<<17。16bit に落とす（MAME の 1<<17 目盛りと同じ）
 		l = l * 32768 / mu2000::DAC_FULL_SCALE;
 		r = r * 32768 / mu2000::DAC_FULL_SCALE;
@@ -648,7 +679,10 @@ int main(int argc, char **argv)
 			std::printf("カードに書き戻した: %s（%zu ブロック）\n", card_path, blocks.size());
 	}
 
-	write_wav(wav, pcm, rate);
+	if (want_float)
+		write_wav_float(wav, fpcm, rate);
+	else
+		write_wav(wav, pcm, rate);
 	if (eng_opts.native_engine && eng_opts.voicecache)
 		smu2000::voicecache::save(mu, smu2000::voicecache::key(mu));
 	if (eng_opts.native_engine) {

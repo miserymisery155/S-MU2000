@@ -3230,7 +3230,7 @@ void overview::row(int part, xg::model &m, const xg_snapshot &ram, bridge &br, f
 		const float dot_w = dot * 2;
 		u16 rows[16];
 		if (vr) {
-			// パネルの LCD と同じ色（draw.h の LCD_BACK / LCD_GHOST / LCD_DOT）。
+			// パネルの LCD と同じ色（draw_imgui.h の LCD_BACK / LCD_GHOST / LCD_DOT）。
 			// 絵が引けないもの（ROM の版が違うなど）も、LCD の枠だけ出して並びを揃える
 			static const ImU32 LCD_BACK  = IM_COL32(150, 205, 45, 255);
 			static const ImU32 LCD_GHOST = IM_COL32(140, 194, 44, 255);

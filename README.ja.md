@@ -4,7 +4,11 @@
 
 Yamaha MU2000 のソフトウェア音源。DAW に挿して使えることを目指す。
 
+![Screenshot](doc/mu_screenshot.png)
+
 **現在の状態: VST3・CLAP（Windows）と VST3・Audio Unit（macOS）として DAW に挿して鳴る。実機のフロントパネル風の画面と、PC で触るエディタが付いた。**
+
+**ブラウザで試す: https://tarboh.github.io/S-MU2000/（オフライン書き出し＋ライブ演奏。自分の MU2000 から取り出した ROM が要る）。**
 
 作りかけを晒しながら進めている。X では `#S_MU2000`。
 

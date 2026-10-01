@@ -9,11 +9,10 @@
 //
 //   gui <rom directory> [--midi N] [--midi-b N] ...   (ui/tool_args.h)
 //   gui [<rom directory> --boot] --shot image.png [--size 1000x400]
-//   gui --list | gui --dump-layout panel.txt | gui --selftest [rom dir]
+//   gui --list | gui --dump-layout panel.txt
 //
-// Two flags stay Linux-only here, taken out of argv before the shared
-// parser: --selftest (the DIB-vs-window check from doc/porting-linux-gui.md)
-// and --seconds (timed runs under SDL_VIDEODRIVER=dummy).
+// --seconds stays Linux-only here, taken out of argv before the shared
+// parser: timed runs under SDL_VIDEODRIVER=dummy.
 
 #include "compat/console.h"
 #include "mu2000.h"
@@ -35,19 +34,13 @@ int main(int argc, char **argv)
 {
 	smu2000::init_console_utf8();
 
-	// --seconds N and --selftest stay Linux-only flags (timed runs under
-	// SDL_VIDEODRIVER=dummy and the DIB-vs-window check,
-	// doc/porting-linux-gui.md): taken out of argv before the shared parser
+	// --seconds N stays a Linux-only flag (timed runs under
+	// SDL_VIDEODRIVER=dummy): taken out of argv before the shared parser
 	double seconds = 0.0;
-	bool run_selftest = false;
 	int kept = 1;
 	for (int i = 1; i < argc; i++) {
 		if (!std::strcmp(argv[i], "--seconds") && i + 1 < argc) {
 			seconds = std::atof(argv[++i]);
-			continue;
-		}
-		if (!std::strcmp(argv[i], "--selftest")) {
-			run_selftest = true;
 			continue;
 		}
 		argv[kept++] = argv[i];
@@ -73,10 +66,6 @@ int main(int argc, char **argv)
 	static ui::linux_app gui(br, midi_ports, mout, mout_b, mout_mu);
 	ui::g_linux = &gui;
 	gui.seconds_limit = seconds;
-
-	// Paint twice and compare, then upload and read the pixels back
-	if (run_selftest)
-		return ui::selftest(a.dir, a.win_w, a.win_h);
 
 	// Picture only. An empty screen can be drawn even without any ROMs.
 	if (!a.shot_path.empty() && (a.dir.empty() || !a.boot_for_shot))

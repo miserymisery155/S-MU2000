@@ -163,6 +163,48 @@ endif
 endif
 BUILD ?= build
 
+# The per-user data directory -- the same place compat/paths.h's config_dir()
+# points at, where roms/, nvram/ and the .ini files already live. The panel art
+# goes in a panel/ beside them, and find_default() looks there (step 3), which
+# is the only place a one-file plug-in format can keep artwork: a lone .clap or
+# .dll has no bundle to put Resources/panel in.
+#
+# Keyed off PLATFORM, not off uname: this Makefile cross-builds, and asking the
+# *host* would put a Linux or Windows target's art in the macOS directory.
+ifeq ($(PLATFORM),windows)
+# LOCALAPPDATA is a Windows path; the slashes suit cp and mkdir better. It is
+# unset when configuring from another host, and an empty prefix would have the
+# recipe write to "/S-MU2000/panel", so fall back to where MSYS2 puts $HOME.
+PANEL_DATA_DIR := $(if $(LOCALAPPDATA),$(subst \,/,$(LOCALAPPDATA)),$(HOME)/AppData/Local)/S-MU2000/panel
+else ifeq ($(PLATFORM),macos)
+PANEL_DATA_DIR := $(HOME)/Library/Application Support/S-MU2000/panel
+else
+# config_dir() prefers XDG_DATA_HOME when it is set, so ask it first
+PANEL_DATA_DIR := $(if $(XDG_DATA_HOME),$(XDG_DATA_HOME),$(HOME)/.local/share)/S-MU2000/panel
+endif
+
+# **The default goal is `all`, said out loud.** Without this it is whichever
+# rule comes first in the file, and this block sits above the `all:` lines: a
+# plain `make` ran install-panel-art and built nothing, and `make CROSS=windows`
+# compiled zero files and wrote the panel art to ~/AppData/Local instead.
+.DEFAULT_GOAL := all
+
+# Neither the pictures nor panel.txt are overwritten. panel.txt is the one file
+# here a person edits (doc/panel-editing.md), and a panel.txt of yours may well
+# point at pictures of your own, so replacing the pictures while keeping the
+# panel.txt would leave the two describing different panels. Delete what you
+# want the shipped versions of. Phony because it produces no file of its own.
+.PHONY: install-panel-art
+install-panel-art:
+	@mkdir -p "$(PANEL_DATA_DIR)"
+	@for f in art/real/*.png art/real/panel.txt; do \
+		test -e "$$f" || continue; \
+		cp -n "$$f" "$(PANEL_DATA_DIR)/" 2>/dev/null || \
+			test -e "$(PANEL_DATA_DIR)/$$(basename $$f)" || \
+			cp -f "$$f" "$(PANEL_DATA_DIR)/"; \
+	done
+	@echo "絵を置いておいた: $(PANEL_DATA_DIR)"
+
 SRCS := \
 	src/compat/compat.cpp \
 	src/smartmedia.cpp \
@@ -287,6 +329,10 @@ IMGUI_CORE  := $(IMGUI_DIR)/imgui.cpp $(IMGUI_DIR)/imgui_draw.cpp \
                $(IMGUI_DIR)/imgui_tables.cpp $(IMGUI_DIR)/imgui_widgets.cpp
 IMGUI_FLAGS := -I $(IMGUI_DIR)
 
+# Triangulation for SVG fills with holes
+EARCUT_INC  := -I third_party/earcut.hpp/include
+CXXFLAGS += $(EARCUT_INC)
+
 # ---- Windows-side ports (audio, MIDI, display) and VST3 ----------------------
 #
 # These still call the Windows APIs directly. The macOS ones are added at each
@@ -316,6 +362,11 @@ $(BUILD)/src/gui.o: CXXFLAGS += $(IMGUI_FLAGS)
 # The app classes pull in app.h, whose editor headers want imgui.h
 $(BUILD)/src/ui/app_win.o: CXXFLAGS += $(IMGUI_FLAGS)
 $(BUILD)/src/ui/window_win.o: CXXFLAGS += $(IMGUI_FLAGS)
+# src/ui/ paints through ui/draw_imgui.h, so these need imgui.h on the include
+# path; one rule beats per-file lines (matches before generic below)
+$(BUILD)/src/ui/%.o: src/ui/%.cpp
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) $(IMGUI_FLAGS) -c -o $@ $<
 
 $(BUILD)/gui$(EXE): $(OBJS) $(BUILD)/src/mu2000.o $(BUILD)/src/smf.o $(UI_OBJS) $(PC_OBJS) $(BUILD)/src/gui.o $(BUILD)/src/ui/app_win.o $(BUILD)/src/ui/window_win.o
 	@mkdir -p $(dir $@)
@@ -436,7 +487,7 @@ $(CLAP_BIN): $(OBJS) $(BUILD)/src/mu2000.o $(CLAP_OBJS) $(PC_OBJS)
 
 CLAP_INSTALL ?= $(PROGRAMFILES)/Common Files/CLAP
 
-install-clap: $(CLAP_BIN)
+install-clap: $(CLAP_BIN) install-panel-art
 	mkdir -p "$(CLAP_INSTALL)"
 	cp -f $(CLAP_BIN) "$(CLAP_INSTALL)/"
 	@echo "入れた: $(CLAP_INSTALL)/S-MU2000.clap"
@@ -463,7 +514,7 @@ $(VSTI_BIN): $(OBJS) $(BUILD)/src/mu2000.o $(VSTI_OBJS) $(PC_OBJS)
 
 VSTI_INSTALL ?= $(PROGRAMFILES)/VstPlugins
 
-install-vsti: $(VSTI_BIN)
+install-vsti: $(VSTI_BIN) install-panel-art
 	mkdir -p "$(VSTI_INSTALL)"
 	cp -f $(VSTI_BIN) "$(VSTI_INSTALL)/"
 	@echo "入れた: $(VSTI_INSTALL)/S-MU2000.dll"
@@ -493,13 +544,13 @@ $(BUILD)/live$(EXE): $(OBJS) $(BUILD)/src/mu2000.o $(LINUX_IO_OBJS) $(BUILD)/src
 
 # ---- Linux GUI + plug-ins (doc/porting-linux-gui.md) --------------------------
 #
-# gui is an SDL3 window drawing the shared panel through Cairo. The plug-ins
+# gui is an SDL3 window drawing the shared panel through Dear ImGui. The plug-ins
 # are ELF shared objects with headless editors for now (hosts fall back to
-# their generic UI). Needs libcairo2-dev, libfontconfig-dev and libsdl3-dev
+# their generic UI). Needs libfontconfig-dev and libsdl3-dev
 # alongside libasound2-dev.
 
-LINUX_GUI_CFLAGS := $(shell pkg-config --cflags cairo fontconfig 2>/dev/null)
-LINUX_GUI_LIBS := $(shell pkg-config --libs cairo fontconfig 2>/dev/null)
+LINUX_GUI_CFLAGS := $(shell pkg-config --cflags fontconfig 2>/dev/null)
+LINUX_GUI_LIBS := $(shell pkg-config --libs fontconfig 2>/dev/null)
 LINUX_SDL_CFLAGS := $(shell pkg-config --cflags sdl3 2>/dev/null)
 LINUX_SDL_LIBS := $(shell pkg-config --libs sdl3 2>/dev/null)
 CXXFLAGS += $(LINUX_GUI_CFLAGS)
@@ -550,7 +601,7 @@ $(BUILD)/guiobj/%.o: %.cpp
 $(BUILD)/src/gui_linux.o: CXXFLAGS += $(IMGUI_FLAGS) $(LINUX_SDL_CFLAGS)
 
 $(BUILD)/gui$(EXE): $(OBJS) $(BUILD)/src/mu2000.o $(BUILD)/src/smf.o \
-                    $(BUILD)/src/compat/gdi_linux.o $(LINUX_GUI_OBJS) $(IMGUI_OBJS) \
+                    $(LINUX_GUI_OBJS) $(IMGUI_OBJS) \
                     $(IMGUI_SDL_OBJS) $(LINUX_IO_OBJS) $(LINUX_EXTRA_IO_OBJS) \
                     $(BUILD)/src/gui_linux.o
 	@mkdir -p $(dir $@)
@@ -572,8 +623,7 @@ VST3_SDK_SRCS := \
 	third_party/vst3/pluginterfaces/base/conststringtable.cpp \
 	third_party/vst3/pluginterfaces/base/ustring.cpp
 
-LINUX_PANEL_SRCS := src/compat/gdi_linux.cpp \
-              src/ui/panel.cpp src/ui/layout.cpp src/ui/svg.cpp src/ui/png.cpp src/ui/editor.cpp \
+LINUX_PANEL_SRCS := src/ui/panel.cpp src/ui/layout.cpp src/ui/svg.cpp src/ui/png.cpp src/ui/editor.cpp \
               src/ui/effects.cpp src/xg/model.cpp \
               src/ui/xg_ui.cpp src/ui/fx_help.cpp src/ui/fx_icons.cpp $(IMGUI_CORE)
 
@@ -652,7 +702,7 @@ $(BUILD)/clapprobe$(EXE): $(BUILD)/clapobj/src/clap/probe.o $(BUILD)/src/smf.o $
 
 CLAP_INSTALL ?= $(HOME)/.clap
 
-install-clap: $(CLAP_BIN)
+install-clap: $(CLAP_BIN) install-panel-art
 	mkdir -p "$(CLAP_INSTALL)"
 	cp -f $(CLAP_BIN) "$(CLAP_INSTALL)/"
 	@echo "入れた: $(CLAP_INSTALL)/S-MU2000.clap"
@@ -697,17 +747,17 @@ $(BUILD)/live$(EXE): $(OBJS) $(BUILD)/src/mu2000.o $(MAC_IO_OBJS) $(BUILD)/src/l
 # gui draws the front-panel look of the real machine.
 #
 # panel.cpp and its neighbours are the **same source** as the Windows build; only
-# what is underneath differs. compat/gdi_mac.cpp fills the GDI interface in with
-# CoreGraphics and window_mac.mm fills the window in with AppKit
+# what is underneath differs. Dear ImGui + Metal fill the interface in with
+# Dear ImGui and window_mac.mm fills the window in with AppKit
 # (doc/porting-macos.md).
 #
-# window_mac.mm is the one file compiled as Objective-C++.
+# window_mac.mm is compiled as Objective-C++, and so is src/ui/shot_mac.mm.
 MAC_GUI_SRCS := src/ui/panel.cpp src/ui/editor.cpp src/ui/effects.cpp \
                 src/ui/png.cpp src/ui/layout.cpp src/ui/svg.cpp src/ui/player.cpp \
                 src/ui/audio_out_mac.cpp src/ui/audio_in_mac.cpp \
                 src/ui/midi_in_mac.cpp src/ui/midi_out_mac.cpp \
                 src/xg/model.cpp \
-                src/compat/gdi_mac.cpp src/ui/window_mac.mm src/ui/app_mac.cpp \
+                src/ui/window_mac.mm src/ui/app_mac.cpp src/ui/shot_mac.mm \
                 src/gui_mac.cpp
 
 # PC editor (doc/pc-editor.md). The views are the same files as on Windows;
@@ -743,6 +793,19 @@ $(BUILD)/%.o: %.mm
 $(BUILD)/src/ui/app_mac.o: CXXFLAGS += $(IMGUI_FLAGS)
 $(BUILD)/src/ui/window_mac.o: CXXFLAGS += $(IMGUI_FLAGS)
 $(BUILD)/src/gui_mac.o: CXXFLAGS += $(IMGUI_FLAGS)
+# src/ui/ paints through ui/draw_imgui.h, so these need imgui.h on the include
+# path; one rule beats per-file lines (matches before generic below)
+$(BUILD)/src/ui/%.o: src/ui/%.cpp
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) $(IMGUI_FLAGS) -c -o $@ $<
+
+# --shot renders headless through Metal on macOS (ui/shot_mac.mm): the same
+# renderer the window uses, into an ordinary texture, because a CAMetalLayer
+# drawable is framebufferOnly and wants presenting. SDL3 stays a Linux-only
+# dependency; asking macOS for it is what broke the macOS CI build, whose
+# runner has no SDL3. shot_mac.mm is Objective-C++, so it needs the ImGui
+# include path spelled out like the other .mm files above it.
+$(BUILD)/src/ui/shot_mac.o: CXXFLAGS += $(IMGUI_FLAGS)
 
 MAC_FRAMEWORKS += -framework Metal
 
@@ -767,15 +830,14 @@ VST3_SDK_SRCS := \
 	third_party/vst3/pluginterfaces/base/ustring.cpp
 
 # Uses the **same** panel.cpp / layout.cpp / svg.cpp as the Windows build, with
-# compat/gdi_mac.cpp filling in CoreGraphics underneath. The window is view_mac.mm
+# Dear ImGui + Metal underneath. The window is view_mac.mm
 #
 # Both plug-in formats show this one panel, so the view and the drawing layer are
 # named once and the VST3 bundle and the AU both build them. (The Windows side of
 # this Makefile names the same drawing layer in its own VST3_SRCS, with
 # view_win.cpp in place of view_mac.mm)
 PANEL_VIEW_SRCS := src/vst3/view.cpp src/vst3/view_mac.mm
-PANEL_SRCS := src/compat/gdi_mac.cpp \
-              src/ui/panel.cpp src/ui/layout.cpp src/ui/svg.cpp src/ui/png.cpp src/ui/editor.cpp \
+PANEL_SRCS := src/ui/panel.cpp src/ui/layout.cpp src/ui/svg.cpp src/ui/png.cpp src/ui/editor.cpp \
               src/ui/effects.cpp src/xg/model.cpp
 
 VST3_SRCS := src/vst3/plugin.cpp src/vst3/engine.cpp src/vst3/iids.cpp src/vst3/automation.cpp \
@@ -836,9 +898,18 @@ CLAP_OBJS := $(BUILD)/clapobj/src/clap/plugin.o $(filter-out $(BUILD)/vst3obj/sr
 
 $(BUILD)/clapobj/%.o: %.cpp
 	@mkdir -p $(dir $@)
-	$(CXX) $(CXXFLAGS) $(CLAP_INC) -c -o $@ $<
+	$(CXX) $(CXXFLAGS) $(CLAP_INC) $(IMGUI_FLAGS) -c -o $@ $<
 
-clap: $(CLAP_BIN)
+# フォト調のパネルの絵（art/real）も CLAP の束の中へ。macOS の CLAP は VST3 や
+# AU と同じ束（Contents/MacOS にバイナリ）なので、同じ居場所から見つかる。
+# 定義は clap: より前に置く。:= は読んだ時点で展開される
+CLAP_PANEL := $(CLAP_DIR)/Contents/Resources/panel/panel.txt
+
+clap: $(CLAP_BIN) $(CLAP_PANEL)
+
+$(CLAP_PANEL): $(wildcard art/real/*.png) art/real/panel.txt
+	@mkdir -p $(dir $@)
+	@cp -f art/real/*.png art/real/panel.txt $(dir $@)
 
 $(CLAP_BIN): $(OBJS) $(BUILD)/src/mu2000.o $(CLAP_OBJS) $(MAC_PC_OBJS)
 	@mkdir -p $(dir $@)
@@ -851,7 +922,7 @@ $(CLAP_BIN): $(OBJS) $(BUILD)/src/mu2000.o $(CLAP_OBJS) $(MAC_PC_OBJS)
 
 CLAP_INSTALL ?= $(HOME)/Library/Audio/Plug-Ins/CLAP
 
-install-clap: $(CLAP_BIN)
+install-clap: $(CLAP_BIN) $(CLAP_PANEL)
 	rm -rf "$(CLAP_INSTALL)/S-MU2000.clap"
 	mkdir -p "$(CLAP_INSTALL)"
 	cp -r $(CLAP_DIR) "$(CLAP_INSTALL)/"
@@ -915,7 +986,16 @@ AU_SRCS := src/au/plugin.cpp src/au/editor_mac.mm src/vst3/engine.cpp src/vst3/i
 AU_OBJS := $(AU_SRCS:%.cpp=$(BUILD)/vst3obj/%.o)
 AU_OBJS := $(AU_OBJS:%.mm=$(BUILD)/vst3obj/%.o)
 
-au: $(AU_BIN)
+# 写真調のパネルの絵（art/real）も AU の中へ。VST3 と同じ居場所、同じ理由
+# （doc/panel-editing.md）。これがないと find_default() が
+# layout.cpp の内蔵の配置（"YAMAHA" の古い絵）に落ちて、素の GDI 風の
+# パネルになる。プラグインの型式は違っても、中身は同じ一枚であるべき。
+AU_PANEL := $(AU_DIR)/Contents/Resources/panel/panel.txt
+
+au: $(AU_BIN) $(AU_PANEL)
+$(AU_PANEL): $(wildcard art/real/*.png) art/real/panel.txt
+	@mkdir -p $(dir $@)
+	@cp -f art/real/*.png art/real/panel.txt $(dir $@)
 
 # -bundle like the VST3: an AU is also read with CFBundle
 $(AU_BIN): $(OBJS) $(BUILD)/src/mu2000.o $(AU_OBJS) $(MAC_PC_OBJS)
@@ -931,7 +1011,7 @@ $(AU_BIN): $(OBJS) $(BUILD)/src/mu2000.o $(AU_OBJS) $(MAC_PC_OBJS)
 # Where the AU goes. auval looks here
 AU_INSTALL ?= $(HOME)/Library/Audio/Plug-Ins/Components
 
-install-au: $(AU_BIN)
+install-au: $(AU_BIN) $(AU_PANEL)
 	rm -rf "$(AU_INSTALL)/S-MU2000.component"
 	mkdir -p "$(AU_INSTALL)"
 	cp -r $(AU_DIR) "$(AU_INSTALL)/"
@@ -1010,7 +1090,7 @@ AUV3_FW    := -framework Foundation -framework AudioToolbox -framework AVFoundat
 
 $(BUILD)/auv3obj/%.o: %.cpp
 	@mkdir -p $(dir $@)
-	$(CXX) $(CXXFLAGS) $(VST3_INC) -c -o $@ $<
+	$(CXX) $(CXXFLAGS) $(VST3_INC) $(IMGUI_FLAGS) -c -o $@ $<
 
 $(BUILD)/auv3obj/%.o: %.mm
 	@mkdir -p $(dir $@)
@@ -1020,7 +1100,15 @@ $(BUILD)/auv3obj/%.o: %.mm
 # when binaries rebuild would ignore a later-added AUV3_ROMS.
 # An explicitly empty AUV3_ROMS leaves the contents as they are (so a bare
 # rebuild never wipes baked ROMs). Write AUV3_ROMS=none to take them out
-auv3: $(AUV3_HOST) $(BUILD)/autest$(EXE)
+# 写真調のパネルの絵（art/real）も appex の中へ。VST3 / AUv2 と同じ居場所、
+# 同じ理由（doc/panel-editing.md）：無いと find_default() が layout.cpp の
+# 内蔵の配置に落ちて、.panel の絵が入れ替わった版と別の古い絵になる
+AUV3_PANEL := $(AUV3_APPEX)/Contents/Resources/panel/panel.txt
+
+auv3: $(AUV3_HOST) $(BUILD)/autest$(EXE) $(AUV3_PANEL)
+$(AUV3_PANEL): $(wildcard art/real/*.png) art/real/panel.txt
+	@mkdir -p $(dir $@)
+	@cp -f art/real/*.png art/real/panel.txt $(dir $@)
 	# ROMs into the bundle. Before signing (adding them later breaks the seal).
 	# An explicitly empty AUV3_ROMS leaves a bare install alone.
 	# AUV3_ROMS=none takes them out

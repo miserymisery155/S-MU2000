@@ -1824,13 +1824,10 @@ s32 swp30_device::volume_apply(s32 level, s32 sample)
 	s32 e = level >> 10;
 	s32 m = level & 0x3ff;
 	s64 mul = (0x4000000 - (m << 15)) >> e;
-	// S-MU2000: 掛けた結果は、16.6 の下 8bit（整数部の下 2bit まで）を 0 の側へ切り捨てる（doc/upstream.md の 34）。
-	// MAME は端数を全部残していて、深く絞った声がいつまでも小さく鳴り続けた。実機は減衰量が 45dB を超えると
-	// 理屈より小さくなりはじめ、約 64dB で全く 0 になる（Organ を CC7 で絞ると、24/16/12 で -1.3/-2.9/-4.5dB、8 で無音）。
-	// 刻みは、試験の曲の piano の 10kHz の帯（静かな音に乗る切り捨ての雑音）が実機と釣り合う 256 にした
-	// （128 だと足りず、512 だと多すぎる）。0 の側へ切り捨てるので、無音になるときはぴったり 0 になる
-	const s64 r = (sample * mul) >> 26;
-	return s32(r / 256 * 256);
+	// S-MU2000: 掛けた結果は切り捨てない（MAME と同じ）。前は 256 刻みで 0 の側へ切り捨てていたが、それは
+	// 16bit に切り詰めた実機の録音に合わせた誤りだった。浮動小数で録ると、実機の減衰の雑音はパートの音量と一緒に
+	// 小さくなり、深く絞っても 0 にはならない（doc/upstream.md の 34、discussion #69）
+	return s32((sample * mul) >> 26);
 }
 
 void swp30_device::awm2_step(std::array<s32, 0x40> &samples_per_chan)
@@ -3613,6 +3610,14 @@ static inline u32 meg_pack24(s64 p)
 	return u32(util::sext(s32(q), 24));
 }
 
+// S-MU2000: 遅延メモリへ書く値も 0 の側へ切り捨てる（meg_pack24 と同じ。doc/upstream.md の 39、discussion #69）。
+// MAME は p >> 15（負の無限大の側）で、負の値が 0 に戻らず、音が止んだあともリバーブが -100dB あたりで
+// 鳴り続けた（数百 Hz の音）。実機は離して 2〜3 秒で消える
+static inline s64 meg_mem_value(s64 p)
+{
+	return p / 32768;
+}
+
 // S-MU2000: MEG の分岐（doc/upstream.md の 11）。
 //
 // MAME は「分岐は無い」としていて、bit 0x3f の立った命令を ALU の無い命令として
@@ -3835,7 +3840,7 @@ void swp30_device::meg_state::step()
 
 	if(d.memw) {
 		m_memw_active[m_delay_2] = true;
-		m_memw_value[m_delay_2] = m_p >> 15;
+		m_memw_value[m_delay_2] = meg_mem_value(m_p);
 	} else
 		m_memw_active[m_delay_2] = false;
 
@@ -4147,7 +4152,7 @@ void swp30_device::meg_state::run_program(const op *ops)
 
 		m_memw_active[d2] = o.memw;
 		if(o.memw)
-			m_memw_value[d2] = p >> 15;
+			m_memw_value[d2] = meg_mem_value(p);
 
 		m_index_active[d3] = o.index;
 		if(o.index)

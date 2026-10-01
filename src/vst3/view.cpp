@@ -4,13 +4,12 @@
 // the handling of mouse and key input. The window that holds it is per
 // platform (view_win.cpp, view_mac.mm), reached through plug_window.h.
 //
-// This file is plain C++ and includes compat/gdi.h, which is what paints the
-// panel on both platforms.
+// This file is plain C++ and paints through Dear ImGui; each platform window
+// owns its renderer and context and hands repaint() the draw list.
 
 #include "view.h"
 #include "plug_window.h"
 
-#include "compat/gdi.h"
 #include "compat/platform.h"
 #include "engine.h"
 #include "smartmedia.h"
@@ -18,10 +17,6 @@
 #include "ui/layout.h"
 #include "ui/panel.h"
 #include "ui/toolbar.h"
-
-#if defined(__APPLE__)
-#include <CoreGraphics/CoreGraphics.h>
-#endif
 
 #include <algorithm>
 #include <cstdio>
@@ -97,7 +92,7 @@ plug_key plug_key_of_button(int button)
 	return PLUG_KEY_NONE;
 }
 
-// The panel lives here so that view.h can stay free of compat/gdi.h
+// The panel lives here so that view.h only needs the draw-list types
 struct plug_view::impl
 {
 	engine  &eng;
@@ -105,14 +100,6 @@ struct plug_view::impl
 	// **窓を開くボタンの帯**。F3・F2 をホストが先に食う
 	// DAW でも、ここからなら確実に開ける（ui/toolbar.h）
 	ui::toolbar bar;
-
-#if defined(_WIN32)
-	// Double buffered: the host repaints at 30 frames a second and drawing
-	// straight into the window would flicker
-	HDC     mem_dc = nullptr;
-	HBITMAP mem_bmp = nullptr;
-	int     mem_w = 0, mem_h = 0;
-#endif
 
 	explicit impl(engine &e) : eng(e)
 	{
@@ -124,7 +111,7 @@ struct plug_view::impl
 		panel.set_top_inset(ui::toolbar::HEIGHT);
 	}
 
-	void paint_panel(HDC dc)
+	void paint_panel(ImDrawList *dl, const ui::im::fonts &fonts)
 	{
 		ui::snapshot s;
 		eng.panel().read(s);
@@ -133,18 +120,9 @@ struct plug_view::impl
 		std::snprintf(status, sizeof(status), "%s", eng.message().c_str());
 
 		panel.set_volume(eng.panel().gain());
-		panel.paint(dc, s, eng.panel().buttons(), status);
+		panel.paint(dl, s, eng.panel().buttons(), status);
 		// 帯はパネルの**あと**に描く（パネルは全面を塗る）
-		bar.paint(dc, panel.width());
-	}
-
-	void forget_backing()
-	{
-#if defined(_WIN32)
-		if (mem_bmp) { DeleteObject(mem_bmp); mem_bmp = nullptr; }
-		if (mem_dc)  { DeleteDC(mem_dc); mem_dc = nullptr; }
-		mem_w = mem_h = 0;
-#endif
+		bar.paint(dl, panel.width(), fonts.label, fonts.label_px);
 	}
 };
 
@@ -237,7 +215,6 @@ tresult PLUGIN_API plug_view::removed()
 		m_window = nullptr;
 	}
 	m_engine.notify_idle(true);
-	m_impl->forget_backing();
 	return kResultOk;
 }
 
@@ -292,9 +269,14 @@ tresult PLUGIN_API plug_view::checkSizeConstraint(ViewRect *rect)
 
 // ---- Called by the platform window
 
-void plug_view::repaint(void *native, int w, int h)
+void plug_view::fonts_ready()
 {
-	if (!native || w <= 0 || h <= 0)
+	m_impl->panel.fonts_ready();
+}
+
+void plug_view::repaint(ImDrawList *dl, const ui::im::fonts &fonts, int w, int h)
+{
+	if (!dl || w <= 0 || h <= 0)
 		return;
 
 	// パラメータの層: 音源の返事を読み、見えている面の読み返しを頼む
@@ -307,30 +289,7 @@ void plug_view::repaint(void *native, int w, int h)
 	// 触っている最中の値の操作（ホストへの beginEdit / endEdit）を、しばらく触られていなければ終える
 	m_engine.notify_idle(false);
 
-#if defined(_WIN32)
-	HDC dst = static_cast<HDC>(native);
-	if (!m_impl->mem_dc || m_impl->mem_w != w || m_impl->mem_h != h) {
-		m_impl->forget_backing();
-		m_impl->mem_dc  = CreateCompatibleDC(dst);
-		m_impl->mem_bmp = CreateCompatibleBitmap(dst, w, h);
-		SelectObject(m_impl->mem_dc, m_impl->mem_bmp);
-		m_impl->mem_w = w;
-		m_impl->mem_h = h;
-	}
-	m_impl->paint_panel(m_impl->mem_dc);
-	BitBlt(dst, 0, 0, w, h, m_impl->mem_dc, 0, 0, SRCCOPY);
-#elif defined(__APPLE__)
-	// The subview is flipped, so the context is already top-left with y down
-	// and only has to be wrapped -- no flipping, same as the GUI window
-	CGContextRef ctx = static_cast<CGContextRef>(native);
-	HDC dc = static_cast<HDC>(smu_gdi_wrap_view_context(ctx, w, h));
-	m_impl->paint_panel(dc);
-	DeleteDC(dc);
-#else
-	// Linux headless build (plug_window_linux): the stub window never paints.
-	// The editor view arrives in a later phase (doc/porting-linux-gui.md).
-	(void)native; (void)w; (void)h;
-#endif
+	m_impl->paint_panel(dl, fonts);
 
 	card_tick();
 }

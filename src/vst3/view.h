@@ -18,6 +18,13 @@
 
 #include "plug_window.h"
 
+#include "ui/fonts.h"      // ui::im::fonts, ImGui only -- NOT ui/draw_imgui.h,
+                           // which needs compat/gdi.h and so <windows.h> on
+                           // Windows, where `interface` is a macro for `struct`
+                           // and the SDK headers have a member by that name
+
+#include "imgui.h"
+
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -62,17 +69,19 @@ public:
 	Steinberg::tresult PLUGIN_API canResize() override;
 	Steinberg::tresult PLUGIN_API checkSizeConstraint(Steinberg::ViewRect *rect) override;
 
-	// ---- Called by the platform window (view_win.cpp / view_mac.mm).
-	//
-	// `native` is whatever that platform paints into: an HDC on Windows, a
-	// CGContextRef on macOS.
+	// ---- Called by the platform window (view_win.cpp / view_mac.mm),
+	// already inside a frame: dl is the background draw list to paint into.
 	int  width() const { return m_w; }
 	int  height() const { return m_h; }
 	// 開く前の大きさ（VST2 は窓を作る前に聞いてくる）。1000 × (400 + 上の帯)
 	static int default_width();
 	static int default_height();
 
-	void repaint(void *native, int w, int h);
+	// The panel's fonts need an ImGui context and no open frame; the platform
+	// window calls this once its context is up (see panel::fonts_ready)
+	void fonts_ready();
+
+	void repaint(ImDrawList *dl, const ui::im::fonts &fonts, int w, int h);
 	void mouse_down(int x, int y);
 	void mouse_drag(int x, int y);
 	void mouse_up();
@@ -100,7 +109,7 @@ public:
 private:
 	void card_error(const std::string &err);           // log it and tell the user
 
-	struct impl;                            // the panel, and the Win32 backing store
+	struct impl;                            // the panel and its toolbar
 	std::unique_ptr<impl> m_impl;
 
 	engine &m_engine;

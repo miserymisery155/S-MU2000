@@ -1,6 +1,6 @@
 // license:BSD-3-Clause
 //
-// Display strings for the GDI panel pages and the main window around
+// Display strings for the panel pages and the main window around
 // them (strip, popup menus, status line). The struct below is the source
 // of truth: changing a member changes every platform at once, and shared
 // code only ever reads ui::texts().

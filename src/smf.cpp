@@ -58,19 +58,12 @@ u16 be16(const u8 *p) { return u16((p[0] << 8) | p[1]); }
 } // namespace
 
 // SMF を (秒, バイト列) の並びに開く。format 0/1 の両方に対応する
-bool load(const std::string &path, std::vector<event> &out, std::string &err)
+bool load_from_memory(const u8 *data, size_t size, std::vector<event> &out, std::string &err)
 {
-	std::FILE *f = std::fopen(path.c_str(), "rb");
-	if (!f) { err = "MIDI ファイルを開けない: " + path; return false; }
-	std::fseek(f, 0, SEEK_END);
-	std::vector<u8> d(size_t(std::ftell(f)));
-	std::fseek(f, 0, SEEK_SET);
-	if (std::fread(d.data(), 1, d.size(), f) != d.size()) {
-		std::fclose(f); err = "MIDI ファイルを読めない"; return false;
-	}
-	std::fclose(f);
+	const u8 *d = data;
+	const size_t n = size;
 
-	if (d.size() < 14 || std::memcmp(d.data(), "MThd", 4)) {
+	if (n < 14 || std::memcmp(d, "MThd", 4)) {
 		err = "MThd がない。標準 MIDI ファイルではないらしい"; return false;
 	}
 	const u16 ntrk = be16(&d[10]);
@@ -82,11 +75,11 @@ bool load(const std::string &path, std::vector<event> &out, std::string &err)
 	std::vector<raw> all;
 
 	size_t pos = 8 + be32(&d[4]);
-	for (u16 t = 0; t < ntrk && pos + 8 <= d.size(); t++) {
+	for (u16 t = 0; t < ntrk && pos + 8 <= n; t++) {
 		if (std::memcmp(&d[pos], "MTrk", 4)) break;
 		const size_t len = be32(&d[pos + 4]);
 		size_t p = pos + 8;
-		const size_t end = std::min(p + len, d.size());
+		const size_t end = std::min(p + len, n);
 		pos = p + len;
 
 		u64 tick = 0;
@@ -127,13 +120,13 @@ bool load(const std::string &path, std::vector<event> &out, std::string &err)
 					explicit_port = true;
 				}
 				if (type == 0x03 && !explicit_port && l >= 1 && l <= 64) {
-					const int tp = port_from_track_name(std::string(d.begin() + p, d.begin() + std::min(p + size_t(l), end)));
+					const int tp = port_from_track_name(std::string(d + p, d + std::min(p + size_t(l), end)));
 					if (tp >= 0)
 						port = u8(tp);
 				}
 				if (type == 0x09 && l >= 1 && l <= 32) {
 					// 機器名で口を言う流儀。「A」〜「D」か「Port 1」〜「Port 4」（大文字小文字は問わない）だけ見る
-					std::string name(d.begin() + p, d.begin() + std::min(p + size_t(l), end));
+					std::string name(d + p, d + std::min(p + size_t(l), end));
 					while (!name.empty() && (name.back() == ' ' || name.back() == 0)) name.pop_back();
 					for (char &c : name) c = char(std::tolower(u8(c)));
 					if (name.size() == 1 && name[0] >= 'a' && name[0] <= 'd') {
@@ -152,16 +145,16 @@ bool load(const std::string &path, std::vector<event> &out, std::string &err)
 				while (p < end) { l = (l << 7) | (d[p] & 0x7f); if (!(d[p++] & 0x80)) break; }
 				std::vector<u8> b;
 				if (status == 0xf0) b.push_back(0xf0);
-				b.insert(b.end(), d.begin() + p, d.begin() + std::min(p + size_t(l), end));
+				b.insert(b.end(), d + p, d + std::min(p + size_t(l), end));
 				p += size_t(l);
 				all.push_back({ tick, std::move(b), false, 0, port });
 				continue;
 			}
 
 			running = status;
-			const int n = ((status & 0xf0) == 0xc0 || (status & 0xf0) == 0xd0) ? 1 : 2;
+			const int nb = ((status & 0xf0) == 0xc0 || (status & 0xf0) == 0xd0) ? 1 : 2;
 			std::vector<u8> b{ status };
-			for (int i = 0; i < n && p < end; i++) b.push_back(d[p++]);
+			for (int i = 0; i < nb && p < end; i++) b.push_back(d[p++]);
 			all.push_back({ tick, std::move(b), false, 0, port });
 		}
 	}
@@ -179,6 +172,21 @@ bool load(const std::string &path, std::vector<event> &out, std::string &err)
 		out.push_back({ sec, e.bytes, e.port });
 	}
 	return true;
+}
+
+// ファイルから読んで load_from_memory に渡す（既存の呼び出し側用）
+bool load(const std::string &path, std::vector<event> &out, std::string &err)
+{
+	std::FILE *f = std::fopen(path.c_str(), "rb");
+	if (!f) { err = "MIDI ファイルを開けない: " + path; return false; }
+	std::fseek(f, 0, SEEK_END);
+	std::vector<u8> d(size_t(std::ftell(f)));
+	std::fseek(f, 0, SEEK_SET);
+	if (std::fread(d.data(), 1, d.size(), f) != d.size()) {
+		std::fclose(f); err = "MIDI ファイルを読めない"; return false;
+	}
+	std::fclose(f);
+	return load_from_memory(d.data(), d.size(), out, err);
 }
 
 

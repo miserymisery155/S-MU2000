@@ -20,16 +20,30 @@
 
 #include "xg_ui.h"
 
+#include "imgui.h"
+
 namespace ui {
 
 // One tick for all five windows. Invisible windows cost nothing (each
 // frame() returns early while hidden). The overview asks for the insertion,
 // part-voice or master window by double-click; open() shows it, however the
 // host shows windows
+//
+// Each of these windows has an ImGui context of its own, and both frame() and
+// open() leave that context current -- frame() calls SetCurrentContext, and
+// open() creates it, which makes it current too. That is fine on its own, but
+// this runs from *inside* the panel's frame: the panel is drawn by ImGui, and
+// paint_main() calls us between the window's NewFrame() and Render(). Handing
+// the panel's Render() to an editor's context strands the panel's own frame --
+// nothing ever ends it -- and the next NewFrame() then asserted "Forgot to
+// call Render() or EndFrame() at the end of the previous frame?", the moment
+// any PC window was opened. So the panel's context goes back afterwards, and
+// the editors keep theirs to themselves.
 template <typename Window, typename Open>
 inline void pc_frame_all(Window &list, Window &editor, Window &fx, Window &shapes, Window &master,
                          xg::model &m, const xg_snapshot &ram, bridge &br, Open open)
 {
+	ImGuiContext *const panel_ctx = ImGui::GetCurrentContext();
 	list.frame(m, ram, br);
 	editor.frame(m, ram, br);
 	fx.frame(m, ram, br);
@@ -44,6 +58,7 @@ inline void pc_frame_all(Window &list, Window &editor, Window &fx, Window &shape
 		open(shapes);
 	if (xgui::take_master_request())
 		open(master);
+	ImGui::SetCurrentContext(panel_ctx);
 }
 
 // What a front end owes its windows on the way out (the overview unmutes,
@@ -52,11 +67,15 @@ template <typename Window>
 inline void pc_shutdown_all(Window &list, Window &editor, Window &fx, Window &shapes, Window &master,
                             bridge &br)
 {
+	// Same reason as pc_frame_all: destroy() switches the context on its way
+	// out, and the panel's frame is open around this on the way down too
+	ImGuiContext *const panel_ctx = ImGui::GetCurrentContext();
 	list.shutdown(br);
 	editor.shutdown(br);
 	fx.shutdown(br);
 	shapes.shutdown(br);
 	master.shutdown(br);
+	ImGui::SetCurrentContext(panel_ctx);
 }
 
 } // namespace ui

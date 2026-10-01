@@ -15,10 +15,9 @@
 //
 //   * the program (state, paint, menus, bring-up, run) is ui::app (ui/app.h)
 //   * the AppKit half of the app class is ui::gui_app (ui/app_mac.h), and
-//     the window system is window_mac.mm -- separate files because the
-//     Cocoa headers and compat/gdi.h cannot both be visible at once
-//   * drawing goes into the view's CGContext through the GDI shim, so
-//     panel.cpp is literally the same code that paints the Windows window
+//     the window system is window_mac.mm
+//   * drawing goes through Metal + Dear ImGui (ui/imgui_shell.h), the same
+//     code that paints the Windows/Linux windows
 //   * settings live in ~/Library/Application Support/S-MU2000/gui.ini
 //
 // Audio is produced the same way as in live: **it keeps no clock of its own**
@@ -29,6 +28,7 @@
 
 #include "compat/console.h"
 #include "mu2000.h"
+
 #include "ui/app.h"
 #include "ui/app_mac.h"
 #include "ui/lang.h"

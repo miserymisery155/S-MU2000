@@ -96,6 +96,25 @@ void write_wav(const std::string &path, const std::vector<short> &pcm, unsigned 
 	std::fclose(f);
 }
 
+// 32bit 浮動小数の WAV（--float）。全振幅を 1.0 とする
+void write_wav_float(const std::string &path, const std::vector<float> &pcm, unsigned rate)
+{
+	std::FILE *f = std::fopen(path.c_str(), "wb");
+	if (!f) return;
+	const unsigned bytes = unsigned(pcm.size() * 4);
+	auto u32w = [&](unsigned v) { unsigned char b[4] = { (unsigned char)v, (unsigned char)(v >> 8),
+	                                                     (unsigned char)(v >> 16), (unsigned char)(v >> 24) };
+	                              std::fwrite(b, 1, 4, f); };
+	auto u16w = [&](unsigned v) { unsigned char b[2] = { (unsigned char)v, (unsigned char)(v >> 8) };
+	                              std::fwrite(b, 1, 2, f); };
+	std::fwrite("RIFF", 1, 4, f); u32w(36 + bytes); std::fwrite("WAVE", 1, 4, f);
+	std::fwrite("fmt ", 1, 4, f); u32w(16); u16w(3); u16w(2);
+	u32w(rate); u32w(rate * 8); u16w(8); u16w(32);
+	std::fwrite("data", 1, 4, f); u32w(bytes);
+	std::fwrite(pcm.data(), 1, bytes, f);
+	std::fclose(f);
+}
+
 // MIDI ファイルを実時間で流す。midisend.exe と同じことを別スレッドで。
 // SMF のポート指定（`FF 21`）で口 A〜D へ振り分ける。実機の MU2000 は
 // USB で `Yamaha MU2000-1` `-2` … と口が並ぶので、A〜D をそこへ渡す
@@ -287,8 +306,11 @@ int main(int argc, char **argv)
 	int midi_ports[4] = { -1, -1, -1, -1 };
 	std::string midi_file;
 	double midi_delay = 0.5;   // 録り始めてから流すまで
+	bool want_float = false;   // --float: 32bit 浮動小数の WAV で書く（16bit に落とさない）
 	for (int i = 4; i < argc; i++) {
-		if (!std::strcmp(argv[i], "--send") && i + 2 < argc) {
+		if (!std::strcmp(argv[i], "--float"))
+			want_float = true;
+		else if (!std::strcmp(argv[i], "--send") && i + 2 < argc) {
 			midi_ports[0] = std::atoi(argv[++i]);
 			midi_file = argv[++i];
 		} else if (!std::strcmp(argv[i], "--send-b") && i + 1 < argc)
@@ -343,6 +365,7 @@ int main(int argc, char **argv)
 	}
 
 	std::vector<short> pcm;
+	std::vector<float> fpcm;       // --float のとき（受け取った値をそのまま）
 	pcm.reserve(size_t(seconds * rate) * 2);
 	const size_t want = size_t(seconds * rate);
 	size_t got = 0;
@@ -384,6 +407,10 @@ int main(int argc, char **argv)
 				}
 				pcm.push_back(short(std::clamp(int(l * 32767.0f), -32768, 32767)));
 				pcm.push_back(short(std::clamp(int(r * 32767.0f), -32768, 32767)));
+				if (want_float) {
+					fpcm.push_back(l);
+					fpcm.push_back(r);
+				}
 			}
 			got += frames;
 			cap->ReleaseBuffer(frames);
@@ -395,7 +422,10 @@ int main(int argc, char **argv)
 	if (sender.joinable())
 		sender.join();
 
-	write_wav(wav, pcm, rate);
+	if (want_float)
+		write_wav_float(wav, fpcm, rate);
+	else
+		write_wav(wav, pcm, rate);
 	std::printf("書き出した: %s（%.2f 秒）\n", wav.c_str(), double(got) / rate);
 
 	cap->Release();

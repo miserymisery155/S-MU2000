@@ -6,6 +6,14 @@ build-*/
 *.wav
 roms/
 
+# web/ build outputs and deps (rebuild with npm run build in web/)
+web/out/
+web/node_modules/
+web/dist/
+
+# JetBrains configuration files
+.idea/
+
 # 同じところで MAME を走らせたときに出るもの
 cfg/
 nvram/

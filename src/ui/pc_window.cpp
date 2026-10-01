@@ -4,6 +4,7 @@
 #include "text.h"
 #include "ui/texts.h"
 #include "ui/lang.h"
+#include "ui/font_file.h"
 
 #include "imgui.h"
 #include "backends/imgui_impl_dx11.h"
@@ -23,18 +24,6 @@ namespace ui {
 namespace {
 
 const wchar_t CLASS_NAME[] = L"SMU2000PcEditor";
-
-// 日本語の出る字。Windows に入っているものを順に探す（配らない）
-const char *const FONTS[] = {
-	"C:\\Windows\\Fonts\\YuGothM.ttc",
-	"C:\\Windows\\Fonts\\meiryo.ttc",
-	"C:\\Windows\\Fonts\\msgothic.ttc",
-};
-
-bool file_exists(const char *path)
-{
-	return GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES;
-}
 
 // .syx の書き出し・読み込みの窓（xgui::ask_save_file・ask_open_file の頼み）。
 // 描き終えたあとに開く。窓が回っている間にタイマーが別のコマを描いても、前のコマは終わっている
@@ -158,10 +147,10 @@ bool pc_window::create(HINSTANCE inst, std::string &err)
 	style.FontScaleDpi = scale;
 	style.FrameRounding = 3;
 
-	for (const char *path : FONTS) {
-		if (file_exists(path) && io.Fonts->AddFontFromFileTTF(path, 16.0f))
-			break;
-	}
+	// The editor windows keep upstream's exact font: first existing file, face 0
+	// (ui/font_file.h). The panel's unified walk must not serve here -- it
+	// picks by weight and renders a lighter face than upstream's editors.
+	add_cjk_editor_font(io.Fonts);
 
 	ImGui_ImplWin32_Init(m_hwnd);
 	ImGui_ImplDX11_Init(m_dev, m_ctx);
